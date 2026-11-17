@@ -12,13 +12,15 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal, QUrl
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QIntValidator, QLinearGradient, QPainter,
-    QKeySequence, QPalette, QPen, QPixmap, QPolygonF,
+    QKeySequence, QPalette, QPen, QPixmap, QPolygonF, QTextLayout, QTextOption,
 )
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QLayout,
     QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QMenu, QScrollArea, QSizeGrip, QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMenu, QScrollArea, QSizeGrip, QSizePolicy, QStyle, QStyledItemDelegate,
+    QStyleOptionButton, QStyleOptionViewItem, QStylePainter,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     QPlainTextEdit,
     QHeaderView, QWidgetAction,
 )
@@ -28,6 +30,8 @@ from src.ui.appearance import (
     theme_font_family, theme_font_size, theme_rgba,
 )
 from src.ui.styles import Styles
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+from src.ui.custom_exchange_rate_panel import ElidedLabel
 from src.utils.window_focus import (
     focus_window, get_foreground_window, is_path_of_exile_window,
 )
@@ -168,8 +172,8 @@ _UNIQUE_CANDIDATE_VIEWPORT_HEIGHT = (
     _UNIQUE_CANDIDATE_ROW_HEIGHT * _UNIQUE_CANDIDATE_VISIBLE_ROWS
     + _UNIQUE_CANDIDATE_ROW_SPACING * (_UNIQUE_CANDIDATE_VISIBLE_ROWS - 1)
 )
-_ACTION_CLUSTER_HORIZONTAL_GAP = 6
-_ACTION_CLUSTER_VERTICAL_GAP = 10
+_ACTION_CLUSTER_HORIZONTAL_GAP = UI_METRICS.overlay_gap
+_ACTION_CLUSTER_VERTICAL_GAP = UI_METRICS.control_gap
 _RELATED_ITEMS_TREE_HEIGHT = 180
 _RELATED_ITEMS_PRICE_HEIGHT_REDUCTION = 180
 _DISPLAY_SIZE_PROFILES = {
@@ -211,15 +215,15 @@ def normalize_result_font_size(value) -> str:
 def _auto_mod_layout_sizes(
     *, profile_height: int, profile_mod_height: int,
     profile_price_height: int, minimum_price_height: int,
-    content_height: int, available_height: int, minimum_height: int,
+    content_height: int, available_height: int,
 ) -> tuple[int, int, int]:
     """Mod行へ価格欄の高さも振り替え、ウィンドウを作業領域内へ収める。"""
-    wanted_mod_height = max(profile_mod_height, content_height)
+    wanted_mod_height = content_height
     fixed_height = profile_height - profile_mod_height - profile_price_height
     wanted_window_height = fixed_height + wanted_mod_height + profile_price_height
     window_height = min(
         wanted_window_height,
-        max(minimum_height, available_height - 16),
+        max(1, available_height - 16),
     )
     flexible_height = max(
         80 + minimum_price_height,
@@ -551,6 +555,64 @@ def _asset_icon_path(filename: str) -> Path | None:
     return None
 
 
+def _wrapped_mod_text(text: str, font: QFont, width: int) -> str:
+    """Keep two readable lines, eliding only the remainder of the second."""
+    metrics = QFontMetrics(font)
+    if width <= 0 or metrics.horizontalAdvance(text) <= width:
+        return text
+    layout = QTextLayout(text.replace("\n", "\u2028"), font)
+    wrapping = QTextOption()
+    wrapping.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(wrapping)
+    layout.beginLayout()
+    lines = []
+    for _ in range(3):
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        lines.append(line)
+    layout.endLayout()
+    if len(lines) <= 1:
+        return text
+    # QTextLine offsets count UTF-16 units, including surrogate pairs.
+    encoded = layout.text().encode("utf-16-le")
+    split = lines[1].textStart() * 2
+    first = encoded[:split].decode("utf-16-le").rstrip()
+    rest = encoded[split:].decode("utf-16-le").replace("\u2028", " ")
+    return first + "\n" + (metrics.elidedText(rest, Qt.ElideRight, width) if len(lines) > 2 else rest)
+
+
+class _ModDescriptionDelegate(QStyledItemDelegate):
+    """Wrap before eliding: Qt's styled ElideRight otherwise stays one line."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.features |= QStyleOptionViewItem.WrapText
+        option.textElideMode = Qt.ElideNone
+        width = option.rect.width() - 12
+        if width > 0 and (option.fontMetrics.horizontalAdvance(option.text) > width or "\n" in option.text):
+            option.displayAlignment = Qt.AlignLeft | Qt.AlignTop
+        option.text = _wrapped_mod_text(option.text, option.font, width)
+
+
+class _ElidedScopeButton(QPushButton):
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), self.fontMetrics().horizontalAdvance("同一クラスすべて") + 20), hint.height())
+
+    def minimumSizeHint(self):
+        return QSize(0, self.sizeHint().height())
+
+    def paintEvent(self, event):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        content = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
+        option.text = self.fontMetrics().elidedText(option.text, Qt.ElideRight, content.width())
+        painter = QStylePainter(self)
+        painter.drawControl(QStyle.CE_PushButton, option)
+
+
 class _FlowLayout(QLayout):
     """表示中の検索チップを利用可能な横幅で自動折り返しするレイアウト。"""
 
@@ -560,6 +622,7 @@ class _FlowLayout(QLayout):
         self._h_spacing = h_spacing
         self._v_spacing = v_spacing
         self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(h_spacing)
 
     def addItem(self, item):
         self._items.append(item)
@@ -619,7 +682,8 @@ class _FlowLayout(QLayout):
                 next_x = x + hint.width()
                 line_height = 0
             if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
+                item_x = available.right() + 1 - hint.width() if item.alignment() & Qt.AlignRight else x
+                item.setGeometry(QRect(QPoint(item_x, y), hint))
             x = next_x + self._h_spacing
             line_height = max(line_height, hint.height())
         return y + line_height - rect.y() + margins.bottom()
@@ -630,8 +694,10 @@ class _BinaryToggle(QWidget):
 
     currentIndexChanged = Signal(int)
 
-    def __init__(self, first: tuple[str, object], second: tuple[str, object], parent=None):
+    def __init__(self, first: tuple[str, object], second: tuple[str, object], parent=None, *, elide=False):
         super().__init__(parent)
+        self._elide = elide
+        self.setProperty("themeLayoutManaged", elide)
         self._options = (first, second)
         self._current_index = 0
         self._second_available = True
@@ -640,7 +706,8 @@ class _BinaryToggle(QWidget):
         layout.setSpacing(0)
         self._buttons = []
         for index, (label, _) in enumerate(self._options):
-            button = QPushButton(label)
+            button = _ElidedScopeButton(label) if elide else QPushButton(label)
+            button.setProperty("elideText", elide)
             button.setObjectName("binaryToggle")
             button.setCheckable(True)
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -687,6 +754,11 @@ class _BinaryToggle(QWidget):
         options[index] = (str(text), options[index][1])
         self._options = tuple(options)
         self._buttons[index].setText(str(text))
+        equalize_button_sizes(self._buttons, expanding=True)
+        if self._elide:
+            for button in self._buttons:
+                button.setMinimumWidth(0)
+                button.setToolTip(button.text())
 
     def setItemData(self, index: int, data):
         if index not in (0, 1):
@@ -1022,7 +1094,7 @@ class _PoetoreTitleBar(QWidget):
         controls_layout.addSpacing(4)
         window.poetore_close_button = QPushButton("×", self._expanded_controls)
         window.poetore_close_button.setToolTip("閉じる")
-        window.poetore_close_button.setFixedSize(28, 24)
+        window.poetore_close_button.setFixedSize(28, 28)
         window.poetore_close_button.clicked.connect(window._close_and_return_to_poe)
         controls_layout.addWidget(window.poetore_close_button)
 
@@ -1053,6 +1125,7 @@ class _PoetoreTitleBar(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        dragging = self._drag_offset is not None
         moved = (
             self._drag_offset is not None
             and self._drag_start_position is not None
@@ -1060,6 +1133,8 @@ class _PoetoreTitleBar(QWidget):
         )
         self._drag_offset = None
         self._drag_start_position = None
+        if dragging:
+            self._window._finish_trade_move()
         if moved:
             self._window._persist_manual_result_position()
         super().mouseReleaseEvent(event)
@@ -1133,6 +1208,15 @@ class PoetoreWindow(QWidget):
         self.trade_league_combo.currentIndexChanged.connect(self._persist_trade_league)
         self.trade_league_combo.lineEdit().editingFinished.connect(self._persist_trade_league)
         self._placement_context: PlacementContext | None = None
+        self._trade_window_handle = None
+        self._trade_screen = None
+        self._trade_screen_geometry: QRect | None = None
+        self._trade_screen_update_pending = False
+        self._trade_placing_context = False
+        self._trade_screen_timer = QTimer(self)
+        self._trade_screen_timer.setSingleShot(True)
+        self._trade_screen_timer.setInterval(150)
+        self._trade_screen_timer.timeout.connect(self._refresh_trade_screen_geometry)
         self._poe_window_hwnd: int | None = None
         self._focus_signal_connected = False
         self._outside_click_listener = None
@@ -1157,26 +1241,40 @@ class PoetoreWindow(QWidget):
         self._panel = QFrame(self)
         self._panel.setObjectName("poetorePanel")
         panel_layout = QVBoxLayout(self._panel)
-        panel_layout.setContentsMargins(10, 5, 10, 9)
-        panel_layout.setSpacing(7)
+        panel_layout.setContentsMargins(UI_METRICS.overlay_margin, UI_METRICS.inline_gap,
+                                       UI_METRICS.overlay_margin, UI_METRICS.control_gap)
+        panel_layout.setSpacing(UI_METRICS.overlay_gap)
         self._title_bar = _PoetoreTitleBar(self)
         panel_layout.addWidget(self._title_bar)
-        self._obs_content = QWidget(self._panel)
+        self._content_scroll = QScrollArea(self._panel)
+        self._content_scroll.setObjectName("tradeContentScroll")
+        self._content_scroll.setFrameShape(QFrame.NoFrame)
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._obs_content = QWidget()
         self._obs_content.setObjectName("poetoreSearchContent")
         content_layout = QVBoxLayout(self._obs_content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(7)
-        panel_layout.addWidget(self._obs_content)
+        content_layout.setSpacing(UI_METRICS.overlay_gap)
+        content_layout.setAlignment(Qt.AlignTop)
+        content_layout.setSizeConstraint(QLayout.SetMinimumSize)
+        self._content_scroll.setWidget(self._obs_content)
+        panel_layout.addWidget(self._content_scroll)
         layout.addWidget(self._panel)
+        # Qt owns the wrapping/scrolling containers; the appearance fitter still
+        # sizes every text control, but must not freeze a previous layout height.
+        for container in (self, self._panel, self._content_scroll, self._content_scroll.viewport(), self._obs_content):
+            container.setProperty("themeLayoutManaged", True)
 
         self.item_header = QFrame()
         self.item_header.setObjectName("itemHeader")
         item_header_layout = QVBoxLayout(self.item_header)
         item_header_layout.setContentsMargins(10, 7, 10, 7)
         item_header_layout.setSpacing(1)
-        self.item_name_label = QLabel("アイテムを読み取ってください")
+        self.item_name_label = ElidedLabel("アイテムを読み取ってください")
+        self.item_name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.item_name_label.setObjectName("itemName")
-        self.base_scope_toggle = _BinaryToggle(("ベース名", True), ("同一クラスすべて", False))
+        self.base_scope_toggle = _BinaryToggle(("ベース名", True), ("同一クラスすべて", False), elide=True)
         self.base_scope_toggle.setToolTip(
             "読み取ったベースタイプに絞るか、同じアイテムクラス全体から探すかを切り替えます。"
         )
@@ -1215,12 +1313,11 @@ class PoetoreWindow(QWidget):
         ))
         self.corrupted_combo.setToolTip("クリックするたびにコラプト条件を切り替えます")
         self.corrupted_combo.setCurrentIndex(1)
-        item_header_layout.addWidget(self.item_name_label)
         item_scope_layout = QHBoxLayout()
         item_scope_layout.setContentsMargins(0, 0, 0, 0)
         item_scope_layout.setSpacing(6)
+        item_scope_layout.addWidget(self.item_name_label, stretch=1)
         item_scope_layout.addWidget(self.base_scope_toggle, stretch=1)
-        item_scope_layout.addStretch()
         item_scope_layout.addWidget(self.chart_area_chip)
         item_scope_layout.addWidget(self.corrupted_combo)
         item_header_layout.addLayout(item_scope_layout)
@@ -1299,20 +1396,19 @@ class PoetoreWindow(QWidget):
         self.related_items_panel.hide()
         content_layout.addWidget(self.related_items_panel)
 
-        top_options = QHBoxLayout()
+        top_options = _FlowLayout()
+        self._top_options_layout = top_options
         top_options.setSpacing(6)
         self.trade_preset_combo = _BinaryToggle(
             ("完成品", PRESET_FINISHED), ("ベースアイテム", PRESET_BASE),
         )
         self.trade_preset_combo.currentIndexChanged.connect(self._trade_preset_changed)
-        # 検索プリセットは左半分だけを使い、下のMod表との視線移動を短くする。
-        # 切替候補がない場合は固定状態を説明するだけのボタンを出さず、同じ幅の空白を
-        # 残して右側のMod数値コントロールの位置を動かさない。
-        top_options.addWidget(self.trade_preset_combo, 1)
+        # 検索プリセットを左、数値範囲を右へ寄せ、狭い時だけ折り返す。
+        # 切替候補がない場合も、数値範囲の右揃えは維持する。
+        top_options.addWidget(self.trade_preset_combo)
         self.trade_preset_placeholder = QWidget()
         self.trade_preset_placeholder.hide()
-        top_options.addWidget(self.trade_preset_placeholder, 1)
-        top_options.addStretch(1)
+        top_options.addWidget(self.trade_preset_placeholder)
         self.search_range_combo = QComboBox()
         self.search_range_combo.setObjectName("filterControl")
         for percent in (0, 5, 10, 15, 20, 30, 50):
@@ -1322,6 +1418,7 @@ class PoetoreWindow(QWidget):
                 else f"Mod数値：-{percent}%まで許容"
             )
             self.search_range_combo.addItem(label, percent)
+            self.search_range_combo.setItemData(self.search_range_combo.count() - 1, label, Qt.ToolTipRole)
         saved_range = self._app_config.get("poetore", {}).get("search_stat_range", 10)
         try:
             saved_range = int(saved_range)
@@ -1334,8 +1431,11 @@ class PoetoreWindow(QWidget):
             "例：読取値100・-10%まで許容 → 最小値90で検索\n"
             "ユニーク品はModの可変範囲を基準に調整します。"
         )
+        self._search_range_help = self.search_range_combo.toolTip()
+        self.search_range_combo.currentIndexChanged.connect(self._fit_search_range_width)
         self.search_range_combo.currentIndexChanged.connect(self._search_range_changed)
         top_options.addWidget(self.search_range_combo)
+        top_options.setAlignment(self.search_range_combo, Qt.AlignRight)
         self.magic_rarity_toggle = _BinaryToggle(
             ("非ユニーク", False), ("マジック完全一致", True),
         )
@@ -1472,6 +1572,8 @@ class PoetoreWindow(QWidget):
 
         self.filter_chip_container = QWidget()
         self.filter_chip_container.setObjectName("filterChipContainer")
+        self.filter_chip_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.filter_chip_container.setProperty("themeLayoutManaged", True)
         self.filter_chip_layout = _FlowLayout(self.filter_chip_container, h_spacing=6, v_spacing=6)
         self.item_level_tag = QFrame()
         self.item_level_tag.setObjectName("itemLevelTag")
@@ -1748,7 +1850,7 @@ class PoetoreWindow(QWidget):
         self.weapon_property_header.addStretch(1)
         self.weapon_property_header.addWidget(self.disenchant_dust_panel)
         content_layout.addLayout(self.weapon_property_header)
-        self.clear_mod_conditions_button = QPushButton("一覧のチェックを全て選択")
+        self.clear_mod_conditions_button = QPushButton("すべて選択")
         self.clear_mod_conditions_button.setObjectName("secondaryActionButton")
         self.clear_mod_conditions_button.setProperty("mutedText", True)
         self.clear_mod_conditions_button.setToolTip(
@@ -1785,11 +1887,17 @@ class PoetoreWindow(QWidget):
         # 行選択は使わない。Mod文章クリックはチェック切替だけを行い、
         # セルウィジェット（最小・最大欄）と選択背景の見た目が分離しないようにする。
         self.mod_filter_tree.setSelectionMode(QAbstractItemView.NoSelection)
+        self.mod_filter_tree.setWordWrap(True)
+        self.mod_filter_tree.setItemDelegateForColumn(_MOD_COLUMN_TEXT, _ModDescriptionDelegate(self.mod_filter_tree))
+        self.mod_filter_tree.viewport().installEventFilter(self)
         self.mod_filter_tree.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.mod_filter_tree.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
         self.mod_filter_tree.setMinimumHeight(profile["mod_height"])
         mod_header = self.mod_filter_tree.header()
         mod_header.hide()
+        # Hidden header labels must not impose a font-scaled minimum on the
+        # checkbox and elided description columns at 24px.
+        mod_header.setMinimumSectionSize(0)
         # Qtは既定で最終列を余白まで伸ばす。最大欄ではなくMod文章欄へ
         # 余った幅を渡すため、最終列の自動伸長を無効化する。
         mod_header.setStretchLastSection(False)
@@ -1813,8 +1921,8 @@ class PoetoreWindow(QWidget):
         self.mod_filter_tree.itemClicked.connect(
             self._toggle_mod_condition_from_text
         )
-        content_layout.addWidget(self.mod_filter_tree, stretch=3)
-        self.mod_conditions_toggle = QPushButton("mod条件をたたむ∧")
+        content_layout.addWidget(self.mod_filter_tree)
+        self.mod_conditions_toggle = QPushButton("Mod一覧をたたむ ∧")
         self.mod_conditions_toggle.setObjectName("secondaryActionButton")
         self.mod_conditions_toggle.setProperty("mutedText", True)
         self.mod_conditions_toggle.setToolTip("Mod検索条件の一覧を折りたたむ")
@@ -1848,14 +1956,13 @@ class PoetoreWindow(QWidget):
             self._toggle_mercenary_supports
         )
         self.mercenary_supports_toggle.hide()
-        mod_conditions_actions = QHBoxLayout()
+        mod_conditions_actions = _FlowLayout()
         mod_conditions_actions.setContentsMargins(0, 0, 0, 0)
         mod_conditions_actions.setSpacing(_ACTION_CLUSTER_HORIZONTAL_GAP)
         mod_conditions_actions.addWidget(self.mod_conditions_toggle)
         mod_conditions_actions.addWidget(self.clear_mod_conditions_button)
         mod_conditions_actions.addWidget(self.hidden_mods_toggle)
         mod_conditions_actions.addWidget(self.mod_sources_toggle)
-        mod_conditions_actions.addStretch()
         self.mod_conditions_actions_layout = mod_conditions_actions
         self.mercenary_supports_actions_widget = QWidget()
         mercenary_supports_actions = QHBoxLayout(
@@ -1878,7 +1985,7 @@ class PoetoreWindow(QWidget):
         self.search_scope_notice.hide()
         content_layout.addWidget(self.search_scope_notice)
 
-        action_row = QHBoxLayout()
+        action_row = _FlowLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(_ACTION_CLUSTER_HORIZONTAL_GAP)
         action_row.setAlignment(Qt.AlignLeft)
@@ -2484,6 +2591,10 @@ class PoetoreWindow(QWidget):
             QWidget#uniqueCandidateContainer {{
                 background: {theme_color('background', '#111416')};
             }}
+            QScrollArea#tradeContentScroll, QWidget#poetoreSearchContent {{
+                background: {theme_color('background', '#111416')};
+                border: none;
+            }}
             QHeaderView::section {{
                 background: {theme_rgba('surface', 28, 34, 36, 245)};
                 color: {theme_color('text', '#D5DDDA')};
@@ -2520,9 +2631,7 @@ class PoetoreWindow(QWidget):
         )
         chip_font = QFont(theme_font_family("Noto Sans JP"))
         chip_font.setPixelSize(theme_font_size(profile["font"]))
-        chip_content_height = profile["font"] + 3
-        if has_custom_theme_font():
-            chip_content_height = max(chip_content_height, QFontMetrics(chip_font).height())
+        chip_content_height = max(profile["font"] + 3, QFontMetrics(chip_font).height())
         style = style.replace("__FILTER_CHIP_MIN_HEIGHT__", str(chip_content_height))
         style = style.replace(
             "__COMPACT_ACTION_FONT__", str(theme_font_size(profile["mod_value_font"]))
@@ -2598,6 +2707,88 @@ class PoetoreWindow(QWidget):
             min(content_width, theme_font_size(self._scaled_display_value(_MOD_KIND_COLUMN_MAX_WIDTH))),
         )
 
+    def _fit_mod_columns_to_width(self):
+        """Reclaim secondary labels and empty space before wrapping Mod names."""
+        tree = self.mod_filter_tree
+        rows = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+        visible = [row for row in rows if not row.isHidden()]
+        if not visible:
+            return
+        metrics = tree.fontMetrics()
+        # Reserve up to twelve full-width characters before allowing labels
+        # to compete with the description. Longer names can use two lines.
+        desired = min(max(metrics.horizontalAdvance(row.text(_MOD_COLUMN_TEXT)) for row in visible),
+                      metrics.horizontalAdvance("あ") * 12) + 12
+        kind_width = max(QFontMetrics(row.font(_MOD_COLUMN_KIND)).horizontalAdvance(row.toolTip(_MOD_COLUMN_KIND))
+                         for row in visible) + 10
+        if self.poe_version == POE2:
+            kind_width = min(kind_width, theme_font_size(self._scaled_display_value(_MOD_KIND_COLUMN_MAX_WIDTH)))
+        tier_width = theme_font_size(self._scaled_display_value(_MOD_TIER_COLUMN_WIDTH))
+        gap = self._scaled_display_value(_MOD_VALUE_LEADING_GAP)
+        values_width = 2 * self._mod_value_editor_size().width()
+        available = tree.viewport().width() - tree.columnWidth(_MOD_COLUMN_CHECK) - values_width
+        compact = available - kind_width - tier_width - gap < desired
+        short_labels = {"プレフィックス": "P", "サフィックス": "S", "プレフィックス／サフィックス": "P/S"}
+        for row in rows:
+            full = row.toolTip(_MOD_COLUMN_KIND)
+            label = short_labels.get(full, full) if compact else full
+            if row.text(_MOD_COLUMN_KIND) != label:
+                row.setText(_MOD_COLUMN_KIND, label)
+        if compact:
+            kind_width = min(kind_width, max(QFontMetrics(row.font(_MOD_COLUMN_KIND)).horizontalAdvance(row.text(_MOD_COLUMN_KIND))
+                                             for row in visible) + 10)
+            if available - kind_width - tier_width - gap < desired:
+                # Badges keep their text and game colours; only unused space
+                # after them and before the numeric editors is removed.
+                tier_width = 0
+                for row in visible:
+                    badge = tree.itemWidget(row, _MOD_COLUMN_TIER)
+                    tier_width = max(tier_width, badge.minimumSizeHint().width() + 4 if badge is not None
+                                     else metrics.horizontalAdvance(row.text(_MOD_COLUMN_TIER)) + 10)
+                gap = 0
+            # Keep the shortened kind readable and hoverable even when the
+            # description must use two lines. It is never an optional column.
+        tree.header().setSectionResizeMode(_MOD_COLUMN_KIND, QHeaderView.Fixed)
+        tree.setColumnWidth(_MOD_COLUMN_KIND, kind_width)
+        tree.setColumnWidth(_MOD_COLUMN_TIER, tier_width)
+        for row in rows:
+            cell = tree.itemWidget(row, _MOD_COLUMN_MIN)
+            editor = self._mod_value_editor(cell)
+            if cell is not None and editor is not None and cell is not editor:
+                cell.layout().setContentsMargins(gap, 0, 0, 0)
+                cell.setFixedWidth(editor.width() + gap)
+        tree.header().resizeSections()
+        text_width = max(1, tree.columnWidth(_MOD_COLUMN_TEXT) - 12)
+        for row in rows:
+            text_cell = tree.itemWidget(row, _MOD_COLUMN_TEXT)
+            if text_cell is not None:
+                label = text_cell.findChild(QLabel, "modDescription")
+                if label is not None:
+                    full = row.text(_MOD_COLUMN_TEXT)
+                    wrapping = label.fontMetrics().horizontalAdvance(full) > text_width or "\n" in full
+                    if wrapping or label.wordWrap():
+                        label.setWordWrap(wrapping)
+                        label.setText(_wrapped_mod_text(full, label.font(), text_width))
+                        if wrapping:
+                            label.setFixedHeight(label.fontMetrics().height() + label.fontMetrics().lineSpacing())
+                        else:
+                            label.setMinimumHeight(0)
+                            label.setMaximumHeight(16777215)
+                        height = self._scaled_display_value(_UNIQUE_ROLL_ROW_HEIGHT)
+                        if wrapping or has_custom_theme_font():
+                            height = max(height, text_cell.minimumSizeHint().height() + 9)
+                        row.setSizeHint(_MOD_COLUMN_TEXT, QSize(0, height))
+                continue
+            text = row.text(_MOD_COLUMN_TEXT)
+            wrapping = metrics.horizontalAdvance(text) > text_width or "\n" in text
+            height = metrics.height() + (metrics.lineSpacing() if wrapping else 0)
+            # The styled delegate adds a 3px top inset. Keep the existing
+            # bottom clearance even when the second line has descenders.
+            height = max(self._mod_row_height(), height + (12 if wrapping else 9))
+            hint = QSize(0, height)
+            if row.sizeHint(_MOD_COLUMN_TEXT) != hint:
+                row.setSizeHint(_MOD_COLUMN_TEXT, hint)
+
     def _make_mod_value_cell(
         self, editor: QLineEdit, *, leading_gap: bool = False,
     ) -> QWidget:
@@ -2621,17 +2812,29 @@ class PoetoreWindow(QWidget):
         return None
 
     def _fit_search_range_width(self):
-        """Mod数値コンボを全選択肢が収まる内容幅へ詰める。"""
+        """Keep full range labels unless they would wrap below the preset tabs."""
         profile = _DISPLAY_SIZE_PROFILES[self._result_font_size]
         font = self.search_range_combo.font()
         font.setPixelSize(theme_font_size(profile["font"]))
         metrics = QFontMetrics(font)
-        text_width = max(
-            (metrics.horizontalAdvance(self.search_range_combo.itemText(index))
-             for index in range(self.search_range_combo.count())),
-            default=0,
-        )
-        self.search_range_combo.setFixedWidth(text_width + 34)
+        combo = self.search_range_combo
+        full_labels = [combo.itemData(i, Qt.ToolTipRole) for i in range(combo.count())]
+        full_width = max(map(metrics.horizontalAdvance, full_labels), default=0) + 34
+        available = self._content_scroll.viewport().width()
+        tabs_width = self._top_options_layout.itemAt(0).sizeHint().width() if not self.trade_preset_combo.isHidden() else 0
+        # Before any result layout exists, the viewport can still be 100px.
+        compact = getattr(self, "_mod_rows_initialized", False) and tabs_width + 6 + full_width > available
+        labels = [("Mod：一致" if combo.itemData(i) == 0 else f"Mod：-{combo.itemData(i)}%")
+                  if compact else full for i, full in enumerate(full_labels)]
+        blocked = combo.blockSignals(True)
+        try:
+            for index, label in enumerate(labels):
+                if combo.itemText(index) != label:
+                    combo.setItemText(index, label)
+        finally:
+            combo.blockSignals(blocked)
+        combo.setFixedWidth(max(map(metrics.horizontalAdvance, labels), default=0) + 34)
+        combo.setToolTip(f"{full_labels[combo.currentIndex()]}\n{self._search_range_help}")
 
     def _fit_compact_action_widths(self, *_args):
         """検索操作列を、現在表示中の文言に合う最小幅へ揃える。"""
@@ -2684,6 +2887,7 @@ class PoetoreWindow(QWidget):
             layout.invalidate()
         self.layout().invalidate()
         width = max(self.minimumWidth(), self.layout().minimumSize().width())
+        width = min(width, self._trade_available_geometry().width() - 32)
         self.setMinimumWidth(width)
         if getattr(self, "_obs_collapsed", False):
             self._obs_expanded_size.setWidth(max(self._obs_expanded_size.width(), width))
@@ -2724,7 +2928,7 @@ class PoetoreWindow(QWidget):
             self._scaled_display_value(62), self._scaled_display_value(28)
         )
         self.poetore_close_button.setFixedSize(
-            self._scaled_display_value(28), self._scaled_display_value(24)
+            self._scaled_display_value(28), self._scaled_display_value(28)
         )
         self.poe_ninja_currency_icon.setFixedSize(
             self._scaled_display_value(28), self._scaled_display_value(28)
@@ -2756,14 +2960,28 @@ class PoetoreWindow(QWidget):
                         gap = self._scaled_display_value(_MOD_VALUE_LEADING_GAP) if column == _MOD_COLUMN_MIN else 0
                         cell.setFixedWidth(editor.width() + gap)
         self._apply_poetore_style()
+        for toggle in (self.trade_preset_combo, self.base_scope_toggle, self.magic_rarity_toggle):
+            equalize_button_sizes(toggle._buttons, expanding=True)
+        for button in self.base_scope_toggle._buttons:
+            button.setMinimumWidth(0)
+        equalize_button_sizes((self.league_popup_button, self.poetore_close_button),
+                              minimum_width=self._scaled_display_value(UI_METRICS.overlay_control_height),
+                              minimum_height=self._scaled_display_value(UI_METRICS.overlay_control_height))
+        equalize_button_sizes((self.league_popup_button, self.poetore_close_button,
+                               self.league_refresh_button, self.trade_league_combo),
+                              minimum_height=self._scaled_display_value(UI_METRICS.overlay_control_height),
+                              equal_width=False)
+        equalize_button_sizes((self.mod_conditions_toggle, self.clear_mod_conditions_button,
+                               self.hidden_mods_toggle, self.mod_sources_toggle))
+        equalize_button_sizes((self.price_button, self.trade_status_combo,
+                               self.trade_currency_combo, self.listed_within_combo), equal_width=False)
         # Qt/OSのスタイルによって、同じpaddingでもdisabledの読み取り専用
         # チップと操作可能な状態チップのsizeHintがずれる。表示サイズごとの
         # 基準高を明示し、Windowsを含む全環境で同じ行高に揃える。
         filter_chip_height = profile["font"] + 11
         chip_font = QFont(theme_font_family("Noto Sans JP"))
         chip_font.setPixelSize(theme_font_size(profile["font"]))
-        if has_custom_theme_font():
-            filter_chip_height = max(filter_chip_height, QFontMetrics(chip_font).height() + 8)
+        filter_chip_height = max(filter_chip_height, QFontMetrics(chip_font).height() + 8)
         for _name, chip in self._filter_chips:
             if isinstance(chip, QPushButton) and chip.objectName() in {
                 "readonlyFilterChip", "cycleToggle",
@@ -2821,7 +3039,7 @@ class PoetoreWindow(QWidget):
     def _set_mod_conditions_collapsed(self, collapsed: bool):
         self.mod_filter_tree.setVisible(not collapsed)
         self.mod_conditions_toggle.setText(
-            "mod条件をひらく∨" if collapsed else "mod条件をたたむ∧"
+            "Mod一覧をひらく ∨" if collapsed else "Mod一覧をたたむ ∧"
         )
         self.mod_conditions_toggle.setToolTip(
             "Mod検索条件の一覧を展開する" if collapsed
@@ -2909,20 +3127,119 @@ class PoetoreWindow(QWidget):
         # 同一アイテムの連続検索だけ既定高へ縮む原因になっていた。
         if self.mod_filter_tree.isHidden():
             return 0
+        self.mod_filter_tree.doItemsLayout()
         height = self.mod_filter_tree.frameWidth() * 2 + 4
         default_row_height = self._mod_row_height()
         for index in range(self.mod_filter_tree.topLevelItemCount()):
             row = self.mod_filter_tree.topLevelItem(index)
             if row.isHidden():
                 continue
-            height += max(row.sizeHint(_MOD_COLUMN_TEXT).height(), default_row_height)
+            height += max(self.mod_filter_tree.visualItemRect(row).height(),
+                          row.sizeHint(_MOD_COLUMN_TEXT).height(), default_row_height)
             if row.isExpanded():
                 for child_index in range(row.childCount()):
                     child = row.child(child_index)
-                    height += max(child.sizeHint(0).height(), default_row_height)
+                    if not child.isHidden():
+                        height += max(self.mod_filter_tree.visualItemRect(child).height(),
+                                      child.sizeHint(0).height(), default_row_height)
         return height
 
-    def _fixed_layout_height(self, profile: dict, price_height: int) -> int:
+    def _trade_available_geometry(self) -> QRect:
+        if self._trade_screen_geometry is not None:
+            return self._trade_screen_geometry
+        context = getattr(self, "_placement_context", None)
+        if context is not None and context.target_rect is not None:
+            return context.target_rect
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+
+    def _watch_trade_screen(self):
+        handle = self.windowHandle()
+        if handle is not self._trade_window_handle:
+            if self._trade_window_handle is not None:
+                try:
+                    self._trade_window_handle.screenChanged.disconnect(self._trade_screen_changed)
+                except RuntimeError:  # Qt can recreate the native window for OBS.
+                    pass
+            self._trade_window_handle = handle
+            if handle is not None:
+                handle.screenChanged.connect(self._trade_screen_changed)
+        screen = handle.screen() if handle is not None else self.screen()
+        if self._trade_screen is not None and screen is not self._trade_screen:
+            self._trade_screen_changed(screen)
+        else:
+            self._bind_trade_screen(screen)
+
+    def _bind_trade_screen(self, screen):
+        if screen is self._trade_screen:
+            return
+        if self._trade_screen is not None:
+            try:
+                for signal in (self._trade_screen.availableGeometryChanged,
+                               self._trade_screen.logicalDotsPerInchChanged,
+                               self._trade_screen.physicalDotsPerInchChanged):
+                    signal.disconnect(self._queue_trade_screen_geometry)
+            except RuntimeError:  # A disconnected monitor may already be gone.
+                pass
+        self._trade_screen = screen
+        if screen is not None:
+            for signal in (screen.availableGeometryChanged, screen.logicalDotsPerInchChanged,
+                           screen.physicalDotsPerInchChanged):
+                signal.connect(self._queue_trade_screen_geometry)
+
+    def _trade_screen_changed(self, screen):
+        self._bind_trade_screen(screen)
+        self._queue_trade_screen_geometry()
+
+    def _queue_trade_screen_geometry(self, *_args):
+        if self._trade_placing_context:
+            return
+        # Stop consulting the search's original client rect immediately, even
+        # if a width reflow runs before the debounced screen update.
+        if self._trade_screen is not None:
+            self._trade_screen_geometry = self._trade_screen.availableGeometry()
+        self._trade_screen_update_pending = True
+        self._trade_screen_timer.start()
+
+    def _refresh_trade_screen_geometry(self):
+        self._trade_screen_timer.stop()
+        if self._title_bar._drag_offset is not None:
+            return  # mouseReleaseEvent applies the pending update before saving.
+        self._watch_trade_screen()
+        if self._trade_screen is not None:
+            self._trade_screen_geometry = self._trade_screen.availableGeometry()
+        self._trade_screen_update_pending = False
+        self._constrain_trade_geometry()
+        # Always enqueue a pass, including when dimensions are unchanged or a
+        # screen notification arrived during an active layout pass.
+        self._queue_trade_layout()
+
+    def _finish_trade_move(self):
+        screen = self.screen()
+        if screen is not self._trade_screen:
+            self._trade_screen_changed(screen)
+        if self._trade_screen_update_pending:
+            self._refresh_trade_screen_geometry()
+            self._adjust_window_height_to_mod_rows()
+
+    def _constrain_trade_geometry(self):
+        if getattr(self, "_obs_collapsed", False):
+            return
+        available = self._trade_available_geometry()
+        profile = _DISPLAY_SIZE_PROFILES[self._result_font_size]
+        fixed_columns = sum(self.mod_filter_tree.columnWidth(c) for c in range(6) if c != _MOD_COLUMN_TEXT)
+        minimum_width = max(profile["minimum_width"], fixed_columns + theme_font_size(100) + 32,
+                            self._title_bar.minimumSizeHint().width() + 22)
+        self.setMinimumSize(min(minimum_width, available.width() - 32),
+                            min(profile["minimum_height"], available.height() - 16))
+        self.setMaximumSize(max(1, available.width() - 32), max(1, available.height() - 16))
+        self.resize(min(self.width(), self.maximumWidth()), min(self.height(), self.maximumHeight()))
+        self.move(max(available.left(), min(self.x(), available.right() - self.width() + 1)),
+                  max(available.top(), min(self.y(), available.bottom() - self.height() + 1)))
+        if getattr(self, "_obs_streaming_mode", False):
+            self._obs_expanded_size = self.size()
+
+    def _fixed_layout_height(self) -> int:
         """Return the real height required outside the two flexible trees.
 
         The display profile predates several action rows.  Deriving this value
@@ -2934,30 +3251,44 @@ class PoetoreWindow(QWidget):
         ):
             if layout is not None:
                 layout.activate()
-        measured = (
-            self.minimumSizeHint().height()
-            - self.mod_filter_tree.minimumHeight()
-            - self.price_list.minimumHeight()
-        )
-        profile_fixed = profile["height"] - profile["mod_height"] - price_height
-        return max(profile_fixed, measured)
+        content = self._obs_content.layout()
+        # Measure as if the vertical scrollbar were present. Its appearance
+        # must not change the flow-row height used to size this same viewport.
+        # Keep AsNeeded for painting, preserving the default 13px appearance.
+        width = max(1, self._content_scroll.maximumViewportSize().width()
+                    - self._content_scroll.verticalScrollBar().sizeHint().width())
+        measured = content.totalHeightForWidth(width) if content.hasHeightForWidth() else content.minimumSize().height()
+        if not self.mod_filter_tree.isHidden():
+            measured -= self.mod_filter_tree.minimumHeight()
+        measured -= self.price_list.minimumHeight()
+        margins = self._panel.layout().contentsMargins()
+        return (measured + self._title_bar.sizeHint().height() + margins.top()
+                + margins.bottom() + self._panel.layout().spacing() + 2 * self._panel.frameWidth())
 
     def _adjust_window_height_to_mod_rows(self):
         """通常候補が収まる分だけ縦へ拡張し、画面超過時だけスクロールを残す。"""
         if not hasattr(self, "mod_filter_tree"):
             return
         # 初期表示サイズは従来どおり維持し、アイテム解析後だけ内容に合わせる。
-        if self.mod_filter_tree.topLevelItemCount() == 0:
+        if not getattr(self, "_mod_rows_initialized", False):
             return
+        if self._title_bar._drag_offset is not None:
+            return
+        if getattr(self, "_trade_layout_active", False):
+            return
+        self._trade_layout_active = True
+        try:
+            self._update_trade_layout_geometry()
+        finally:
+            self._trade_layout_active = False
+
+    def _update_trade_layout_geometry(self):
         profile = _DISPLAY_SIZE_PROFILES[self._result_font_size]
-        screen = QApplication.screenAt(self.frameGeometry().center())
-        if screen is None:
-            screen = QApplication.primaryScreen()
-        available = screen.availableGeometry() if screen is not None else self.screen().availableGeometry()
-        content_height = (
-            self._visible_mod_content_height()
-            if not self.mod_filter_tree.isHidden() else profile["mod_height"]
-        )
+        self._constrain_trade_geometry()
+        self._fit_mod_columns_to_width()
+        self._fit_search_range_width()
+        available = self._trade_available_geometry()
+        content_height = self._visible_mod_content_height()
         related_visible = not self.related_items_panel.isHidden()
         price_height = profile["price_height"]
         if related_visible:
@@ -2966,7 +3297,16 @@ class PoetoreWindow(QWidget):
                 price_height
                 - self._scaled_display_value(_RELATED_ITEMS_PRICE_HEIGHT_REDUCTION),
             )
-        fixed_height = self._fixed_layout_height(profile, price_height)
+        if self.price_list.topLevelItemCount():
+            self.price_list.doItemsLayout()
+            content_price_height = self.price_list.header().height() + 2 * self.price_list.frameWidth() + 4
+            content_price_height += sum(self.price_list.visualItemRect(self.price_list.topLevelItem(i)).height()
+                                        for i in range(self.price_list.topLevelItemCount()))
+            price_height = min(price_height, max(self._scaled_display_value(120), content_price_height))
+        # Measure against the current tree heights. Temporarily restoring the
+        # profile height here toggles scrollbars and queues another reflow even
+        # when the final geometry is identical to the previous pass.
+        fixed_height = self._fixed_layout_height()
         mod_height, price_height, window_height = _auto_mod_layout_sizes(
             profile_height=fixed_height + profile["mod_height"] + price_height,
             profile_mod_height=profile["mod_height"],
@@ -2974,8 +3314,10 @@ class PoetoreWindow(QWidget):
             minimum_price_height=self._scaled_display_value(120),
             content_height=content_height,
             available_height=available.height(),
-            minimum_height=profile["minimum_height"],
         )
+        # When enlarged controls alone exhaust the screen, let the outer body
+        # scroll instead of reducing a short Mod list to one or two rows.
+        mod_height = max(mod_height, min(content_height, profile["mod_height"]))
         if content_height > mod_height and not self.mod_filter_tree.isHidden():
             # 画面高が足りない時だけ、末尾に半端な行を見せず一覧内スクロールへ
             # 切り替える。セルWidgetが直下の操作ボタンへ重なって見えるのを防ぐ。
@@ -2983,9 +3325,11 @@ class PoetoreWindow(QWidget):
             row_height = self._mod_row_height()
             visible_rows = max(2, (mod_height - frame_height) // row_height)
             mod_height = frame_height + visible_rows * row_height
-        self.mod_filter_tree.setMinimumHeight(mod_height)
-        self.mod_filter_tree.setMaximumHeight(mod_height)
-        self.price_list.setMinimumHeight(price_height)
+        window_height = min(available.height() - 16, fixed_height + mod_height + price_height)
+        if (self.mod_filter_tree.minimumHeight(), self.mod_filter_tree.maximumHeight()) != (mod_height, mod_height):
+            self.mod_filter_tree.setFixedHeight(mod_height)
+        if (self.price_list.minimumHeight(), self.price_list.maximumHeight()) != (price_height, price_height):
+            self.price_list.setFixedHeight(price_height)
         if getattr(self, "_obs_collapsed", False):
             # 解析中は待機ラベルだけが見えている。ここで実ウィンドウを
             # resizeすると、結果完成前に大きな空タイルが描画される。
@@ -2993,7 +3337,11 @@ class PoetoreWindow(QWidget):
                 max(self.width(), profile["width"]), window_height,
             )
             return
-        self.resize(max(self.width(), profile["width"]), window_height)
+        self.setMinimumHeight(min(profile["minimum_height"], window_height))
+        if self.height() != window_height:
+            self.resize(self.width(), window_height)
+        if getattr(self, "_obs_streaming_mode", False):
+            self._obs_expanded_size = self.size()
         if self.y() < available.top():
             self.move(self.x(), available.top())
         elif self.frameGeometry().bottom() > available.bottom():
@@ -3022,8 +3370,8 @@ class PoetoreWindow(QWidget):
             for checkbox in self._mod_condition_checkboxes()
         )
         self.clear_mod_conditions_button.setText(
-            "一覧のチェックを全て解除"
-            if has_checked_condition else "一覧のチェックを全て選択"
+            "すべて解除"
+            if has_checked_condition else "すべて選択"
         )
 
     def _toggle_all_mod_condition_checks(self):
@@ -3054,6 +3402,7 @@ class PoetoreWindow(QWidget):
             if build:
                 display_name = f"{display_name} ({build})"
         self.item_name_label.setText(display_name)
+        self.item_name_label.setToolTip(display_name)
         show_base_scope = (
             is_nonunique_equipment or is_nonunique_abyss_jewel
             or item.category == "chart"
@@ -3316,6 +3665,10 @@ class PoetoreWindow(QWidget):
         )
 
     def eventFilter(self, watched, event):
+        if (event.type() == QEvent.Resize and hasattr(self, "mod_filter_tree")
+                and watched is self.mod_filter_tree.viewport()
+                and event.oldSize().width() != event.size().width()):
+            self._queue_trade_layout()
         if (
             event.type() == QEvent.Wheel
             and isinstance(watched, QLineEdit)
@@ -4446,6 +4799,9 @@ class PoetoreWindow(QWidget):
             QDesktopServices.openUrl(QUrl(self._last_poe_ninja_url))
 
     def showEvent(self, event):
+        self._watch_trade_screen()
+        self._constrain_trade_geometry()
+        self._adjust_window_height_to_mod_rows()
         if not self._focus_signal_connected:
             QApplication.instance().focusChanged.connect(self._close_when_focus_leaves_panel)
             self._focus_signal_connected = True
@@ -4460,7 +4816,36 @@ class PoetoreWindow(QWidget):
         # previous HWND.
         QTimer.singleShot(0, self._notify_native_hwnd_changed)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "price_list") or getattr(self, "_obs_collapsed", False):
+            return
+        # A width change can wrap both action groups. Recompute after Qt has
+        # laid out the new viewport, coalescing intermediate resize events.
+        if event.oldSize().width() != event.size().width():
+            self._queue_trade_layout()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self.isVisible() or getattr(self, "_trade_placing_context", True):
+            return
+        screen = self.screen()
+        if screen is not self._trade_screen:
+            self._trade_screen_changed(screen)
+        elif self._trade_screen_update_pending:
+            self._trade_screen_timer.start()
+
+    def _queue_trade_layout(self):
+        if not getattr(self, "_trade_layout_pending", False):
+            self._trade_layout_pending = True
+            QTimer.singleShot(0, self, self._refresh_trade_layout)
+
+    def _refresh_trade_layout(self):
+        self._trade_layout_pending = False
+        self._adjust_window_height_to_mod_rows()
+
     def _notify_native_hwnd_changed(self):
+        self._watch_trade_screen()
         callback = getattr(self, "_native_hwnd_changed", None)
         if callback is None:
             return
@@ -4470,6 +4855,8 @@ class PoetoreWindow(QWidget):
             callback(None)
 
     def event(self, event):
+        if event.type() == QEvent.DevicePixelRatioChange and hasattr(self, "_trade_screen_timer"):
+            self._queue_trade_screen_geometry()
         if (
             event.type() == QEvent.WindowDeactivate
             and self.isVisible()
@@ -4513,6 +4900,7 @@ class PoetoreWindow(QWidget):
             self._obs_collapsed = False
             self._title_bar.set_obs_collapsed(False)
             self._obs_content.show()
+            self._content_scroll.show()
             self._panel.layout().setContentsMargins(10, 5, 10, 9)
             self.setMaximumHeight(16777215)
             suspend_theme_fixed_geometry(self, False)
@@ -4534,6 +4922,7 @@ class PoetoreWindow(QWidget):
         suspend_theme_fixed_geometry(self, True)
         self._obs_collapsed = True
         self._obs_content.hide()
+        self._content_scroll.hide()
         self._title_bar.set_obs_collapsed(True)
         self._panel.layout().setContentsMargins(6, 2, 6, 2)
         collapsed_height = 30
@@ -4556,6 +4945,7 @@ class PoetoreWindow(QWidget):
         self._obs_collapsed = False
         self._title_bar.set_obs_collapsed(False)
         self._obs_content.show()
+        self._content_scroll.show()
         self._panel.layout().setContentsMargins(10, 5, 10, 9)
         self.setMaximumHeight(16777215)
         suspend_theme_fixed_geometry(self, False)
@@ -4972,13 +5362,23 @@ class PoetoreWindow(QWidget):
             saved_positions.get(placement_side(context))
             if isinstance(saved_positions, dict) else None
         )
-        if getattr(self, "_obs_streaming_mode", False):
-            self._expand_for_obs()
-        else:
-            position = position_from_relative(context, self.size(), saved_position)
-            self.move(position or position_for_context(context, self.size()))
-        self._passive_hotkey_display = not activate
-        self.show()
+        self._trade_placing_context = True
+        self._trade_screen_geometry = None
+        self._trade_screen_update_pending = False
+        self._trade_screen_timer.stop()
+        try:
+            if getattr(self, "_obs_streaming_mode", False):
+                self._expand_for_obs()
+                self._constrain_trade_geometry()
+            else:
+                self._constrain_trade_geometry()
+                self._adjust_window_height_to_mod_rows()
+                position = position_from_relative(context, self.size(), saved_position)
+                self.move(position or position_for_context(context, self.size()))
+            self._passive_hotkey_display = not activate
+            self.show()
+        finally:
+            self._trade_placing_context = False
         self._obs_transitioning = False
         self.raise_()
         if activate:
@@ -6504,6 +6904,7 @@ class PoetoreWindow(QWidget):
         return tuple(filters)
 
     def _populate_stat_filters(self, filters: tuple[TradeStatFilter, ...]):
+        self._mod_rows_initialized = True
         self.mod_filter_tree.clear()
         has_mercenary_supports = any(
             stat_filter.stat_id.startswith("mercenary.support")
@@ -6706,6 +7107,8 @@ class PoetoreWindow(QWidget):
                 text_layout.setContentsMargins(2, 3, 2, 3)
                 text_layout.setSpacing(3)
                 text_label = QLabel(stat_filter.text)
+                text_label.setObjectName("modDescription")
+                text_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 text_label.setToolTip(mod_tooltip)
                 text_label.setCursor(Qt.PointingHandCursor)
                 text_label._mod_condition_checkbox = checkbox
@@ -6933,6 +7336,7 @@ class PoetoreWindow(QWidget):
                 price_width = math.ceil((widget_hint.width() + 20) * 1.3)
                 row.setSizeHint(0, QSize(price_width, widget_hint.height()))
                 self.price_list.setItemWidget(row, 0, price_widget)
+        self._adjust_window_height_to_mod_rows()
 
     def _hide_augment_values(self):
         if not hasattr(self, "virtual_augment_cost_label"):

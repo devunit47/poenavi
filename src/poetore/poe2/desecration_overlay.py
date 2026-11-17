@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import math
 
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -17,10 +19,13 @@ from PySide6.QtGui import (
     QPen,
 )
 from PySide6.QtWidgets import (
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -303,31 +308,72 @@ class CategoryChoiceOverlay(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setStyleSheet(f"QWidget {{ background:{theme_color('overlay_bg', '#111715')}; color:{theme_color('overlay_text', '#E8F1EE')}; }} QPushButton {{ padding:6px 10px; border:1px solid {theme_color('overlay_border', '#63E6C5')}; border-radius:5px; color:{theme_color('overlay_text', '#E8F1EE')}; }} QPushButton:hover {{ background:{theme_color('accent_soft', '#25463E')}; }}")
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.addWidget(QLabel("装備の種類を選択してください"))
-        self._buttons = QGridLayout()
-        root.addLayout(self._buttons)
+        root.setContentsMargins(UI_METRICS.overlay_margin, UI_METRICS.control_gap,
+                               UI_METRICS.overlay_margin, UI_METRICS.control_gap)
+        root.setSpacing(UI_METRICS.overlay_gap)
+        root.addWidget(QLabel("装備の種類"))
+        self._button_area = QScrollArea()
+        self._button_area.setFrameShape(QFrame.NoFrame)
+        self._button_area.setWidgetResizable(True)
+        button_panel = QWidget()
+        self._buttons = QGridLayout(button_panel)
+        self._buttons.setContentsMargins(0, 0, 0, 0)
+        self._buttons.setSpacing(UI_METRICS.overlay_gap)
+        self._button_area.setWidget(button_panel)
+        root.addWidget(self._button_area)
 
     def show_categories(self, categories, anchor: QPoint):
         while self._buttons.count():
             item = self._buttons.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
         categories = selectable_categories(categories)
-        for index, category in enumerate(categories):
-            button = QPushButton(CATEGORY_LABELS.get(category, category))
+        buttons = []
+        for category in categories:
+            button = QPushButton(CATEGORY_LABELS.get(category, category), self._button_area.widget())
             button.clicked.connect(lambda _checked=False, value=category: self._choose(value))
-            self._buttons.addWidget(button, index // 4, index % 4)
-        cancel = QPushButton("閉じる")
+            buttons.append(button)
+        cancel = QPushButton("閉じる", self._button_area.widget())
         cancel.clicked.connect(self._cancel)
-        final_index = len(categories)
-        self._buttons.addWidget(cancel, final_index // 4, final_index % 4)
-        self.adjustSize()
+        buttons.append(cancel)
+        equalize_button_sizes(buttons, minimum_width=UI_METRICS.action_width)
         screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            anchor.setX(min(max(available.left(), anchor.x()), available.right() - self.width() + 1))
-            anchor.setY(min(max(available.top(), anchor.y()), available.bottom() - self.height() + 1))
+        available = screen.availableGeometry() if screen is not None else None
+        gap = self._buttons.spacing()
+        button_width, button_height = buttons[0].width(), buttons[0].height()
+        columns = min(4, len(buttons))
+        max_width = columns * (button_width + gap) - gap
+        max_height = len(buttons) * (button_height + gap) - gap
+        if available is not None:
+            margins = self.layout().contentsMargins()
+            max_width = max(1, available.width() - margins.left() - margins.right())
+            max_height = max(1, available.height() - margins.top() - margins.bottom()
+                             - self.layout().itemAt(0).widget().sizeHint().height() - self.layout().spacing())
+            columns = min(columns, max(1, (max_width + gap) // (button_width + gap)))
+        rows = math.ceil(len(buttons) / columns)
+        scrollbar_width = 0
+        if rows * (button_height + gap) - gap > max_height:
+            scrollbar_width = self._button_area.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+            columns = min(columns, max(1, (max_width - scrollbar_width + gap) // (button_width + gap)))
+            rows = math.ceil(len(buttons) / columns)
+        for index, button in enumerate(buttons):
+            self._buttons.addWidget(button, index // columns, index % columns)
+            button.show()
+        self._button_area.setFixedSize(
+            min(max_width, columns * (button_width + gap) - gap + scrollbar_width),
+            min(max_height, rows * (button_height + gap) - gap),
+        )
+        # Reopening on another screen must discard the previous grid's fitted
+        # minimum before measuring and clamping the new window geometry.
+        self._button_area.widget().setMinimumSize(self._buttons.minimumSize())
+        self.setMinimumSize(0, 0)
+        self.layout().activate()
+        self.adjustSize()
+        anchor = QPoint(anchor)
+        if available is not None:
+            anchor.setX(max(available.left(), min(anchor.x(), available.right() - self.width() + 1)))
+            anchor.setY(max(available.top(), min(anchor.y(), available.bottom() - self.height() + 1)))
         self.move(anchor)
         self.show()
         self.raise_()

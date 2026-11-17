@@ -358,7 +358,7 @@ def test_action_cluster_uses_consistent_spacing_at_every_display_size(
         zero_margins = (0, 0, 0, 0)
 
         assert _ACTION_CLUSTER_HORIZONTAL_GAP == 6
-        assert _ACTION_CLUSTER_VERTICAL_GAP == 10
+        assert _ACTION_CLUSTER_VERTICAL_GAP == 8
         assert window.action_cluster_layout.spacing() == _ACTION_CLUSTER_VERTICAL_GAP
         assert window.mod_conditions_actions_layout.spacing() == _ACTION_CLUSTER_HORIZONTAL_GAP
         assert window.mercenary_supports_actions_layout.spacing() == _ACTION_CLUSTER_HORIZONTAL_GAP
@@ -1232,16 +1232,19 @@ def test_auto_hide_closes_only_after_release_and_mouse_threshold(qapp, determini
         window.show()
         window._passive_hotkey_display = True
         window._capture_auto_hide = True
-        window._auto_hide_origin = QPoint(500, 400)
         qapp.processEvents()
+        # The result panel now clamps itself to the available screen. Keep
+        # these listener coordinates outside its final, visible geometry.
+        origin = window.frameGeometry().bottomRight() + QPoint(100, 100)
+        window._auto_hide_origin = origin
 
-        window._handle_global_mouse_move(550, 400)
+        window._handle_global_mouse_move(origin.x() + 50, origin.y())
         assert window.isVisible()
 
         window.capture_hotkey_released()
-        window._handle_global_mouse_move(520, 400)
+        window._handle_global_mouse_move(origin.x() + 20, origin.y())
         assert window.isVisible()
-        window._handle_global_mouse_move(541, 400)
+        window._handle_global_mouse_move(origin.x() + 41, origin.y())
         assert not window.isVisible()
     finally:
         window.close()
@@ -2816,7 +2819,6 @@ def test_auto_mod_layout_expands_until_available_height():
         minimum_price_height=120,
         content_height=430,
         available_height=1200,
-        minimum_height=620,
     ) == (430, 300, 1080)
     assert _auto_mod_layout_sizes(
         profile_height=900,
@@ -2825,7 +2827,6 @@ def test_auto_mod_layout_expands_until_available_height():
         minimum_price_height=120,
         content_height=600,
         available_height=1000,
-        minimum_height=620,
     ) == (514, 120, 984)
 
 
@@ -2837,7 +2838,6 @@ def test_auto_mod_layout_borrows_height_from_price_results_on_fhd():
         minimum_price_height=120,
         content_height=330,
         available_height=1040,
-        minimum_height=620,
     ) == (330, 339, 1024)
 
 
@@ -2849,7 +2849,6 @@ def test_auto_mod_layout_keeps_related_items_budget_on_fhd():
         minimum_price_height=120,
         content_height=330,
         available_height=1040,
-        minimum_height=620,
     ) == (330, 159, 1024)
 
 def test_checked_hidden_unique_mutation_is_sent_as_exact_filter(qapp):
@@ -4377,15 +4376,15 @@ def test_mod_conditions_can_be_collapsed_without_losing_values(qapp):
         editor.setText("95")
 
         window.show()
-        assert window.mod_conditions_toggle.text() == "mod条件をたたむ∧"
+        assert window.mod_conditions_toggle.text() == "Mod一覧をたたむ ∧"
         window.mod_conditions_toggle.click()
         assert window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "mod条件をひらく∨"
+        assert window.mod_conditions_toggle.text() == "Mod一覧をひらく ∨"
         assert window._selected_stat_filters()[0].min_value == 95
 
         window.mod_conditions_toggle.click()
         assert not window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "mod条件をたたむ∧"
+        assert window.mod_conditions_toggle.text() == "Mod一覧をたたむ ∧"
     finally:
         window.close()
 
@@ -4404,7 +4403,7 @@ def test_mod_conditions_default_is_reset_for_each_new_item(qapp):
 
         assert window.mod_filter_tree.topLevelItemCount() == 0
         assert window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "mod条件をひらく∨"
+        assert window.mod_conditions_toggle.text() == "Mod一覧をひらく ∨"
 
         window.mod_conditions_toggle.click()
         assert not window.mod_filter_tree.isHidden()
@@ -4426,7 +4425,7 @@ def test_mod_conditions_default_is_reset_for_each_new_item(qapp):
 
         assert window.mod_filter_tree.topLevelItemCount() > 0
         assert not window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "mod条件をたたむ∧"
+        assert window.mod_conditions_toggle.text() == "Mod一覧をたたむ ∧"
     finally:
         window.close()
 
@@ -4530,7 +4529,7 @@ def test_mod_condition_checks_toggle_all_without_changing_item_level(qapp):
         window.item_level_edit.setText("84")
         window._set_item_level_filter_enabled(True)
 
-        assert window.clear_mod_conditions_button.text() == "一覧のチェックを全て解除"
+        assert window.clear_mod_conditions_button.text() == "すべて解除"
         assert window.clear_mod_conditions_button.toolTip() == (
             "上の条件一覧のみ。ilvlなどの基本条件は変更しません"
         )
@@ -4551,14 +4550,14 @@ def test_mod_condition_checks_toggle_all_without_changing_item_level(qapp):
         window.clear_mod_conditions_button.click()
 
         assert [row.enabled for row in window._selected_stat_filters()] == [False, False]
-        assert window.clear_mod_conditions_button.text() == "一覧のチェックを全て選択"
+        assert window.clear_mod_conditions_button.text() == "すべて選択"
         assert window._selected_item_level() == 84
         assert window._item_level_filter_enabled
 
         window.clear_mod_conditions_button.click()
 
         assert [row.enabled for row in window._selected_stat_filters()] == [True, True]
-        assert window.clear_mod_conditions_button.text() == "一覧のチェックを全て解除"
+        assert window.clear_mod_conditions_button.text() == "すべて解除"
     finally:
         window.close()
 
@@ -4573,14 +4572,14 @@ def test_mod_condition_toggle_shows_clear_when_partially_checked(qapp):
         window._populate_stat_filters(filters)
 
         assert [row.enabled for row in window._selected_stat_filters()] == [True, False]
-        assert window.clear_mod_conditions_button.text() == "一覧のチェックを全て解除"
+        assert window.clear_mod_conditions_button.text() == "すべて解除"
 
         checkboxes = window._mod_condition_checkboxes()
         checkboxes[0].setChecked(False)
-        assert window.clear_mod_conditions_button.text() == "一覧のチェックを全て選択"
+        assert window.clear_mod_conditions_button.text() == "すべて選択"
 
         checkboxes[1].setChecked(True)
-        assert window.clear_mod_conditions_button.text() == "一覧のチェックを全て解除"
+        assert window.clear_mod_conditions_button.text() == "すべて解除"
     finally:
         window.close()
 

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.appearance import resolve_dialog_theme
-from src.ui.dialog_theme import POETORE_DIALOG_THEME, apply_dialog_theme
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, fit_scroll_content_width, POETORE_DIALOG_THEME, apply_dialog_theme
 from src.ui.expedition_settings_dialog import ClickableImageLabel
 from src.ui.high_accuracy_ocr_pack_group import HighAccuracyOcrPackGroup
 from src.ui.settings_dialog import AutoHideHotkeyWidget
@@ -57,8 +57,8 @@ class HeistSettingsDialog(QDialog):
         apply_dialog_theme(self, self.theme)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        root.setSpacing(UI_METRICS.section_gap)
         self.title_label = QLabel("ハイスト報酬OCR設定")
         self.title_label.setProperty("uiRole", "title")
         root.addWidget(self.title_label)
@@ -70,8 +70,8 @@ class HeistSettingsDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         content_widget = QWidget()
         content = QVBoxLayout(content_widget)
-        content.setContentsMargins(4, 4, 4, 4)
-        content.setSpacing(10)
+        content.setContentsMargins(0, 0, UI_METRICS.inline_gap, 0)
+        content.setSpacing(UI_METRICS.section_gap)
         scroll.setWidget(content_widget)
         root.addWidget(scroll, 1)
 
@@ -81,14 +81,16 @@ class HeistSettingsDialog(QDialog):
         self.enabled_checkbox = QCheckBox("ハイスト報酬OCRを有効化")
         self.enabled_checkbox.setChecked(bool(enabled))
         toggle_row.addWidget(self.enabled_checkbox)
-        self.enable_required_hint = QLabel("※有効時だけOCRとホットキーを起動します")
+        self.enable_required_hint = QLabel("有効時のみ読み取り")
+        self.enabled_checkbox.setToolTip("有効時だけOCRとホットキーを起動します")
         self.enable_required_hint.setObjectName("heistEnableRequiredHint")
         self.enable_required_hint.setProperty("uiRole", "muted")
-        toggle_row.addWidget(self.enable_required_hint)
         toggle_row.addStretch()
         basic.addLayout(toggle_row)
+        basic.addWidget(self.enable_required_hint)
 
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form.setContentsMargins(0, 2, 0, 0)
         self.hotkey_widget = AutoHideHotkeyWidget(
             hotkey,
@@ -133,7 +135,7 @@ class HeistSettingsDialog(QDialog):
         example_title.setObjectName("heistExampleHeading")
         example_title.setProperty("uiRole", "section")
         example_heading.addWidget(example_title)
-        hint = QLabel("※画像をクリックすると拡大表示します")
+        hint = QLabel("クリックで拡大")
         hint.setObjectName("heistExampleHint")
         hint.setProperty("uiRole", "muted")
         example_heading.addWidget(hint)
@@ -146,6 +148,7 @@ class HeistSettingsDialog(QDialog):
         self.example_thumbnail.setAlignment(Qt.AlignCenter)
         self.example_thumbnail.setFixedHeight(150)
         self.example_thumbnail.setCursor(Qt.PointingHandCursor)
+        self.example_thumbnail.setToolTip("画像をクリックすると指定例を別ウィンドウで拡大表示します")
         self.example_thumbnail.clicked.connect(self._show_example_popup)
         usage.addWidget(self.example_thumbnail)
         self._load_example_thumbnail()
@@ -168,14 +171,16 @@ class HeistSettingsDialog(QDialog):
         for widget_type in (QCheckBox, QGroupBox, QPushButton, QScrollArea):
             for widget in self.findChildren(widget_type):
                 widget.setStyleSheet("")
+        equalize_button_sizes((self.cancel_button, self.save_button), minimum_width=UI_METRICS.action_width)
+        fit_scroll_content_width(scroll)
 
     @staticmethod
     def _section_group(title: str, object_name: str):
         group = QGroupBox(title)
         group.setObjectName(object_name)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(12, 18, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*([UI_METRICS.panel_padding] * 4))
+        layout.setSpacing(UI_METRICS.control_gap)
         return group, layout
 
     def settings(self) -> tuple[str, bool]:

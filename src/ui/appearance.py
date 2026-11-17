@@ -328,6 +328,11 @@ def fit_theme_fixed_geometry(root) -> None:
         widget.ensurePolished()
         text = (widget.currentText() if isinstance(widget, QComboBox)
                 else widget.text() if isinstance(widget, (QAbstractButton, QAbstractSpinBox, QLabel, QLineEdit)) else None)
+        # Responsive containers derive their live minimum from Qt's layout.
+        # Keep fitting descendants without pinning a wrapped/scrolling body to
+        # the largest height observed at a previous width.
+        if text is None and widget.property("themeLayoutManaged"):
+            continue
         signature = (widget.font().key(), tuple(inherited_style),
                      application_style, text, original_limits)
         if isinstance(widget, QLabel) and widget.wordWrap():
@@ -359,7 +364,7 @@ def fit_theme_fixed_geometry(root) -> None:
                 if not widget.isVisibleTo(root):
                     continue
                 needed = QSize(widget.minimumSizeHint().width(), widget.heightForWidth(widget.width()))
-            if type(widget).__name__ == "ElidedLabel":
+            if type(widget).__name__ == "ElidedLabel" or widget.property("elideText"):
                 needed.setWidth(widget.minimumWidth())
         elif isinstance(widget, QAbstractSpinBox):
             editor = widget.findChild(QLineEdit)

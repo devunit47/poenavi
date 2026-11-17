@@ -39,6 +39,7 @@ from src.poetore.exchange_rate_settings import (
     ensure_rate_pair_config,
 )
 from src.ui.app_theme import POETORE_THEME
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 from src.ui.custom_command_settings import (
     custom_command_hotkeys,
     normalized_custom_commands,
@@ -316,8 +317,9 @@ class _PoetoreModeTitleBar(QWidget):
         self.setFixedHeight(38)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(5, 10, 10, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(UI_METRICS.control_gap, UI_METRICS.control_gap,
+                                  UI_METRICS.control_gap, 0)
+        layout.setSpacing(UI_METRICS.inline_gap)
         layout.addStretch()
 
         button_style = f"""
@@ -327,7 +329,7 @@ class _PoetoreModeTitleBar(QWidget):
                 border: none;
                 font-size: {theme_font_size(14)}px;
                 font-weight: bold;
-                padding: 2px 8px;
+                padding: 0;
             }}
             QPushButton:hover {{
                 background: {theme_rgba('accent_soft', 101, 255, 202, 0.20)};
@@ -341,7 +343,7 @@ class _PoetoreModeTitleBar(QWidget):
                 border: none;
                 font-size: {theme_font_size(14)}px;
                 font-weight: bold;
-                padding: 2px 8px;
+                padding: 0;
             }}
             QPushButton:hover {{
                 background: {theme_rgba('accent_soft', 255, 60, 60, 0.8)};
@@ -353,20 +355,21 @@ class _PoetoreModeTitleBar(QWidget):
         self.minimize_button = QPushButton("─")
         self.minimize_button.setObjectName("poetoreMinimizeButton")
         self.minimize_button.setFocusPolicy(Qt.NoFocus)
-        self.minimize_button.setFixedSize(30, 22)
+        self.minimize_button.setFixedSize(32, 24)
         self.minimize_button.setStyleSheet(button_style)
         self.minimize_button.setToolTip("最小化")
         self.minimize_button.clicked.connect(window.minimize_to_tray)
         layout.addWidget(self.minimize_button)
 
-        self.close_button = QPushButton("✕")
+        self.close_button = QPushButton("×")
         self.close_button.setObjectName("poetoreCloseButton")
         self.close_button.setFocusPolicy(Qt.NoFocus)
-        self.close_button.setFixedSize(30, 22)
+        self.close_button.setFixedSize(32, 24)
         self.close_button.setStyleSheet(close_style)
         self.close_button.setToolTip("閉じる")
         self.close_button.clicked.connect(window.close)
         layout.addWidget(self.close_button)
+        equalize_button_sizes((self.minimize_button, self.close_button), minimum_width=32)
 
     def mousePressEvent(self, event):
         if (
@@ -615,11 +618,12 @@ class PoetoreModeWindow(QMainWindow):
         body.setObjectName("poetoreModeBody")
         body.setStyleSheet("QWidget#poetoreModeBody { border: none; background: transparent; }")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(24, 8, 24, 18)
-        body_layout.setSpacing(16)
+        body_layout.setContentsMargins(UI_METRICS.page_margin, UI_METRICS.control_gap,
+                                      UI_METRICS.page_margin, UI_METRICS.page_margin)
+        body_layout.setSpacing(UI_METRICS.section_gap)
 
         header = QHBoxLayout()
-        header.setSpacing(3)
+        header.setSpacing(UI_METRICS.inline_gap)
         title_box = QVBoxLayout()
         title_box.setSpacing(1)
         title_row = QHBoxLayout()
@@ -651,7 +655,7 @@ class PoetoreModeWindow(QMainWindow):
         self.focus_button.setObjectName("poetoreFocusButton")
         self.focus_button.setFocusPolicy(Qt.NoFocus)
         self.focus_button.setToolTip("隠れ家滞在通知の集中モードを切り替える")
-        self.focus_button.setFixedSize(108, 35)
+        self.focus_button.setFixedSize(108, UI_METRICS.toolbar_size)
         self.focus_button.clicked.connect(self.toggle_focus_mode)
         header.addWidget(self.focus_button)
 
@@ -776,6 +780,13 @@ class PoetoreModeWindow(QMainWindow):
         body_layout.addWidget(self.update_button)
         root.addWidget(body, 1)
         self.setCentralWidget(central)
+        equalize_button_sizes(
+            (self.focus_button, *self.header_action_buttons),
+            minimum_height=UI_METRICS.toolbar_size,
+            equal_width=False,
+        )
+        equalize_button_sizes((self.rate_panel.manage_button, self.rate_panel.refresh_button),
+                              minimum_width=UI_METRICS.action_width)
         self._update_capture_hint()
 
     def _apply_window_settings(self):
@@ -810,7 +821,9 @@ class PoetoreModeWindow(QMainWindow):
         button = QPushButton(text)
         button.setFocusPolicy(Qt.NoFocus)
         button.setToolTip(tooltip)
-        button.setFixedSize(35, 35)
+        button.setAccessibleName(tooltip)
+        button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
+        button.setStyleSheet("padding: 0;")
         return button
 
     def toggle_focus_mode(self):

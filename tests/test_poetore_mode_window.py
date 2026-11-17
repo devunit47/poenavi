@@ -206,7 +206,7 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     assert window.header_action_buttons == header_buttons
     assert window.focus_button.text() == "隠れ家滞在通知\nOFF"
     assert window.focus_button.size().width() == 108
-    assert window.focus_button.size().height() == 35
+    assert window.focus_button.size().height() == 36
     assert "text-align: center" in window.centralWidget().styleSheet()
     assert window._hideout_notification is None
     assert all(button.text() == "" for button in header_buttons)
@@ -217,8 +217,8 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
         button.icon().pixmap(QSize(24, 24)).toImage() for button in header_buttons
     ]
     assert all(image != icon_images[0] for image in icon_images[1:])
-    assert window.memo_button.size().width() == 35
-    assert window.memo_button.size().height() == 35
+    assert window.memo_button.size().width() == 36
+    assert window.memo_button.size().height() == 36
     assert all(
         button.height() == window.focus_button.height()
         for button in header_buttons
@@ -235,7 +235,7 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     minimize_button = window.findChild(QPushButton, "poetoreMinimizeButton")
     close_button = window.findChild(QPushButton, "poetoreCloseButton")
     assert minimize_button.text() == "─"
-    assert close_button.text() == "✕"
+    assert close_button.text() == "×"
     assert minimize_button.focusPolicy() == Qt.NoFocus
     assert close_button.focusPolicy() == Qt.NoFocus
     assert window.rate_refresh_button.text() == "最新データ確認"

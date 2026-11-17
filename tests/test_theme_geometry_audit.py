@@ -298,7 +298,7 @@ def test_trade_obs_transitions_keep_legacy_collapsed_height(qapp):
         assert window.height() == 30
         window.set_obs_streaming_mode(False)
         assert not (failures := _audit_pages(qapp, window)), "\n".join(failures)
-        assert window.maximumHeight() == 16777215
+        assert 30 < window.height() <= window.maximumHeight() <= window._trade_available_geometry().height()
 
 
 @pytest.mark.parametrize("module", ["expedition_settings_dialog", "desecration_settings_dialog", "heist_settings_dialog"])
@@ -382,7 +382,7 @@ def test_window_inventory_is_complete():
     # window/component classes must be explicitly assigned to a generating
     # scenario, rather than disappearing from a hand-written factory list.
     embedded = {
-        "_UniqueRollSlider", "_BinaryToggle", "_CycleButton", "_AreaSegmentedControl",
+        "_UniqueRollSlider", "_BinaryToggle", "_ElidedScopeButton", "_CycleButton", "_AreaSegmentedControl",
         "_NumericFilterChip", "_RequiredNumericFilterChip", "_SparklineWidget", "_PoetoreTitleBar",
         "AppearanceSettingsWidget", "AppInfoWidget", "CustomCommandSettingsWidget",
         "ElidedLabel", "DecimalAlignedRateLabel", "CustomExchangeRatePanel",

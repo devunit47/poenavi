@@ -189,7 +189,8 @@ def test_expedition_settings_warns_that_screen_reading_must_be_enabled():
     dialog = ExpeditionSettingsDialog()
 
     hint = dialog.findChild(QLabel, "screenReadingEnableRequiredHint")
-    assert hint.text() == "※使用するにはチェックをONにしてください"
+    assert hint.text() == "有効時のみ読み取り"
+    assert "チェックをONにしてください" in dialog.enabled_checkbox.toolTip()
     assert hint.property("state") == "warning"
     assert "#F6C85F" in dialog.styleSheet()
     assert "font-weight: 600" in dialog.styleSheet()
@@ -288,9 +289,9 @@ def test_region_selection_keeps_modal_settings_dialog_open():
 def test_expedition_dialog_shows_example_or_clear_placeholder(tmp_path):
     QApplication.instance() or QApplication([])
     missing = ExpeditionSettingsDialog(example_image_path=tmp_path / "missing.png")
-    assert missing.example_hint_label.text() == (
-        "※以下の画像をクリックするとポップアップで拡大表示します"
-    )
+    assert missing.example_hint_label.text() == "クリックで拡大"
+    assert "クリック" in missing.example_thumbnail.toolTip()
+    assert "拡大表示" in missing.example_thumbnail.toolTip()
     assert "準備中" in missing.example_thumbnail.text()
     missing.close()
 
@@ -319,9 +320,9 @@ def test_packaged_expedition_example_image_is_available():
 def test_expedition_dialog_warns_that_window_resize_requires_region_reset():
     dialog = ExpeditionSettingsDialog()
     warning = dialog.findChild(QLabel, "screenSizeRegionWarning")
-    assert warning.text() == (
-        "PoE2のウィンドウサイズを変更した場合、位置が変わるため再設定が必要です。"
-    )
+    assert "ウィンドウサイズ変更後" in warning.text()
+    assert "範囲を再設定" in warning.text()
+    assert "位置が変わるため再設定が必要" in warning.toolTip()
     assert warning.property("state") == "warning"
     assert "#F6C85F" in dialog.styleSheet()
     dialog.close()

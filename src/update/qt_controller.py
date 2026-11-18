@@ -17,12 +17,18 @@ from src.update.artifacts import (
     validate_update_archive,
     verify_sha256,
 )
-from src.update.release_client import ReleaseInfo, fetch_latest_release
+from src.update.release_client import (
+    CHECK_TIMEOUT_MESSAGE,
+    RELEASE_CHECK_TIMEOUT_SECONDS,
+    SOCKET_TIMEOUT_SECONDS,
+    ReleaseInfo,
+    fetch_latest_release,
+)
 from src.version import APP_VERSION
 
 
-CHECK_TIMEOUT_MS = 15_000
-CHECK_TIMEOUT_MESSAGE = "更新確認がタイムアウトしました。"
+# Allow for an in-flight socket wait and delivery of the result to the UI.
+CHECK_TIMEOUT_MS = (RELEASE_CHECK_TIMEOUT_SECONDS + SOCKET_TIMEOUT_SECONDS + 5) * 1000
 logger = logging.getLogger(__name__)
 
 
@@ -58,11 +64,12 @@ class UpdateController(QObject):
         self._downloading = False
         self._download_result.connect(self._finish_download)
         self._cancel = threading.Event()
+        self._validation_lock = threading.Lock()
         self._work_dir: Path | None = None
         self._ready_download: _VerifiedDownload | None = None
         app = QCoreApplication.instance()
         if app is not None:
-            app.aboutToQuit.connect(self.discard_download)
+            app.aboutToQuit.connect(self._discard_download_on_quit)
         if getattr(sys, "frozen", False) and sys.platform == "win32":
             cleanup_timer = threading.Timer(10, self._cleanup_stale_update_dirs)
             cleanup_timer.daemon = True
@@ -142,26 +149,33 @@ class UpdateController(QObject):
                     lambda _done, _total: None,
                     self._cancel.is_set,
                 )
-                expected = parse_checksum(
-                    checksum_file.read_text(encoding="utf-8")
-                )
-                archive = None
-                if cached is not None:
-                    try:
-                        if verify_sha256(cached.archive, expected):
-                            archive = cached.archive
-                    except OSError:
-                        pass
-                if archive is None:
+                with self._validation_lock:
+                    if self._cancel.is_set():
+                        raise DownloadCancelled()
+                    expected = parse_checksum(checksum_file.read_text(encoding="utf-8"))
+                    archive = None
+                    if cached is not None:
+                        try:
+                            if verify_sha256(cached.archive, expected):
+                                archive = cached.archive
+                        except OSError:
+                            pass
+                needs_download = archive is None
+                if needs_download:
+                    if self._cancel.is_set():
+                        raise DownloadCancelled()
                     archive = download_file(
                         release.zip_url,
                         work_dir / "PoENavi.zip",
                         self.download_progress.emit,
                         self._cancel.is_set,
                     )
-                    if not verify_sha256(archive, expected):
+                with self._validation_lock:
+                    if self._cancel.is_set():
+                        raise DownloadCancelled()
+                    if needs_download and not verify_sha256(archive, expected):
                         raise ValueError("ダウンロードした ZIP の SHA-256 が一致しません。")
-                validate_update_archive(archive)
+                    validate_update_archive(archive)
             except Exception as exc:
                 self._download_result.emit(None, exc)
             else:
@@ -197,6 +211,18 @@ class UpdateController(QObject):
             # The worker still owns the files until it reports completion.
             self.cancel_download()
             return
+        self._remove_work_dir()
+
+    @Slot()
+    def _discard_download_on_quit(self) -> None:
+        self.cancel_download()
+        self._ready_download = None
+        # On Windows an open ZIP can prevent deletion. Wait for local validation
+        # to close it before Qt stops delivering queued worker results.
+        with self._validation_lock:
+            self._remove_work_dir()
+
+    def _remove_work_dir(self) -> None:
         if self._work_dir is not None:
             shutil.rmtree(self._work_dir, ignore_errors=True)
             self._work_dir = None

@@ -2,7 +2,7 @@ from dataclasses import replace
 import hashlib
 import sys
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from unittest.mock import Mock
 from zipfile import ZipFile
 
@@ -193,6 +193,59 @@ def test_withdrawal_discards_download_that_finishes_after_check(release_download
         ready.assert_not_called()
         cancelled.assert_called_once_with()
     finally:
+        controller.discard_download()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_quit_removes_temporary_zip_during_validation(qt_app, release_download, monkeypatch, cached):
+    release, publish, fetch_asset = release_download
+    publish(b"new app")
+    workers = []
+    archives = []
+    validating = Event()
+
+    def make_thread(target):
+        worker = Thread(target=target, daemon=True)
+        workers.append(worker)
+        return worker
+
+    factory = Mock(side_effect=ImmediateThread)
+    controller = UpdateController(thread_factory=factory)
+
+    def validate(archive):
+        archives.append(archive)
+        with archive.open("rb"):
+            validating.set()
+            assert controller._cancel.wait(timeout=5)
+
+    if cached:
+        controller.download(release)
+        publish(b"replacement app")
+
+        def verify(archive, _expected):
+            validate(archive)
+            return False
+
+        monkeypatch.setattr("src.update.qt_controller.verify_sha256", verify)
+    else:
+        monkeypatch.setattr("src.update.qt_controller.validate_update_archive", validate)
+    factory.side_effect = make_thread
+    controller.download(release)
+    try:
+        assert validating.wait(timeout=5)
+        archive = archives[0]
+        assert archive.is_file()
+        QTimer.singleShot(0, qt_app.quit)
+        qt_app.exec()
+
+        assert not archive.parent.exists()
+        workers[0].join(timeout=5)
+        assert not workers[0].is_alive()
+        assert [call.args[0] for call in fetch_asset.call_args_list].count(release.zip_url) == 1
+    finally:
+        controller.cancel_download()
+        workers[0].join(timeout=5)
+        qt_app.processEvents()
         controller.discard_download()
 
 

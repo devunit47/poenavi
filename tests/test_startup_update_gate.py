@@ -1,11 +1,15 @@
+import io
+import json
 import sys
 from unittest.mock import Mock, patch
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from src.ui.dialog_theme import POENAVI_DIALOG_THEME
 from src.ui.update_dialogs import build_update_message_box
 from src.update.qt_controller import UpdateController
+from src.update.release_client import fetch_latest_release
 from src.update.startup_gate import (
     run_manual_update_check,
     run_startup_update_gate,
@@ -40,6 +44,65 @@ def test_common_startup_gate_continues_without_update():
 
     assert config["notified_update_version"] == ""
     save_config.assert_called_once_with(config)
+
+
+def test_startup_offers_update_after_slow_response(monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.delenv("POENAVI_UPDATE_TEST_TAG", raising=False)
+    config = {}
+    elapsed_ms = 0
+    deadline_ms = None
+    controller = UpdateController(
+        thread_factory=lambda target: Mock(start=lambda: QTimer.singleShot(0, target)),
+    )
+
+    def start_timer(timeout_ms):
+        nonlocal deadline_ms
+        deadline_ms = elapsed_ms + timeout_ms
+
+    def advance(ms):
+        nonlocal elapsed_ms
+        elapsed_ms += ms
+        if elapsed_ms >= deadline_ms:
+            controller._expire_check()
+
+    body = json.dumps({
+        "tag_name": "v99.0.0",
+        "assets": [
+            {"name": "PoENavi.zip", "browser_download_url": "https://github.com/app.zip"},
+            {"name": "PoENavi.zip.sha256", "browser_download_url": "https://github.com/app.zip.sha256"},
+        ],
+    }).encode("utf-8")
+
+    class SlowResponse(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell() == 0:
+                advance(8_000)
+            return super().read(size)
+
+        read1 = read
+
+    def open_response(_request, timeout):
+        assert timeout == 10
+        advance(8_000)
+        return SlowResponse(body)
+
+    with patch.object(controller._check_timer, "start", side_effect=start_timer), patch(
+        "src.update.release_client.monotonic", side_effect=lambda: elapsed_ms / 1000,
+    ), patch("src.update.startup_gate.shared_update_controller", return_value=controller), patch(
+        "src.update.qt_controller.fetch_latest_release",
+        side_effect=lambda version: fetch_latest_release(version, opener=open_response),
+    ), patch("src.update.startup_gate.ConfigManager.save_config") as save_config, patch(
+        "src.update.startup_gate.UpdateAvailableDialog",
+    ) as available:
+        available.return_value.exec.return_value = QDialog.Rejected
+        assert run_startup_update_gate(config) is True
+
+    assert elapsed_ms == 16_000
+    available.assert_called_once()
+    assert available.call_args.args[0].version == "99.0.0"
+    save_config.assert_called_once_with({"notified_update_version": "99.0.0"})
+    assert config["notified_update_version"] == "99.0.0"
 
 
 def test_manual_check_reports_latest_version():

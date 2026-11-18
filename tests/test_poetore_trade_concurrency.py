@@ -15,6 +15,7 @@ from src.poetore import trade
 @pytest.fixture(autouse=True)
 def isolate_requests(monkeypatch):
     traffic = trade._TradeRateLimitTraffic()
+    monkeypatch.setattr(trade, "_trade_rate_traffic", traffic)
     for name in ("_trade_rate_limiter", "_trade2_rate_limiter"):
         monkeypatch.setattr(trade, name, trade._TradeRateLimiter(traffic))
     monkeypatch.setattr(trade, "_trade_response_cache", trade._TtlLruCache())
@@ -29,6 +30,16 @@ def ip_quota(maximum, active, *, policy="shared"):
     if policy is not None:
         headers["X-Rate-Limit-Policy"] = policy
     return headers
+
+
+def use_fake_quota_wait(monkeypatch, advance):
+    def wait(changed, timeout):
+        if timeout is None:
+            changed.wait(3)
+        elif not changed.is_set():
+            advance(timeout)
+
+    monkeypatch.setattr(trade, "_wait_for_trade_quota_change", wait)
 
 
 @pytest.mark.parametrize("route_known", [False, True])
@@ -52,7 +63,8 @@ def test_unnamed_quota_blocks_other_routes_across_games(monkeypatch, route_known
             })
         return response()
 
-    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    use_fake_quota_wait(monkeypatch, sleep)
     monkeypatch.setattr(trade._trade_http_pool, "request", request)
     if route_known:
         trade._trade2_rate_limiter.adjust("fetch", ip_quota(20, 0, policy="poe2-fetch"))
@@ -76,6 +88,107 @@ def test_unnamed_rule_counts_other_responses_received_during_discovery(monkeypat
     now = 102.0
     limiter.adjust("fetch", ip_quota(2, 1, policy=None), reservation=discovering)
     assert limiter.try_reserve("search") == 11.0
+
+
+@pytest.mark.parametrize("policy, first_latency", [("search", 0.1), ("search", 3.0), (None, 0.1)])
+def test_report_releases_expired_local_slots_without_extending_them(monkeypatch, policy, first_latency):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    second_send = max(2.0, first_latency)
+    for index, offset in enumerate((0, second_send, 4, 6, 8)):
+        now = 100.0 + offset
+        slot = limiter.try_reserve("search")
+        assert isinstance(slot, trade._TradeReservation)
+        now += first_latency if index == 0 else 0.1
+        limiter.adjust("search", ip_quota(5, index + 1, policy=policy), reservation=slot)
+
+    first_expiry = 110.0 + max(2.0, first_latency)
+    now = first_expiry - 0.1
+    assert limiter.estimate_wait("search") == pytest.approx(0.1 if policy else 8.2)
+    now = first_expiry + 0.5
+    if policy is None:
+        assert limiter.estimate_wait("search") == pytest.approx(7.6)
+        return
+    trade._prevent_trade_queue()
+    slot = limiter.try_reserve("search")
+    assert isinstance(slot, trade._TradeReservation)
+    assert limiter.try_reserve("search") == pytest.approx(112.0 + second_send - now)
+    limiter.release(slot)
+
+
+def test_report_retains_slots_that_may_not_match_local_requests(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    first = limiter.try_reserve("search")
+    now = 100.1
+    limiter.adjust("search", ip_quota(5, 1), reservation=first)
+
+    now = 109.0
+    second = limiter.try_reserve("search")
+    # The first slot could have expired at the server before this snapshot.
+    now = 110.1
+    limiter.adjust("search", ip_quota(5, 5), reservation=second)
+
+    now = 112.5
+    assert limiter.try_reserve("search") == pytest.approx(9.6)
+
+
+@pytest.mark.parametrize("wake_on", ["response", "cancel", "adjust", "release"])
+def test_timed_quota_wait_rechecks_on_notification(monkeypatch, wake_on):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    sleeping = threading.Event()
+    cancel = trade.TradeSearchCancellation()
+    wait = trade._wait_for_trade_quota_change
+
+    def observe_wait(changed, timeout):
+        assert timeout is not None and timeout > 1
+        sleeping.set()
+        wait(changed, timeout)
+
+    def reserve():
+        with trade.trade_search_scope(cancel):
+            return trade._reserve_trade_send_slot(limiter, "search")
+
+    monkeypatch.setattr(trade, "_wait_for_trade_quota_change", observe_wait)
+    for offset in range(2):
+        now = 100.0 + offset
+        slot = limiter.try_reserve("search")
+        now += 0.1
+        limiter.adjust("search", ip_quota(5, offset + 1), reservation=slot)
+    now = 102.0
+    first = limiter.try_reserve("search")
+    now = 102.2
+    second = limiter.try_reserve("search")
+    now = 102.4
+    limiter.adjust("search", ip_quota(5, 4), reservation=first)
+    assert limiter.estimate_wait("search") == 0
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(reserve)
+        try:
+            assert sleeping.wait(1)
+            assert not waiting.done()
+            if wake_on == "response":
+                now = 102.6
+                limiter.adjust("search", ip_quota(5, 4), reservation=second)
+            elif wake_on == "release":
+                limiter.release(second)
+            elif wake_on == "adjust":
+                limiter.adjust("search", ip_quota(6, 4))
+            else:
+                cancel.set()
+                with pytest.raises(trade.TradeSearchCancelled):
+                    waiting.result(timeout=1)
+                return
+            limiter.release(waiting.result(timeout=1))
+        finally:
+            cancel.set()
+            if wake_on in ("adjust", "cancel"):
+                limiter.release(second)
 
 
 def test_overlapping_reports_do_not_charge_completed_reservations_twice(monkeypatch):
@@ -130,7 +243,7 @@ def test_cancellation_after_reservation_returns_unsent_slot(monkeypatch, route_k
         limiter.adjust("fetch", ip_quota(1, 0))
     reserve = limiter.try_reserve
     cancel = threading.Event()
-    slot_returned = limiter._traffic.response_received
+    slot_returned = limiter._traffic.changed
     sent = []
 
     def reserve_then_cancel(endpoint):
@@ -204,7 +317,7 @@ def test_shared_policy_keeps_an_inflight_reservation_past_the_send_window(monkey
     for _ in range(5):
         assert isinstance(limiter.try_reserve("fetch"), trade._TradeReservation)
     now += 20
-    assert isinstance(limiter.try_reserve("search"), threading.Event)
+    assert limiter.try_reserve("search") is None
 
 
 def test_first_fetch_waits_for_shared_quota_and_blocks_search_until_policy_is_known(monkeypatch):
@@ -238,7 +351,8 @@ def test_first_fetch_waits_for_shared_quota_and_blocks_search_until_policy_is_kn
             search_waiting.set()
         return result
 
-    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    use_fake_quota_wait(monkeypatch, sleep)
     monkeypatch.setattr(trade._trade_http_pool, "request", request)
     monkeypatch.setattr(limiter, "try_reserve", observe_reservation)
     trade._request_json(search, {"query": {}})
@@ -278,12 +392,68 @@ def test_known_rate_limit_accounts_for_late_server_arrival(monkeypatch, repeats_
         arrivals.append(now)
         return response(headers=headers if repeats_headers else {})
 
-    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    use_fake_quota_wait(monkeypatch, sleep)
     monkeypatch.setattr(trade._trade_http_pool, "request", request)
     trade._trade_rate_limiter.adjust("fetch", {**headers, "X-Rate-Limit-Ip-State": "0:10:0"})
     trade._request_json(url)
     trade._request_json(url)
     assert arrivals[1] - arrivals[0] >= 10.0
+
+
+@pytest.mark.parametrize("new_target", ["jp:data/stats", "data/items", "jp:data/items"])
+def test_catalog_fetch_waits_only_for_the_same_target(monkeypatch, new_target):
+    limiter = trade._trade_rate_limiter
+    for endpoint in ("jp:data/items", "data/items", "jp:data/stats"):
+        limiter.adjust(endpoint, ip_quota(5, 0, policy=endpoint))
+    old_cancel = trade.TradeSearchCancellation()
+    old_started, old_response, new_started = (threading.Event() for _ in range(3))
+    requests = []
+    loaders = {
+        "jp:data/stats": trade._trade_stat_entries,
+        "data/items": trade._trade_item_entries,
+        "jp:data/items": trade._jp_trade_item_entries,
+    }
+
+    def request(_method, url, **_kwargs):
+        _, endpoint = trade._rate_limit_context(url)
+        requests.append(endpoint)
+        if endpoint == "jp:data/items":
+            old_started.set()
+            assert old_response.wait(3)
+        return response({"result": []}, headers=ip_quota(5, 1, policy=endpoint))
+
+    def old_prepare():
+        with trade.trade_search_scope(old_cancel):
+            return trade._trade_item_catalogs_for(trade.JP_API_ROOT, trade.API_ROOT)
+
+    def new_prepare():
+        with trade.trade_search_scope(trade.TradeSearchCancellation()):
+            new_started.set()
+            return loaders[new_target]()
+
+    monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
+    monkeypatch.setattr(trade, "_stat_entries_cache", None)
+    monkeypatch.setattr(trade._trade_http_pool, "request", request)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        old = pool.submit(old_prepare)
+        try:
+            assert old_started.wait(1)
+            old_cancel.set()
+            latest = pool.submit(new_prepare)
+            assert new_started.wait(1)
+            if new_target == "jp:data/items":
+                assert not latest.done()
+            else:
+                assert latest.result(timeout=1) == ()
+        finally:
+            old_response.set()
+        with pytest.raises(trade.TradeSearchCancelled):
+            old.result(timeout=1)
+        assert latest.result(timeout=1) == ()
+    assert requests == (
+        ["jp:data/items"] if new_target == "jp:data/items" else ["jp:data/items", new_target]
+    )
 
 
 def test_first_paired_catalog_lookup_reloads_both_independently_cached_locales(monkeypatch):
@@ -429,8 +599,9 @@ def test_catalog_429_delays_next_catalog_request(monkeypatch, retry_after):
         return response({"result": []})
 
     monkeypatch.setattr(trade, "time", SimpleNamespace(
-        monotonic=lambda: now, time=lambda: 1_800_000_000 + now - 100.0, sleep=sleep,
+        monotonic=lambda: now, time=lambda: 1_800_000_000 + now - 100.0,
     ))
+    use_fake_quota_wait(monkeypatch, sleep)
     monkeypatch.setattr(trade._trade_http_pool, "request", request)
     items = f"{trade.API_ROOT}/data/items"
     stats = f"{trade.JP_API_ROOT}/data/stats"
@@ -588,7 +759,8 @@ def test_concurrent_fetches_reserve_every_advertised_window(monkeypatch):
             assert release.wait(2)
         return response(headers=headers)
 
-    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    use_fake_quota_wait(monkeypatch, sleep)
     monkeypatch.setattr(trade._trade_http_pool, "request", request)
     with ThreadPoolExecutor(max_workers=3) as pool:
         first = pool.submit(trade._request_json, root + "one")

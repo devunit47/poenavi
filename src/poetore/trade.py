@@ -400,6 +400,15 @@ def _raise_if_trade_cancelled() -> None:
         raise TradeSearchCancelled
 
 
+class TradeSearchCancellation(threading.Event):
+    """Wake quota waiters when the UI supersedes a search."""
+
+    def set(self) -> None:
+        super().set()
+        with _trade_rate_traffic.lock:
+            _trade_rate_traffic.notify_change()
+
+
 @dataclass
 class _RateLimitRule:
     maximum: int
@@ -409,21 +418,40 @@ class _RateLimitRule:
     window_padding: float | None = None
     # Each report covers requests up to its server-side snapshot. Overlapping
     # reports can arrive out of order, so keep every possibly latest report.
-    reports: list[tuple[float, int]] = field(default_factory=list)
+    reports: list[tuple[float, int, tuple[float, ...]]] = field(default_factory=list)
     report_sent_at: float = -math.inf
     unreported_at: list[float] = field(default_factory=list)
+    confirmed_requests: list[tuple[float, float, float]] = field(default_factory=list)
+
+    def _recorded_at(self, sent_at: float, received_at: float) -> float:
+        if self.window_padding is None:
+            return sent_at
+        return max(sent_at, received_at - self.window_padding)
 
     def record_request(self, sent_at: float, received_at: float, *, reported: bool = False) -> None:
         # Retain each advertised slot for at least one full server window
         # after receipt. The local fallback only paces send times.
-        recorded_at = sent_at
-        if self.window_padding is not None:
-            recorded_at = max(sent_at, received_at - self.window_padding)
-        self.borrowed_at.append(recorded_at)
+        self.borrowed_at.append(self._recorded_at(sent_at, received_at))
         if self.window_padding is not None and not reported and received_at >= self.report_sent_at:
             self.unreported_at.append(received_at)
 
-    def record_report(self, sent_at: float, received_at: float, active: int) -> None:
+    def record_report(self, sent_at: float, received_at: float, active: int, *, reconcile: bool) -> None:
+        matched = ()
+        if reconcile and active and self.window_padding is not None:
+            # A prior request is definitely in this snapshot only if its
+            # response arrived before this send and its earliest possible
+            # server arrival is still within the unpadded window at receipt.
+            server_window = self.window_seconds - self.window_padding
+            # Keep one slot at this report's receipt for its own request.
+            older_slots = active - 1
+            if older_slots:
+                matched = tuple(sorted(
+                    recorded for sent, received, recorded in self.confirmed_requests
+                    if received <= sent_at and sent > received_at - server_window
+                )[-older_slots:])
+            self.confirmed_requests.append(
+                (sent_at, received_at, self._recorded_at(sent_at, received_at))
+            )
         self.report_sent_at = max(self.report_sent_at, sent_at)
         self.reports[:] = [
             report for report in self.reports if report[0] >= self.report_sent_at
@@ -432,21 +460,24 @@ class _RateLimitRule:
             value for value in self.unreported_at if value >= self.report_sent_at
         ]
         if received_at >= self.report_sent_at:
-            self.reports.append((received_at, active))
+            self.reports.append((received_at, active - len(matched), matched))
 
     def prune(self, now: float) -> None:
         threshold = now - self.window_seconds
         self.borrowed_at[:] = [value for value in self.borrowed_at if value > threshold]
         self.reports[:] = [report for report in self.reports if report[0] > threshold]
         self.unreported_at[:] = [value for value in self.unreported_at if value > threshold]
+        self.confirmed_requests[:] = [request for request in self.confirmed_requests if request[2] > threshold]
 
     def histories(self, now: float) -> Iterator[list[float]]:
         self.prune(now)
         # A report already covers this response and any earlier responses at
         # the server. Only requests without such a report need extra slots.
         yield sorted(self.borrowed_at)
-        for received_at, active in self.reports:
-            yield sorted(self.unreported_at + [received_at] * min(active, self.maximum))
+        threshold = now - self.window_seconds
+        for received_at, unmatched, matched in self.reports:
+            history = [recorded for recorded in matched if recorded > threshold]
+            yield sorted(self.unreported_at + history + [received_at] * min(unmatched, self.maximum))
 
     def wait_seconds(self, now: float, capacity: int, *, count: int = 1, start: float = 0.0) -> float:
         wait = start
@@ -487,8 +518,12 @@ class _TradeRateLimitTraffic:
     reservations: set[_TradeReservation] = field(default_factory=set)
     recent_completions: list[tuple[_TradeReservation, float]] = field(default_factory=list)
     discovering: bool = False
-    response_received: threading.Event = field(default_factory=threading.Event)
+    changed: threading.Event = field(default_factory=threading.Event)
     unnamed_restriction: float = 0.0
+
+    def notify_change(self) -> None:
+        self.changed.set()
+        self.changed = threading.Event()
 
 
 class _TradeRateLimiter:
@@ -509,6 +544,7 @@ class _TradeRateLimiter:
                 if key[0] is self:
                     del self._traffic.unnamed_policies[key]
             self._traffic.unnamed_restriction = 0.0
+            self._traffic.notify_change()
 
     def _policy(self, endpoint: str) -> _TradeLimitState | None:
         return self._traffic.policies.get(self._policy_names.get(endpoint, ""))
@@ -546,7 +582,7 @@ class _TradeRateLimiter:
                     wait = max(wait, rule.wait_seconds(now, rule.maximum, count=count, start=restriction))
             return wait
 
-    def try_reserve(self, endpoint: str) -> _TradeReservation | threading.Event | float:
+    def try_reserve(self, endpoint: str) -> _TradeReservation | float | None:
         traffic = self._traffic
         with traffic.lock:
             _raise_if_trade_cancelled()
@@ -554,9 +590,9 @@ class _TradeRateLimiter:
             # An unmapped endpoint can share any policy. Keep its request
             # exclusive until the response has been assigned to a policy.
             if traffic.discovering or (policy is None and traffic.reservations):
-                return traffic.response_received
+                return None
             if policy is not None and not policy.rules and policy.in_flight:
-                return traffic.response_received
+                return None
             now = time.monotonic()
             wait = max(0.0, traffic.unnamed_restriction - now)
             for state, in_flight in self._possible_policies(endpoint, policy):
@@ -564,7 +600,7 @@ class _TradeRateLimiter:
                 for rule in state.rules:
                     capacity = rule.maximum - in_flight
                     if capacity <= 0:
-                        return traffic.response_received
+                        return None
                     wait = max(wait, rule.wait_seconds(now, capacity))
             if wait > 0:
                 return wait
@@ -580,6 +616,7 @@ class _TradeRateLimiter:
         """Return a slot whose HTTP request was never started."""
         with self._traffic.lock:
             self._finish_reservation(reservation)
+            self._traffic.notify_change()
 
     def _finish_reservation(self, reservation: _TradeReservation, received_at: float | None = None) -> None:
         traffic = self._traffic
@@ -599,13 +636,11 @@ class _TradeRateLimiter:
                 traffic.recent_completions.append((reservation, received_at))
         else:
             traffic.recent_completions.clear()
-        traffic.response_received.set()
-        traffic.response_received = threading.Event()
 
     def adjust(
         self, endpoint: str, headers: object, *,
         reservation: _TradeReservation | None = None,
-        received_at: float | None = None, retry_after: int = 0,
+        received_at: float | None = None, retry_after: int = 0, successful: bool = True,
     ) -> None:
         rule_names = {
             name.strip().casefold(): name.strip()
@@ -687,7 +722,10 @@ class _TradeRateLimiter:
                         current.record_request(reservation.sent_at, now, reported=active is not None)
                     if active is not None:
                         sent_at = reservation.sent_at if reservation is not None else now
-                        current.record_report(sent_at, now, active)
+                        current.record_report(
+                            sent_at, now, active,
+                            reconcile=bool(policy_name) and reservation is not None and successful,
+                        )
                     synchronized.append(current)
                 state.rules = synchronized
             elif reservation is not None:
@@ -707,6 +745,7 @@ class _TradeRateLimiter:
                     if candidate is not state:
                         self._record_request(candidate, reservation, now)
                 self._finish_reservation(reservation, now)
+            traffic.notify_change()
 
     @staticmethod
     def _record_request(state: _TradeLimitState, reservation: _TradeReservation, now: float) -> None:
@@ -1152,20 +1191,26 @@ def _reserve_trade_send_slot(
         _raise_if_trade_cancelled()
         return None
 
-    cancel = _trade_search_cancel.get()
+    wait_logged = False
     while True:
+        # Capture the notification before checking quota so a state change
+        # between the check and the wait cannot be lost.
+        changed = limiter._traffic.changed
         result = limiter.try_reserve(endpoint)
         if isinstance(result, _TradeReservation):
             return result
-        if isinstance(result, threading.Event):
-            # Recheck cancellation while waiting for an in-flight response.
-            result.wait(0.05 if cancel is not None else None)
-            continue
-        _trade_log(f"rate limit wait: endpoint={endpoint} seconds={result:.3f}")
-        if cancel is None:
-            time.sleep(result)
-        elif cancel.wait(result):
-            raise TradeSearchCancelled
+        if result is not None and not wait_logged:
+            _trade_log(f"rate limit wait: endpoint={endpoint} seconds={result:.3f}")
+            wait_logged = True
+        _wait_for_trade_quota_change(changed, result)
+
+
+def _wait_for_trade_quota_change(changed: threading.Event, timeout: float | None) -> None:
+    cancel = _trade_search_cancel.get()
+    if cancel is not None and not isinstance(cancel, TradeSearchCancellation):
+        # Plain Events passed to trade_search_scope cannot notify quota waiters.
+        timeout = min(0.05, timeout) if timeout is not None else 0.05
+    changed.wait(timeout)
 
 
 def _trade_retry_after(headers: object) -> int:
@@ -1248,6 +1293,7 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
             rate_limiter.adjust(
                 rate_endpoint, response.headers, reservation=reservation,
                 received_at=received_at, retry_after=retry_after,
+                successful=200 <= response.status < 300,
             )
         break
     assert response is not None
@@ -2808,6 +2854,7 @@ class _TradeItemCatalog:
 class _TradeItemCatalogSnapshot:
     by_root: dict[str, _TradeItemCatalog] = field(default_factory=dict)
     paired: bool = False
+    generation: object = field(default_factory=object)
 
     def contains(self, api_roots: tuple[str, ...]) -> bool:
         return (self.paired or len(api_roots) == 1) and all(root in self.by_root for root in api_roots)
@@ -2816,7 +2863,10 @@ class _TradeItemCatalogSnapshot:
 _stat_entries_cache: tuple[dict, ...] | None = None
 _stat_entry_indexes_cache = None
 _item_catalogs_cache = _TradeItemCatalogSnapshot()
-_trade_catalog_lock = threading.RLock()
+_trade_stat_lock = threading.Lock()
+_trade_item_pair_lock = threading.RLock()
+_trade_item_cache_lock = threading.Lock()
+_trade_item_locks = {root: threading.Lock() for root in (API_ROOT, JP_API_ROOT)}
 _cached_catalogs_only = ContextVar("cached_trade_catalogs_only", default=False)
 
 
@@ -2841,7 +2891,7 @@ def _require_trade_catalog_worker() -> None:
 def _clear_trade_item_catalog_cache() -> None:
     """Discard both locale views so the next identity lookup fetches one fresh pair."""
     global _item_catalogs_cache
-    with _trade_catalog_lock:
+    with _trade_item_pair_lock, _trade_item_cache_lock:
         _item_catalogs_cache = _TradeItemCatalogSnapshot()
 
 
@@ -2907,7 +2957,7 @@ def _trade_stat_entries() -> tuple[dict, ...]:
     if cached is not None:
         return cached
     _require_trade_catalog_worker()
-    with _trade_catalog_lock:
+    with _trade_stat_lock:
         if _stat_entries_cache is None:
             _raise_if_trade_cancelled()
             data, _ = _request_json(f"{JP_API_ROOT}/data/stats")
@@ -2977,21 +3027,47 @@ def _load_trade_item_catalog(api_root: str) -> _TradeItemCatalog:
     return _TradeItemCatalog(tuple(groups), tuple(entries))
 
 
+def _trade_item_catalog_for(
+    api_root: str, previous: _TradeItemCatalog | None = None,
+) -> _TradeItemCatalogSnapshot:
+    global _item_catalogs_cache
+    with _trade_item_locks[api_root]:
+        _raise_if_trade_cancelled()
+        cached = _item_catalogs_cache
+        catalog = cached.by_root.get(api_root)
+        if catalog is not None and catalog is not previous:
+            return cached
+
+        loaded = _load_trade_item_catalog(api_root)
+        with _trade_item_cache_lock:
+            current = _item_catalogs_cache
+            if current.generation is not cached.generation:
+                # A refresh started while the single-locale response was in flight.
+                return replace(cached, by_root={**cached.by_root, api_root: loaded})
+            _item_catalogs_cache = replace(current, by_root={**current.by_root, api_root: loaded})
+            return _item_catalogs_cache
+
+
 def _trade_item_catalogs_for(*api_roots: str) -> dict[str, _TradeItemCatalog]:
     global _item_catalogs_cache
     cached = _item_catalogs_cache
     if cached.contains(api_roots):
         return cached.by_root
     _require_trade_catalog_worker()
-    with _trade_catalog_lock:
-        if not _item_catalogs_cache.contains(api_roots):
-            # Publish a new snapshot only after all requested locales load.
-            # A paired lookup fetches both even if they were loaded separately.
-            loaded = {root: _load_trade_item_catalog(root) for root in api_roots}
-            _item_catalogs_cache = _TradeItemCatalogSnapshot(
-                {**_item_catalogs_cache.by_root, **loaded}, paired=len(api_roots) == 2,
-            )
-        return _item_catalogs_cache.by_root
+    if len(api_roots) == 1:
+        return _trade_item_catalog_for(api_roots[0]).by_root
+
+    with _trade_item_pair_lock:
+        current = _item_catalogs_cache
+        if current.contains(api_roots):
+            return current.by_root
+        # Fetch both locales for a paired lookup, sharing any loads started
+        # since this lookup began. Publish the pair only once both are ready.
+        for root in api_roots:
+            _trade_item_catalog_for(root, cached.by_root.get(root))
+        with _trade_item_cache_lock:
+            _item_catalogs_cache = replace(_item_catalogs_cache, paired=len(api_roots) == 2)
+            return _item_catalogs_cache.by_root
 
 
 def _trade_item_entries() -> tuple[dict, ...]:
@@ -5073,8 +5149,11 @@ def english_trade_identity(
         return resolved
 
     _require_trade_catalog_worker()
-    with _trade_catalog_lock:
-        _clear_trade_item_catalog_cache()
+    cached = _item_catalogs_cache
+    with _trade_item_pair_lock:
+        _raise_if_trade_cancelled()
+        if _item_catalogs_cache is cached:
+            _clear_trade_item_catalog_cache()
         return _english_trade_identity_once(item, base_type, name)
 
 

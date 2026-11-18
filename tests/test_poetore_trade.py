@@ -4900,7 +4900,10 @@ def test_awakened_style_rate_limit_does_not_delay_available_requests():
         with patch(
             "src.poetore.trade._trade_http_pool.request",
             return_value=response,
-        ), patch("src.poetore.trade.time.sleep") as sleep:
+        ), patch(
+            "src.poetore.trade._wait_for_trade_quota_change",
+            side_effect=AssertionError("Request unexpectedly waited for quota"),
+        ) as wait:
             _request_json(
                 "https://www.pathofexile.com/api/trade/search/Standard",
                 {"query": {}},
@@ -4909,7 +4912,7 @@ def test_awakened_style_rate_limit_does_not_delay_available_requests():
                 "https://www.pathofexile.com/api/trade/search/Standard",
                 {"query": {}},
             )
-        sleep.assert_not_called()
+        wait.assert_not_called()
     finally:
         _trade_rate_limiter.reset()
 

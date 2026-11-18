@@ -53,7 +53,7 @@ from .window_position import (
 )
 from .trade import (
     PRESET_BASE, PRESET_FINISHED, PriceResult, TradeApiError, TradeCatalogRequired,
-    TradeSearchCancelled, TradeStatFilter, trade_search_scope,
+    TradeSearchCancellation, TradeSearchCancelled, TradeStatFilter, trade_search_scope,
     available_pc_leagues, available_trade_presets, default_pc_league,
     apply_search_range, cached_trade_catalogs_only, english_trade_identity, gem_metadata,
     elemental_dps, physical_dps_at_20_quality,
@@ -1155,7 +1155,7 @@ class PoetoreWindow(QWidget):
         self._has_searched_current_item = False
         self._search_dirty = False
         self._search_generation = 0
-        self._search_cancel = threading.Event()
+        self._search_cancel = TradeSearchCancellation()
         self._pending_trade_conditions = None
         self._pending_capture_identity_text: str | None = None
         self._active_item_key: str | None = None
@@ -2241,7 +2241,7 @@ class PoetoreWindow(QWidget):
 
     def _advance_search_generation(self):
         self._search_cancel.set()
-        self._search_cancel = threading.Event()
+        self._search_cancel = TradeSearchCancellation()
         self._search_generation += 1
         self._clear_pending_trade_conditions()
 
@@ -5575,7 +5575,7 @@ class PoetoreWindow(QWidget):
                         prepared_poe1_conditions = prepare()
                 except TradeCatalogRequired:
                     generation = self._search_generation
-                    cancel = threading.Event()
+                    cancel = TradeSearchCancellation()
 
                     def apply(result):
                         if (generation != self._search_generation

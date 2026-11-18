@@ -13,8 +13,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.ui.appearance import resolve_app_theme, theme_color, theme_font_family, theme_font_size, theme_rgba
 from src.ui.app_theme import POENAVI_THEME
+from src.ui.dialog_theme import icon_button_stylesheet
 from src.ui.styles import Styles
 from src.ui.window_flags import _with_optional_always_on_top
 
@@ -27,7 +29,7 @@ class MemoDialog(QDialog):
         ("#44cc44", "緑"), ("#dddd44", "黄"), ("#dd66ff", "紫"), ("#ffffff", "白"),
     ]
 
-    def __init__(self, parent=None, notes_path: str = "", theme=None):
+    def __init__(self, parent=None, notes_path: str = "", theme=None, *, app_mode=POENAVI_MODE):
         super().__init__(parent)
         self.theme = theme = theme or resolve_app_theme(POENAVI_THEME)
         self.setWindowFlags(_with_optional_always_on_top(Qt.Window | Qt.FramelessWindowHint, parent))
@@ -70,10 +72,16 @@ class MemoDialog(QDialog):
 
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(22, 22)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {theme_color('muted_text', '#888')}; border: none; font-size: {theme_font_size(14)}px; }}
-            QPushButton:hover {{ color: {theme_color('danger', '#ff6666')}; }}
-        """)
+        if app_mode == POETORE_MODE:
+            close_btn.setAccessibleName("閉じる")
+            close_btn.setStyleSheet(icon_button_stylesheet(
+                border_width=0, content=f"font-size: {theme_font_size(14)}px;",
+            ))
+        else:
+            close_btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {theme_color('muted_text', '#888')}; border: none; font-size: {theme_font_size(14)}px; }}
+                QPushButton:hover {{ color: {theme_color('danger', '#ff6666')}; }}
+            """)
         close_btn.clicked.connect(self.close)
         title_layout.addWidget(close_btn)
         container_layout.addWidget(title_bar)
@@ -108,11 +116,15 @@ class MemoDialog(QDialog):
         reset_btn = QPushButton("✕")
         reset_btn.setFixedSize(18, 18)
         reset_btn.setToolTip("色をリセット")
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{ background: {theme_rgba('control', 40, 40, 40, 200)}; color: {theme_color('muted_text', '#888')};
-                border: 1px solid {theme.accent}; border-radius: 2px; font-size: {theme_font_size(10)}px; }}
-            QPushButton:hover {{ background: {theme_rgba('control', 80, 80, 80, 200)}; }}
-        """)
+        if app_mode == POETORE_MODE:
+            reset_btn.setAccessibleName(reset_btn.toolTip())
+            reset_btn.setStyleSheet(icon_button_stylesheet(content=f"font-size: {theme_font_size(10)}px;"))
+        else:
+            reset_btn.setStyleSheet(f"""
+                QPushButton {{ background: {theme_rgba('control', 40, 40, 40, 200)}; color: {theme_color('muted_text', '#888')};
+                    border: 1px solid {theme.accent}; border-radius: 2px; font-size: {theme_font_size(10)}px; }}
+                QPushButton:hover {{ background: {theme_rgba('control', 80, 80, 80, 200)}; }}
+            """)
         reset_btn.clicked.connect(self._reset_color)
         toolbar.addWidget(reset_btn)
         toolbar.addStretch()

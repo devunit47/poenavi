@@ -3,19 +3,11 @@
 import sys
 import threading
 import time
+from math import cos, radians, sin
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (
-    QAction,
-    QColor,
-    QIcon,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QPolygonF,
-)
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon, QPainterPath, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -31,7 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.ui.appearance import resolve_app_theme, theme_color, theme_font_size, theme_rgba
+from src.app_mode import POETORE_MODE
+from src.ui.appearance import resolve_app_theme, theme_color, theme_font_size
 from src.poetore.exchange_icon_cache import ExchangeIconCache
 from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import (
@@ -39,11 +32,12 @@ from src.poetore.exchange_rate_settings import (
     ensure_rate_pair_config,
 )
 from src.ui.app_theme import POETORE_THEME
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
 from src.ui.custom_command_settings import (
     custom_command_hotkeys,
     normalized_custom_commands,
 )
+from src.ui.toolbar_icons import finish_line_icon, line_icon_canvas
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.update.qt_controller import UpdateController
 from src.update.release_client import parse_version
@@ -72,61 +66,43 @@ UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
 
 
 def _icon_canvas():
-    scale = 2
-    pixmap = QPixmap(24 * scale, 24 * scale)
-    pixmap.setDevicePixelRatio(scale)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    return pixmap, painter
-
-
-def _finish_icon(pixmap, painter) -> QIcon:
-    painter.end()
-    return QIcon(pixmap)
+    return line_icon_canvas(resolve_app_theme(POETORE_THEME).muted_text)
 
 
 def _memo_icon() -> QIcon:
-    """Return a compact note page with a folded corner."""
+    """A note page with a folded corner."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    dark = QColor("#15201D")
-    page = QPainterPath(QPointF(5.0, 2.8))
-    page.lineTo(15.8, 2.8)
-    page.lineTo(20.0, 7.0)
-    page.lineTo(20.0, 21.0)
-    page.lineTo(5.0, 21.0)
+    page = QPainterPath(QPointF(5.5, 3.5))
+    page.lineTo(14.5, 3.5)
+    page.lineTo(18.5, 7.5)
+    page.lineTo(18.5, 20.5)
+    page.lineTo(5.5, 20.5)
     page.closeSubpath()
-    painter.setPen(QPen(accent, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(32, 72, 62))
+    page.moveTo(14.5, 3.5)
+    page.lineTo(14.5, 7.5)
+    page.lineTo(18.5, 7.5)
     painter.drawPath(page)
-    painter.drawLine(QPointF(15.8, 3.1), QPointF(15.8, 7.0))
-    painter.drawLine(QPointF(15.8, 7.0), QPointF(19.7, 7.0))
-    painter.setPen(QPen(dark, 1.5, Qt.SolidLine, Qt.RoundCap))
-    painter.drawLine(QPointF(8.0, 10.0), QPointF(16.8, 10.0))
-    painter.drawLine(QPointF(8.0, 14.0), QPointF(16.8, 14.0))
-    painter.drawLine(QPointF(8.0, 18.0), QPointF(14.0, 18.0))
-    return _finish_icon(pixmap, painter)
+    painter.drawLine(QPointF(8.5, 12.0), QPointF(15.5, 12.0))
+    painter.drawLine(QPointF(8.5, 16.0), QPointF(13.5, 16.0))
+    return finish_line_icon(pixmap, painter)
 
 
 def _heist_curio_icon() -> QIcon:
-    """Return the approved mint Heist settings icon."""
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "assets"
-        / "icons"
-        / "heist_curio_settings.png"
-    )
-    return QIcon(str(path))
+    """The curio's circular dial and latch."""
+    pixmap, painter = _icon_canvas()
+    painter.drawArc(QRectF(4.0, 3.5, 16.0, 15.0), 230 * 16, 320 * 16)
+    painter.drawEllipse(QPointF(12.0, 11.0), 4.6, 4.6)
+    painter.drawEllipse(QPointF(12.0, 11.0), 1.3, 1.3)
+    painter.drawPolygon(QPolygonF([
+        QPointF(4.3, 13.9), QPointF(7.6, 16.1),
+        QPointF(5.7, 19.3), QPointF(2.4, 17.1),
+    ]))
+    return finish_line_icon(pixmap, painter)
 
 
 def _expedition_icon() -> QIcon:
-    """Return the three-armed Expedition spiral emblem."""
+    """The Expedition spiral with two upper curls and one lower curl."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    dark = QColor("#15201D")
-
-    # Match the in-game emblem: two curls above and one curl below.
     painter.translate(0.0, 24.0)
     painter.scale(1.0, -1.0)
 
@@ -144,162 +120,76 @@ def _expedition_icon() -> QIcon:
         painter.translate(12.0, 12.0)
         painter.rotate(angle)
         painter.translate(-12.0, -12.0)
-        painter.setPen(
-            QPen(dark, 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        )
-        painter.drawPath(arm)
-        painter.setPen(
-            QPen(accent, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        )
         painter.drawPath(arm)
         painter.restore()
 
-    painter.setPen(QPen(dark, 0.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(accent)
-    painter.drawEllipse(QPointF(12.0, 12.0), 1.5, 1.5)
-    return _finish_icon(pixmap, painter)
+    painter.drawEllipse(QPointF(12.0, 12.0), 1.0, 1.0)
+    return finish_line_icon(pixmap, painter)
 
 
 def _abyss_desecration_icon() -> QIcon:
-    """Return the approved green stone-and-concentric-eye Abyss emblem."""
+    """An eye engraved in the Abyss stone."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    stone = QColor("#34423F")
-    edge = QColor("#82918B")
-    dark = QColor("#121A18")
-    slab = QPolygonF([
-        QPointF(4.0, 2.3), QPointF(19.7, 2.8), QPointF(21.8, 5.2),
-        QPointF(21.2, 19.7), QPointF(18.8, 21.8), QPointF(4.5, 21.1),
-        QPointF(2.4, 18.5), QPointF(2.9, 5.0),
-    ])
-    painter.setPen(QPen(edge, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(stone)
-    painter.drawPolygon(slab)
-    painter.setPen(QPen(dark, 0.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    for points in (
-        ((4.1, 6.0), (6.1, 6.8), (5.0, 8.2)),
-        ((17.8, 4.5), (16.8, 6.2), (19.1, 7.0)),
-        ((4.0, 16.8), (6.0, 16.1), (5.5, 19.0)),
-        ((18.9, 15.7), (17.1, 17.0), (18.3, 19.3)),
-    ):
-        path = QPainterPath(QPointF(*points[0]))
-        path.lineTo(QPointF(*points[1]))
-        path.lineTo(QPointF(*points[2]))
-        painter.drawPath(path)
-    center = QPointF(12.0, 12.0)
-    painter.setPen(QPen(dark, 2.8, Qt.SolidLine, Qt.RoundCap))
-    for angle in range(0, 360, 45):
-        painter.save()
-        painter.translate(center)
-        painter.rotate(angle)
-        painter.drawLine(QPointF(0.0, -8.1), QPointF(0.0, -6.4))
-        painter.restore()
-    painter.setPen(QPen(accent.darker(155), 1.5))
-    painter.setBrush(QColor("#1B2523"))
-    painter.drawEllipse(center, 7.0, 7.0)
-    painter.setPen(QPen(edge, 1.1))
-    painter.setBrush(QColor("#26312F"))
-    painter.drawEllipse(center, 4.7, 4.7)
-    painter.setPen(QPen(QColor("#161817"), 1.1))
-    painter.setBrush(QColor("#0C100F"))
-    painter.drawEllipse(center, 2.7, 2.7)
-    painter.setPen(QPen(QColor("#A8F5E1"), 0.9))
-    painter.setBrush(accent)
-    painter.drawEllipse(center, 1.45, 1.45)
-    return _finish_icon(pixmap, painter)
+    painter.drawPolygon(QPolygonF([
+        QPointF(6.0, 3.5), QPointF(18.0, 3.5), QPointF(20.5, 6.0),
+        QPointF(20.5, 18.0), QPointF(18.0, 20.5), QPointF(6.0, 20.5),
+        QPointF(3.5, 18.0), QPointF(3.5, 6.0),
+    ]))
+    eye = QPainterPath(QPointF(5.5, 12.0))
+    eye.quadTo(12.0, 4.8, 18.5, 12.0)
+    eye.quadTo(12.0, 19.2, 5.5, 12.0)
+    painter.drawPath(eye)
+    painter.drawEllipse(QPointF(12.0, 12.0), 1.9, 1.9)
+    return finish_line_icon(pixmap, painter)
 
 
 def _image_manager_icon() -> QIcon:
-    """Return stacked picture cards to convey image management."""
+    """Stacked picture cards."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    painter.setPen(QPen(QColor(61, 143, 123), 1.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(24, 49, 43))
-    painter.drawRoundedRect(2.8, 3.2, 15.5, 14.5, 2.0, 2.0)
-    painter.setPen(QPen(accent, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(32, 72, 62))
-    painter.drawRoundedRect(5.5, 6.0, 15.5, 14.5, 2.0, 2.0)
-    painter.setBrush(accent)
-    painter.setPen(Qt.NoPen)
-    painter.drawEllipse(QPointF(16.4, 10.4), 1.7, 1.7)
-    mountain = QPainterPath(QPointF(7.4, 18.4))
-    mountain.lineTo(11.5, 13.2)
-    mountain.lineTo(14.2, 16.1)
-    mountain.lineTo(16.1, 14.3)
-    mountain.lineTo(19.2, 18.4)
-    mountain.closeSubpath()
-    painter.setBrush(QColor(52, 166, 137))
+    back = QPainterPath(QPointF(3.5, 15.5))
+    back.lineTo(3.5, 5.5)
+    back.quadTo(3.5, 3.5, 5.5, 3.5)
+    back.lineTo(16.5, 3.5)
+    painter.drawPath(back)
+    painter.drawRoundedRect(QRectF(7.0, 7.0, 13.5, 13.5), 1.6, 1.6)
+    painter.drawEllipse(QPointF(16.5, 11.2), 1.0, 1.0)
+    mountain = QPainterPath(QPointF(7.4, 18.5))
+    mountain.lineTo(12.0, 13.8)
+    mountain.lineTo(17.1, 18.5)
     painter.drawPath(mountain)
-    return _finish_icon(pixmap, painter)
-
-
-def _draw_gear(
-    painter,
-    center: QPointF,
-    radius=3.5,
-    tooth_length=1.6,
-    stroke_color=None,
-    fill_color=None,
-):
-    dark = QColor("#15201D")
-    stroke = QColor(stroke_color) if stroke_color else dark
-    fill = QColor(fill_color) if fill_color else QColor(resolve_app_theme(POETORE_THEME).accent)
-    cx, cy = center.x(), center.y()
-    painter.setPen(QPen(stroke, 2.6, Qt.SolidLine, Qt.RoundCap))
-    diagonal = tooth_length * 0.72
-    for start, end in (
-        ((cx, cy - radius - tooth_length), (cx, cy - radius)),
-        ((cx, cy + radius), (cx, cy + radius + tooth_length)),
-        ((cx - radius - tooth_length, cy), (cx - radius, cy)),
-        ((cx + radius, cy), (cx + radius + tooth_length, cy)),
-        ((cx - radius - diagonal, cy - radius - diagonal), (cx - radius * 0.72, cy - radius * 0.72)),
-        ((cx + radius * 0.72, cy + radius * 0.72), (cx + radius + diagonal, cy + radius + diagonal)),
-        ((cx - radius - diagonal, cy + radius + diagonal), (cx - radius * 0.72, cy + radius * 0.72)),
-        ((cx + radius * 0.72, cy - radius * 0.72), (cx + radius + diagonal, cy - radius - diagonal)),
-    ):
-        painter.drawLine(QPointF(*start), QPointF(*end))
-    painter.setPen(QPen(stroke, 1.2))
-    painter.setBrush(fill)
-    painter.drawEllipse(center, radius, radius)
-    painter.setBrush(dark)
-    painter.drawEllipse(center, radius * 0.36, radius * 0.36)
+    return finish_line_icon(pixmap, painter)
 
 
 def _settings_icon() -> QIcon:
-    """Return a standalone gear matching the map-management overlay."""
+    """A six-tooth gear."""
     pixmap, painter = _icon_canvas()
-    _draw_gear(
-        painter,
-        QPointF(12.0, 12.0),
-        radius=5.5,
-        tooth_length=2.4,
-        stroke_color=resolve_app_theme(POETORE_THEME).accent,
-        fill_color="#20483E",
-    )
-    return _finish_icon(pixmap, painter)
+    tooth = ((-28, 6.6), (-13, 6.6), (-10, 8.8), (10, 8.8), (13, 6.6), (28, 6.6))
+    outline = QPolygonF()
+    for center_angle in range(-90, 270, 60):
+        for offset, radius in tooth:
+            angle = radians(center_angle + offset)
+            outline.append(QPointF(12.0 + radius * cos(angle), 12.0 + radius * sin(angle)))
+    painter.drawPolygon(outline)
+    painter.drawEllipse(QPointF(12.0, 12.0), 2.6, 2.6)
+    return finish_line_icon(pixmap, painter)
 
 
 def _map_mod_manager_icon() -> QIcon:
-    """Return a compact folded-map icon with a settings gear overlay."""
+    """A folded map with a marked location."""
     pixmap, painter = _icon_canvas()
-
-    map_path = QPainterPath(QPointF(2.5, 4.5))
-    map_path.lineTo(8.5, 2.5)
-    map_path.lineTo(14.5, 4.5)
-    map_path.lineTo(20.5, 2.5)
-    map_path.lineTo(20.5, 16.5)
-    map_path.lineTo(14.5, 18.5)
-    map_path.lineTo(8.5, 16.5)
-    map_path.lineTo(2.5, 18.5)
-    map_path.closeSubpath()
-    painter.setPen(QPen(QColor(resolve_app_theme(POETORE_THEME).accent), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(32, 72, 62))
-    painter.drawPath(map_path)
-    painter.drawLine(QPointF(8.5, 2.8), QPointF(8.5, 16.2))
-    painter.drawLine(QPointF(14.5, 4.8), QPointF(14.5, 18.0))
-
-    _draw_gear(painter, QPointF(17.5, 17.0))
-    return _finish_icon(pixmap, painter)
+    outline = QPainterPath(QPointF(13.0, 19.4))
+    outline.lineTo(8.5, 17.8)
+    outline.lineTo(3.5, 19.5)
+    outline.lineTo(3.5, 5.4)
+    outline.lineTo(8.5, 3.7)
+    outline.lineTo(14.0, 5.5)
+    outline.lineTo(20.5, 3.7)
+    outline.lineTo(20.5, 12.0)
+    painter.drawPath(outline)
+    painter.drawLine(QPointF(8.5, 3.7), QPointF(8.5, 17.8))
+    painter.drawLine(QPointF(14.0, 5.5), QPointF(14.0, 12.5))
+    painter.drawEllipse(QPointF(17.9, 17.4), 2.7, 2.7)
+    return finish_line_icon(pixmap, painter)
 
 
 class _LeagueSignals(QObject):
@@ -336,51 +226,27 @@ class _PoetoreModeTitleBar(QWidget):
             layout.addWidget(label)
         layout.addStretch()
 
-        button_style = f"""
-            QPushButton {{
-                background: transparent;
-                color: {resolve_app_theme(POETORE_THEME).text};
-                border: none;
-                font-size: {theme_font_size(14)}px;
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {theme_rgba('accent_soft', 101, 255, 202, 0.20)};
-                border-radius: 3px;
-            }}
-        """
-        close_style = f"""
-            QPushButton {{
-                background: transparent;
-                color: {resolve_app_theme(POETORE_THEME).text};
-                border: none;
-                font-size: {theme_font_size(14)}px;
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {theme_rgba('accent_soft', 255, 60, 60, 0.8)};
-                border-radius: 3px;
-                color: {theme_color('text', '#ffffff')};
-            }}
-        """
+        button_style = icon_button_stylesheet(
+            border_width=0, content=f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;",
+        )
 
         self.minimize_button = QPushButton("─")
         self.minimize_button.setObjectName("poetoreMinimizeButton")
-        self.minimize_button.setFocusPolicy(Qt.NoFocus)
+        self.minimize_button.setFocusPolicy(Qt.TabFocus)
         self.minimize_button.setFixedSize(32, 24)
         self.minimize_button.setStyleSheet(button_style)
         self.minimize_button.setToolTip("最小化")
+        self.minimize_button.setAccessibleName(self.minimize_button.toolTip())
         self.minimize_button.clicked.connect(window.minimize_to_tray)
         layout.addWidget(self.minimize_button)
 
         self.close_button = QPushButton("×")
         self.close_button.setObjectName("poetoreCloseButton")
-        self.close_button.setFocusPolicy(Qt.NoFocus)
+        self.close_button.setFocusPolicy(Qt.TabFocus)
         self.close_button.setFixedSize(32, 24)
-        self.close_button.setStyleSheet(close_style)
+        self.close_button.setStyleSheet(button_style)
         self.close_button.setToolTip("閉じる")
+        self.close_button.setAccessibleName(self.close_button.toolTip())
         self.close_button.clicked.connect(window.close)
         layout.addWidget(self.close_button)
         equalize_button_sizes((self.minimize_button, self.close_button), minimum_width=32)
@@ -873,11 +739,11 @@ class PoetoreModeWindow(QMainWindow):
 
     def _header_button(self, text, tooltip):
         button = QPushButton(text)
-        button.setFocusPolicy(Qt.NoFocus)
+        button.setFocusPolicy(Qt.TabFocus)
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
         button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
-        button.setStyleSheet("padding: 0;")
+        button.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         return button
 
     def toggle_focus_mode(self):
@@ -1358,7 +1224,7 @@ class PoetoreModeWindow(QMainWindow):
         if self._map_check_window is None:
             map_config = dict(self.config.get("map_check", {}))
             map_config["_font_size"] = self.config.get("poetore", {}).get("result_font_size", "medium")
-            self._map_check_window = MapCheckWindow(map_config, self)
+            self._map_check_window = MapCheckWindow(map_config, self, app_mode=POETORE_MODE)
             self._map_check_window.config_changed.connect(
                 self._save_map_check_config
             )
@@ -1415,7 +1281,9 @@ class PoetoreModeWindow(QMainWindow):
         poe_version = self.poe_version
         filename = "notes_poe2.json" if poe_version == POE2 else "notes_poe1.json"
         notes_path = str(ConfigManager.get_user_data_path(filename))
-        self._memo_dialog = MemoDialog(self, notes_path=notes_path, theme=resolve_app_theme(POETORE_THEME))
+        self._memo_dialog = MemoDialog(
+            self, notes_path=notes_path, theme=resolve_app_theme(POETORE_THEME), app_mode=POETORE_MODE,
+        )
         self._memo_dialog.apply_opacity(
             self.config.get("window_opacity", 100),
             self.config.get("text_opacity", 100),
@@ -1729,7 +1597,8 @@ class PoetoreModeWindow(QMainWindow):
 
         if self._cheat_sheet_overlay is None:
             overlay = CheatSheetOverlay(
-                self.config.get("cheat_sheets", {}), self, theme=resolve_app_theme(POETORE_THEME)
+                self.config.get("cheat_sheets", {}), self,
+                theme=resolve_app_theme(POETORE_THEME), app_mode=POETORE_MODE,
             )
             overlay.config_changed.connect(self._save_cheat_sheet_config)
             overlay.manage_requested.connect(self.open_cheat_sheet_manager)

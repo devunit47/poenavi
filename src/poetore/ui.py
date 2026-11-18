@@ -30,7 +30,7 @@ from src.ui.appearance import (
     theme_font_family, theme_font_size, theme_rgba,
 )
 from src.ui.styles import Styles
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
 from src.ui.custom_exchange_rate_panel import ElidedLabel
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.utils.window_focus import (
@@ -1080,6 +1080,8 @@ class _PoetoreTitleBar(QWidget):
         window.league_popup_button = QPushButton("▼", self._expanded_controls)
         window.league_popup_button.setObjectName("leaguePopupButton")
         window.league_popup_button.setToolTip("リーグ一覧を開く")
+        window.league_popup_button.setAccessibleName(window.league_popup_button.toolTip())
+        window.league_popup_button.setStyleSheet(icon_button_stylesheet(border_width=0))
         window.league_popup_button.setFixedSize(28, 28)
         window.league_popup_button.clicked.connect(window.trade_league_combo.showPopup)
         controls_layout.addWidget(window.league_popup_button)
@@ -1095,6 +1097,8 @@ class _PoetoreTitleBar(QWidget):
         controls_layout.addSpacing(4)
         window.poetore_close_button = QPushButton("×", self._expanded_controls)
         window.poetore_close_button.setToolTip("閉じる")
+        window.poetore_close_button.setAccessibleName(window.poetore_close_button.toolTip())
+        window.poetore_close_button.setStyleSheet(icon_button_stylesheet(border_width=0))
         window.poetore_close_button.setFixedSize(28, 28)
         window.poetore_close_button.clicked.connect(window._close_and_return_to_poe)
         controls_layout.addWidget(window.poetore_close_button)
@@ -2325,10 +2329,8 @@ class PoetoreWindow(QWidget):
             QMenu#divineRateMenu::item {{ padding: 4px 18px 4px 10px; }}
             QMenu#divineRateMenu::item:selected {{ background: {theme_rgba('accent_soft', 101, 255, 202, 45)}; }}
             QPushButton#leaguePopupButton {{
-                color: {theme_color('text', '#D8E3DF')};
                 padding: 0;
                 font-size: 11px;
-                border: none;
             }}
             QPushButton#leagueRefreshButton {{
                 color: {theme_color('text', '#D8E3DF')};

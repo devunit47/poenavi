@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.ui.appearance import (
     resolve_app_theme,
     resolve_dialog_theme,
@@ -51,6 +52,7 @@ from src.ui.dialog_theme import (
     POETORE_DIALOG_THEME,
     DialogTheme,
     apply_dialog_theme,
+    icon_button_stylesheet,
 )
 from src.ui.toolbar_icons import image_manager_icon
 from src.utils.config_manager import ConfigManager
@@ -371,7 +373,7 @@ class CheatSheetOverlay(QWidget):
     config_changed = Signal(dict)
     manage_requested = Signal()
 
-    def __init__(self, config: dict, parent=None, theme=None):
+    def __init__(self, config: dict, parent=None, theme=None, *, app_mode=POENAVI_MODE):
         super().__init__(None)
         theme = theme or resolve_app_theme(POENAVI_THEME)
         self.owner = parent
@@ -407,6 +409,9 @@ class CheatSheetOverlay(QWidget):
         title_row.addWidget(manage)
         close = QPushButton("×")
         close.setFixedWidth(34)
+        if app_mode == POETORE_MODE:
+            close.setAccessibleName("閉じる")
+            close.setStyleSheet(icon_button_stylesheet())
         close.clicked.connect(self.hide_and_save)
         title_row.addWidget(close)
         layout.addLayout(title_row)

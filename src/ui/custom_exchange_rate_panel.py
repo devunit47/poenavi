@@ -26,7 +26,7 @@ from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import ExchangeRatePairStore
 from src.poetore.official_exchange import OfficialExchangeShadowService
 from src.ui.app_theme import POETORE_THEME
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
 from src.ui.toolbar_icons import list_add_icon, trash_icon
 
 RATE_CHECK_INTERVAL_MSEC = 10 * 60 * 1000
@@ -228,13 +228,6 @@ class CustomExchangeRatePanel(QWidget):
                 border: 1px solid {theme_color('border', '#66706C')};
                 padding: 5px;
             }}
-            QPushButton#customRateManageButton {{ padding: 0; }}
-            QPushButton#customRateManageButton:focus {{ border-color: {theme.accent}; }}
-            QPushButton[rateDelete="true"] {{ padding: 0; background: transparent; border: 1px solid transparent; }}
-            QPushButton[rateDelete="true"]:hover, QPushButton[rateDelete="true"]:focus {{
-                background: {theme_color('control', '#25332F')}; border-color: {theme.accent};
-            }}
-            QPushButton[rateDelete="true"]:pressed {{ background: {theme_color('accent_soft', '#276B5A')}; }}
         """)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -249,7 +242,8 @@ class CustomExchangeRatePanel(QWidget):
         title_row.addStretch()
         self.manage_button = QPushButton()
         self.manage_button.setObjectName("customRateManageButton")
-        self.manage_button.setIcon(list_add_icon(theme.accent))
+        self.manage_button.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
+        self.manage_button.setIcon(list_add_icon(theme.muted_text))
         self.manage_button.setIconSize(QSize(22, 22))
         self.manage_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
         self.manage_button.setAccessibleName("交換レートの表示を管理")
@@ -444,7 +438,8 @@ class CustomExchangeRatePanel(QWidget):
         delete = _RateDeleteButton(row)
         delete.setObjectName(f"customRateDelete{index}")
         delete.setProperty("rateDelete", True)
-        delete.setIcon(trash_icon(resolve_app_theme(POETORE_THEME).text))
+        delete.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
+        delete.setIcon(trash_icon(resolve_app_theme(POETORE_THEME).muted_text))
         delete.setIconSize(QSize(20, 20))
         delete.setFixedSize(32, 32)
         delete.setToolTip("このレートを削除")

@@ -46,6 +46,7 @@ $testFiles = @(
     "tests/test_poetore_poe2_trade.py",
     "tests/test_poetore_settings_dialog.py",
     "tests/test_poetore_trade.py",
+    "tests/test_poetore_trade_concurrency.py",
     "tests/test_poetore_ui.py",
     "tests/test_poetore_window_position.py",
     "tests/test_build_poetore_poe2_indexes.py",

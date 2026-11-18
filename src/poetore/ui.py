@@ -2243,6 +2243,7 @@ class PoetoreWindow(QWidget):
         self._search_cancel.set()
         self._search_cancel = threading.Event()
         self._search_generation += 1
+        self._clear_pending_trade_conditions()
 
     def _mark_search_dirty(self, *_args):
         if not self._has_searched_current_item or getattr(self, "_parsed_item", None) is None:
@@ -5499,11 +5500,14 @@ class PoetoreWindow(QWidget):
 
     def _clear_pending_trade_conditions(self):
         if self._pending_trade_conditions is not None:
+            _, cancel = self._pending_trade_conditions
+            cancel.set()
             self._pending_trade_conditions = None
             self._obs_content.setEnabled(True)
 
     def _apply_prepared_trade_conditions(self, apply, result):
-        if self._pending_trade_conditions is apply:
+        pending = self._pending_trade_conditions
+        if pending is not None and pending[0] is apply:
             self._clear_pending_trade_conditions()
             apply(result)
 
@@ -5571,6 +5575,7 @@ class PoetoreWindow(QWidget):
                         prepared_poe1_conditions = prepare()
                 except TradeCatalogRequired:
                     generation = self._search_generation
+                    cancel = threading.Event()
 
                     def apply(result):
                         if (generation != self._search_generation
@@ -5594,7 +5599,8 @@ class PoetoreWindow(QWidget):
                         if search_after_parse:
                             self.search_current_item()
 
-                    self._pending_trade_conditions = apply
+                    self._clear_pending_trade_conditions()
+                    self._pending_trade_conditions = (apply, cancel)
                     self._obs_content.setEnabled(False)
                     if self._poe_ninja_item_key and self._poe_ninja_item_key[0] != item.raw_text:
                         self._poe_ninja_item_key = None
@@ -5606,7 +5612,10 @@ class PoetoreWindow(QWidget):
 
                     def run():
                         try:
-                            result = prepare()
+                            with trade_search_scope(cancel):
+                                result = prepare()
+                        except TradeSearchCancelled:
+                            return
                         except Exception as exc:
                             result = exc
                         self._trade_signals.conditions_ready.emit(apply, result)

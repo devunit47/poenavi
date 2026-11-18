@@ -4918,7 +4918,9 @@ def test_trade2_rate_limit_is_separate_from_poe1_trade_limit():
     _trade_rate_limiter.reset()
     _trade2_rate_limiter.reset()
     try:
+        _trade_rate_limiter.adjust("search", {"X-Rate-Limit-Policy": "trade-search"})
         _trade2_rate_limiter.adjust("search", {
+            "X-Rate-Limit-Policy": "trade2-search",
             "X-Rate-Limit-Rules": "trade2-search-request-limit",
             "X-Rate-Limit-trade2-search-request-limit": "1:10:60",
             "X-Rate-Limit-trade2-search-request-limit-State": "1:10:0",

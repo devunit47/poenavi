@@ -24,6 +24,136 @@ def response(payload=None, *, status=200, headers=None):
     return SimpleNamespace(status=status, headers=headers or {}, data=json.dumps(payload or {}).encode())
 
 
+def ip_quota(maximum, active, *, policy="shared"):
+    headers = {"X-Rate-Limit-Ip": f"{maximum}:10:0", "X-Rate-Limit-Ip-State": f"{active}:10:0"}
+    if policy is not None:
+        headers["X-Rate-Limit-Policy"] = policy
+    return headers
+
+
+@pytest.mark.parametrize("route_known", [False, True])
+def test_unnamed_quota_blocks_other_routes_across_games(monkeypatch, route_known):
+    now = 100.0
+    search = f"{trade.API_ROOT}/search/Standard"
+    fetch = "https://www.pathofexile.com/api/trade2/fetch/old"
+    sent = []
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def request(_method, url, **_kwargs):
+        sent.append((url, now))
+        if url == search:
+            return response(headers={
+                **ip_quota(20, 1, policy=None),
+                "X-Rate-Limit-Account": "1:10:0",
+                "X-Rate-Limit-Account-State": "1:10:0",
+            })
+        return response()
+
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(trade._trade_http_pool, "request", request)
+    if route_known:
+        trade._trade2_rate_limiter.adjust("fetch", ip_quota(20, 0, policy="poe2-fetch"))
+    trade._request_json(search, {})
+    assert trade._trade2_rate_limiter.estimate_wait("fetch") == 12.0
+    trade._request_json(fetch)
+    assert sent == [(search, 100.0), (fetch, 112.0)]
+    assert trade._trade_rate_limiter.estimate_wait("search") == 12.0
+
+
+def test_unnamed_rule_counts_other_responses_received_during_discovery(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    for endpoint in ("fetch", "search"):
+        limiter.adjust(endpoint, ip_quota(10, 0, policy=endpoint))
+    discovering = limiter.try_reserve("fetch")
+    other = limiter.try_reserve("search")
+    now = 101.0
+    limiter.adjust("search", ip_quota(10, 1, policy="search"), reservation=other)
+    now = 102.0
+    limiter.adjust("fetch", ip_quota(2, 1, policy=None), reservation=discovering)
+    assert limiter.try_reserve("search") == 11.0
+
+
+def test_overlapping_reports_do_not_charge_completed_reservations_twice(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    for endpoint in ("fetch", "search"):
+        limiter.adjust(endpoint, ip_quota(5, 0))
+    pending = [limiter.try_reserve("fetch") for _ in range(3)]
+    assert all(isinstance(reservation, trade._TradeReservation) for reservation in pending)
+
+    now = 101.0
+    limiter.adjust("fetch", ip_quota(5, 3), reservation=pending[0])
+    # Until there is a report for every request, they could have reached the
+    # server after the first snapshot.
+    assert limiter.try_reserve("search") == 12.0
+    now = 102.0
+    for reservation in pending[1:]:
+        limiter.adjust("fetch", ip_quota(5, 3), reservation=reservation)
+    assert limiter.estimate_wait("search") == 0
+    latest = [limiter.try_reserve("search") for _ in range(2)]
+    assert all(isinstance(reservation, trade._TradeReservation) for reservation in latest)
+    assert limiter.try_reserve("search") > 0
+
+
+@pytest.mark.parametrize("other_active", [None, 1])
+def test_overlapping_lower_or_missing_state_does_not_free_quota(monkeypatch, other_active):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    limiter.adjust("fetch", ip_quota(4, 0))
+    first, second = [limiter.try_reserve("fetch") for _ in range(2)]
+    limiter.adjust("fetch", ip_quota(4, 3), reservation=first)
+    now = 101.0
+    headers = ip_quota(4, other_active) if other_active is not None else {}
+    limiter.adjust("fetch", headers, reservation=second)
+    if other_active is None:
+        # The headerless request could have reached the server after the 3/4 snapshot.
+        assert limiter.try_reserve("fetch") == 11.0
+    else:
+        # The lower snapshot could be older even when it arrives last.
+        assert isinstance(limiter.try_reserve("fetch"), trade._TradeReservation)
+        assert limiter.try_reserve("fetch") == 11.0
+
+
+@pytest.mark.parametrize("route_known", [False, True])
+def test_cancellation_after_reservation_returns_unsent_slot(monkeypatch, route_known):
+    now = 100.0
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    limiter = trade._trade_rate_limiter
+    if route_known:
+        limiter.adjust("fetch", ip_quota(1, 0))
+    reserve = limiter.try_reserve
+    cancel = threading.Event()
+    slot_returned = limiter._traffic.response_received
+    sent = []
+
+    def reserve_then_cancel(endpoint):
+        result = reserve(endpoint)
+        assert isinstance(result, trade._TradeReservation)
+        cancel.set()
+        return result
+
+    def request(_method, url, **_kwargs):
+        sent.append(url)
+        return response(headers=ip_quota(1, 1))
+
+    monkeypatch.setattr(trade._trade_http_pool, "request", request)
+    monkeypatch.setattr(limiter, "try_reserve", reserve_then_cancel)
+    with trade.trade_search_scope(cancel), pytest.raises(trade.TradeSearchCancelled):
+        trade._request_json(f"{trade.API_ROOT}/fetch/obsolete")
+    assert slot_returned.is_set()
+    monkeypatch.setattr(limiter, "try_reserve", reserve)
+    latest = f"{trade.API_ROOT}/fetch/current"
+    trade._request_json(latest)
+    assert sent == [latest]
+
+
 @pytest.mark.parametrize("shared_policy", [False, True])
 def test_new_search_overlaps_inflight_fetch_with_available_quota(monkeypatch, shared_policy):
     root = trade.API_ROOT
@@ -175,6 +305,28 @@ def test_first_paired_catalog_lookup_reloads_both_independently_cached_locales(m
         f"{trade.API_ROOT}/data/items", f"{trade.JP_API_ROOT}/data/items",
         f"{trade.JP_API_ROOT}/data/items", f"{trade.API_ROOT}/data/items",
     ]
+
+
+def test_item_without_mods_preserves_the_warm_stat_index(monkeypatch):
+    from src.poetore.parser import parse_item_text
+
+    entries = ({"type": "explicit", "id": "explicit.stat_3299347043", "text": "最大ライフ +#"},)
+    monkeypatch.setattr(trade, "_stat_entries_cache", entries)
+    monkeypatch.setattr(trade, "_stat_entry_indexes_cache", None)
+    trade._trade_stat_entry_indexes(entries)
+    warm_index = trade._stat_entry_indexes_cache
+
+    currency = parse_item_text("Item Class: Stackable Currency\nRarity: Currency\nChaos Orb\n")
+    trade.resolve_trade_stat_filters(currency)
+    assert trade._stat_entry_indexes_cache is warm_index
+
+    armour = parse_item_text(
+        "Item Class: Helmets\nRarity: Rare\nDread Visage\nLeather Cap\n"
+        "--------\nItem Level: 68\n--------\n+25 to maximum Life\n"
+    )
+    assert armour.modifiers
+    trade.resolve_trade_stat_filters(armour)
+    assert trade._stat_entry_indexes_cache is warm_index
 
 
 def test_aligned_catalog_reader_keeps_both_locales_across_refresh(monkeypatch):

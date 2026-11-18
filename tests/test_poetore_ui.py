@@ -1091,6 +1091,59 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, mon
     assert len(calls) == 3
 
 
+def test_poe1_new_capture_cancels_next_catalog_request(qtbot, monkeypatch):
+    from src.poetore import trade
+
+    clipboard = iter((
+        "Item Class: Helmets\nRarity: Unique\nゴールドリム\n革の帽子\n"
+        "--------\nItem Level: 68\n",
+        "Item Class: Stackable Currency\nRarity: Currency\nChaos Orb\n",
+    ))
+    window = PoetoreWindow(app_config={"poe_version": POE1})
+    qtbot.addWidget(window)
+    monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
+    monkeypatch.setattr(window, "show_at_context", Mock())
+    monkeypatch.setattr(window, "_queue_poe_ninja_price", Mock())
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", lambda _: next(clipboard))
+    japanese_started, release_japanese, latest_started = (threading.Event() for _ in range(3))
+    calls = []
+    workers = []
+
+    def catalog(url):
+        calls.append(url)
+        if url.startswith(trade.JP_API_ROOT):
+            workers.append(threading.current_thread())
+            japanese_started.set()
+            assert release_japanese.wait(3)
+            name, base = "ゴールドリム", "革の帽子"
+        else:
+            name, base = "Goldrim", "Leather Cap"
+        return {"result": [{"id": "armour", "entries": [
+            {"type": base}, {"type": base, "name": name, "flags": {"unique": True}},
+        ]}]}, {}
+
+    def search(item, *_args, **_kwargs):
+        assert item.name == "Chaos Orb"
+        latest_started.set()
+        return PriceResult("Standard", "latest", 0, ())
+
+    monkeypatch.setattr(trade, "_request_json", catalog)
+    monkeypatch.setattr("src.poetore.ui.search_prices", search)
+    window._capture_item_copy()
+    try:
+        assert japanese_started.wait(1)
+        window._capture_item_copy()
+        assert latest_started.wait(1)
+    finally:
+        release_japanese.set()
+        for worker in workers:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+    assert calls == [f"{trade.JP_API_ROOT}/data/items"]
+    qtbot.waitUntil(window.price_button.isEnabled)
+    assert window._pending_trade_conditions is None
+
+
 @pytest.mark.parametrize("failure", ["invalid_items", "unexpected"])
 def test_poe1_condition_worker_reports_failure_and_enables_search(qtbot, monkeypatch, failure):
     from src.poetore import trade

@@ -407,27 +407,62 @@ class _RateLimitRule:
     borrowed_at: list[float] = field(default_factory=list)
     name: str = ""
     window_padding: float | None = None
+    # Each report covers requests up to its server-side snapshot. Overlapping
+    # reports can arrive out of order, so keep every possibly latest report.
+    reports: list[tuple[float, int]] = field(default_factory=list)
+    report_sent_at: float = -math.inf
+    unreported_at: list[float] = field(default_factory=list)
 
-    def record_request(self, sent_at: float, received_at: float) -> None:
+    def record_request(self, sent_at: float, received_at: float, *, reported: bool = False) -> None:
         # Retain each advertised slot for at least one full server window
         # after receipt. The local fallback only paces send times.
         recorded_at = sent_at
         if self.window_padding is not None:
             recorded_at = max(sent_at, received_at - self.window_padding)
-        if self.borrowed_at:
-            recorded_at = max(recorded_at, self.borrowed_at[-1])
         self.borrowed_at.append(recorded_at)
+        if self.window_padding is not None and not reported and received_at >= self.report_sent_at:
+            self.unreported_at.append(received_at)
+
+    def record_report(self, sent_at: float, received_at: float, active: int) -> None:
+        self.report_sent_at = max(self.report_sent_at, sent_at)
+        self.reports[:] = [
+            report for report in self.reports if report[0] >= self.report_sent_at
+        ]
+        self.unreported_at[:] = [
+            value for value in self.unreported_at if value >= self.report_sent_at
+        ]
+        if received_at >= self.report_sent_at:
+            self.reports.append((received_at, active))
 
     def prune(self, now: float) -> None:
         threshold = now - self.window_seconds
         self.borrowed_at[:] = [value for value in self.borrowed_at if value > threshold]
+        self.reports[:] = [report for report in self.reports if report[0] > threshold]
+        self.unreported_at[:] = [value for value in self.unreported_at if value > threshold]
 
-    def wait_seconds(self, now: float, capacity: int) -> float:
+    def histories(self, now: float) -> Iterator[list[float]]:
         self.prune(now)
-        if len(self.borrowed_at) < capacity:
-            return 0.0
-        oldest = self.borrowed_at[len(self.borrowed_at) - capacity]
-        return max(0.0, oldest + self.window_seconds - now)
+        # A report already covers this response and any earlier responses at
+        # the server. Only requests without such a report need extra slots.
+        yield sorted(self.borrowed_at)
+        for received_at, active in self.reports:
+            yield sorted(self.unreported_at + [received_at] * min(active, self.maximum))
+
+    def wait_seconds(self, now: float, capacity: int, *, count: int = 1, start: float = 0.0) -> float:
+        wait = start
+        for history in self.histories(now):
+            if count == 1:
+                if len(history) >= capacity:
+                    wait = max(wait, history[-capacity] + self.window_seconds - now)
+                continue
+            elapsed = start
+            for _ in range(count):
+                history = [value for value in history if value + self.window_seconds > now + elapsed]
+                if len(history) >= capacity:
+                    elapsed = history[-capacity] + self.window_seconds - now
+                history.append(now + elapsed)
+            wait = max(wait, elapsed)
+        return wait
 
 
 @dataclass
@@ -437,7 +472,7 @@ class _TradeLimitState:
     in_flight: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _TradeReservation:
     sent_at: float
     state: _TradeLimitState | None
@@ -448,7 +483,9 @@ class _TradeRateLimitTraffic:
     # PoE1 and PoE2 can receive the same policy name.
     lock: threading.Lock = field(default_factory=threading.Lock)
     policies: dict[str, _TradeLimitState] = field(default_factory=dict)
-    in_flight: int = 0
+    unnamed_policies: dict[tuple[_TradeRateLimiter, str], _TradeLimitState] = field(default_factory=dict)
+    reservations: set[_TradeReservation] = field(default_factory=set)
+    recent_completions: list[tuple[_TradeReservation, float]] = field(default_factory=list)
     discovering: bool = False
     response_received: threading.Event = field(default_factory=threading.Event)
     unnamed_restriction: float = 0.0
@@ -468,6 +505,9 @@ class _TradeRateLimiter:
                 self._traffic.policies.pop(name, None)
             self._policy_names.clear()
             self._unmapped.clear()
+            for key in tuple(self._traffic.unnamed_policies):
+                if key[0] is self:
+                    del self._traffic.unnamed_policies[key]
             self._traffic.unnamed_restriction = 0.0
 
     def _policy(self, endpoint: str) -> _TradeLimitState | None:
@@ -482,36 +522,28 @@ class _TradeRateLimiter:
 
     def _possible_policies(
         self, endpoint: str, policy: _TradeLimitState | None,
-    ) -> tuple[_TradeLimitState, ...]:
-        if policy is not None:
-            return (policy,)
-        return (self._unmapped_state(endpoint), *self._traffic.policies.values())
+    ) -> Iterator[tuple[_TradeLimitState, int]]:
+        for state in self._traffic.unnamed_policies.values():
+            yield state, len(self._traffic.reservations)
+        if policy is None:
+            yield self._unmapped_state(endpoint), 0
+            for state in self._traffic.policies.values():
+                yield state, state.in_flight
+        else:
+            yield policy, policy.in_flight
 
     def estimate_wait(self, endpoint: str, count: int = 1) -> float:
         with self._traffic.lock:
             now = time.monotonic()
-            states = self._possible_policies(endpoint, self._policy(endpoint))
+            states = tuple(self._possible_policies(endpoint, self._policy(endpoint)))
             restriction = max(
                 0.0, self._traffic.unnamed_restriction - now,
-                *(state.restricted_until - now for state in states),
+                *(state.restricted_until - now for state, _ in states),
             )
             wait = restriction
-            for state in states:
+            for state, _ in states:
                 for rule in state.rules:
-                    if count == 1:
-                        wait = max(wait, rule.wait_seconds(now, rule.maximum))
-                        continue
-                    rule.prune(now)
-                    simulated = list(rule.borrowed_at)
-                    elapsed = restriction
-                    for _ in range(count):
-                        simulated = [
-                            value for value in simulated if value + rule.window_seconds > now + elapsed
-                        ]
-                        if len(simulated) >= rule.maximum:
-                            elapsed = simulated[len(simulated) - rule.maximum] + rule.window_seconds - now
-                        simulated.append(now + elapsed)
-                    wait = max(wait, elapsed)
+                    wait = max(wait, rule.wait_seconds(now, rule.maximum, count=count, start=restriction))
             return wait
 
     def try_reserve(self, endpoint: str) -> _TradeReservation | threading.Event | float:
@@ -521,43 +553,73 @@ class _TradeRateLimiter:
             policy = self._policy(endpoint)
             # An unmapped endpoint can share any policy. Keep its request
             # exclusive until the response has been assigned to a policy.
-            if traffic.discovering or (policy is None and traffic.in_flight):
+            if traffic.discovering or (policy is None and traffic.reservations):
                 return traffic.response_received
             if policy is not None and not policy.rules and policy.in_flight:
                 return traffic.response_received
             now = time.monotonic()
             wait = max(0.0, traffic.unnamed_restriction - now)
-            for state in self._possible_policies(endpoint, policy):
+            for state, in_flight in self._possible_policies(endpoint, policy):
                 wait = max(wait, state.restricted_until - now)
                 for rule in state.rules:
-                    capacity = rule.maximum - state.in_flight
+                    capacity = rule.maximum - in_flight
                     if capacity <= 0:
                         return traffic.response_received
                     wait = max(wait, rule.wait_seconds(now, capacity))
             if wait > 0:
                 return wait
-            traffic.in_flight += 1
             if policy is None:
                 traffic.discovering = True
             else:
                 policy.in_flight += 1
-            return _TradeReservation(now, policy)
+            reservation = _TradeReservation(now, policy)
+            traffic.reservations.add(reservation)
+            return reservation
+
+    def release(self, reservation: _TradeReservation) -> None:
+        """Return a slot whose HTTP request was never started."""
+        with self._traffic.lock:
+            self._finish_reservation(reservation)
+
+    def _finish_reservation(self, reservation: _TradeReservation, received_at: float | None = None) -> None:
+        traffic = self._traffic
+        if reservation.state is None:
+            traffic.discovering = False
+        else:
+            reservation.state.in_flight -= 1
+        traffic.reservations.remove(reservation)
+        if traffic.reservations:
+            # A new unnamed rule can overlap requests that finished while its
+            # response was in transit. Retain those until discovery is safe.
+            first_sent = min(pending.sent_at for pending in traffic.reservations)
+            traffic.recent_completions[:] = [
+                completion for completion in traffic.recent_completions if completion[1] >= first_sent
+            ]
+            if received_at is not None and received_at >= first_sent:
+                traffic.recent_completions.append((reservation, received_at))
+        else:
+            traffic.recent_completions.clear()
+        traffic.response_received.set()
+        traffic.response_received = threading.Event()
 
     def adjust(
         self, endpoint: str, headers: object, *,
         reservation: _TradeReservation | None = None,
         received_at: float | None = None, retry_after: int = 0,
     ) -> None:
-        rule_names = str(headers.get("X-Rate-Limit-Rules", "")).strip()
+        rule_names = {
+            name.strip().casefold(): name.strip()
+            for name in str(headers.get("X-Rate-Limit-Rules", "")).split(",") if name.strip()
+        }
+        for name in ("Ip", "Account"):
+            if headers.get(f"X-Rate-Limit-{name}"):
+                rule_names[name.casefold()] = name
         policy_name = str(headers.get("X-Rate-Limit-Policy", "")).strip().casefold()
 
-        parsed: list[tuple[str, int, float, int]] = []
+        parsed: list[tuple[str, int, float, int | None]] = []
         restriction = retry_after
         window_padding = 2.0
-        for rule_name in rule_names.split(","):
-            rule_name = rule_name.strip()
-            if not rule_name:
-                continue
+        for name, rule_name in rule_names.items():
             limit_text = str(headers.get(f"X-Rate-Limit-{rule_name}", ""))
             state_text = str(headers.get(f"X-Rate-Limit-{rule_name}-State", ""))
             limits = [part.split(":") for part in limit_text.split(",")]
@@ -570,15 +632,20 @@ class _TradeRateLimiter:
                     maximum = int(parts[0])
                     # Awakenedの既定値と同じ2秒を通信状態ずれの余裕として加える。
                     window_seconds = float(parts[1]) + window_padding
-                    state_parts = states.get(parts[1], ())
-                    active = int(state_parts[0]) if state_parts else 0
-                    if len(state_parts) >= 3:
-                        restriction = max(restriction, int(state_parts[2]))
                 except (TypeError, ValueError):
                     continue
                 if maximum <= 0 or not math.isfinite(window_seconds) or window_seconds <= 0:
                     continue
-                parsed.append((rule_name.casefold(), maximum, window_seconds, max(0, active)))
+                state_parts = states.get(parts[1], ())
+                active = None
+                try:
+                    if state_parts:
+                        active = max(0, int(state_parts[0]))
+                    if len(state_parts) >= 3:
+                        restriction = max(restriction, int(state_parts[2]))
+                except ValueError:
+                    pass
+                parsed.append((name, maximum, window_seconds, active))
 
         traffic = self._traffic
         with traffic.lock:
@@ -586,15 +653,20 @@ class _TradeRateLimiter:
             if policy_name:
                 policy = traffic.policies.setdefault(policy_name, _TradeLimitState([]))
                 self._policy_names[endpoint] = policy_name
+                state = policy
+            elif parsed:
+                state = traffic.unnamed_policies.setdefault((self, endpoint), _TradeLimitState([]))
+                self._unmapped_state(endpoint).rules.clear()
             else:
-                policy = self._policy(endpoint)
-            state = policy if policy is not None else self._unmapped_state(endpoint)
+                state = self._policy(endpoint)
+                if state is None:
+                    state = self._unmapped_state(endpoint)
             if restriction:
                 until = now + restriction
-                if policy is None:
+                if not policy_name:
                     traffic.unnamed_restriction = max(traffic.unnamed_restriction, until)
                 else:
-                    policy.restricted_until = max(policy.restricted_until, until)
+                    state.restricted_until = max(state.restricted_until, until)
 
             if parsed:
                 synchronized = []
@@ -605,15 +677,17 @@ class _TradeRateLimiter:
                         current = _RateLimitRule(
                             maximum, window_seconds, name=name, window_padding=window_padding,
                         )
+                        if not policy_name and reservation is not None:
+                            for completed, completed_at in traffic.recent_completions:
+                                if completed_at >= reservation.sent_at:
+                                    current.record_request(completed.sent_at, completed_at)
                     current.maximum = maximum
                     current.prune(now)
                     if reservation is not None:
-                        current.record_request(reservation.sent_at, now)
-                    latest = max(now, current.borrowed_at[-1]) if current.borrowed_at else now
-                    if active > maximum:
-                        current.borrowed_at[:] = [latest] * maximum
-                    elif active > len(current.borrowed_at):
-                        current.borrowed_at.extend([latest] * (active - len(current.borrowed_at)))
+                        current.record_request(reservation.sent_at, now, reported=active is not None)
+                    if active is not None:
+                        sent_at = reservation.sent_at if reservation is not None else now
+                        current.record_report(sent_at, now, active)
                     synchronized.append(current)
                 state.rules = synchronized
             elif reservation is not None:
@@ -621,20 +695,18 @@ class _TradeRateLimiter:
 
             if reservation is not None:
                 previous = reservation.state
-                if previous is None:
-                    traffic.discovering = False
-                    if policy is None:
-                        # Without a policy header, the request might have
-                        # consumed a slot in any already learned policy.
-                        for candidate in traffic.policies.values():
+                if previous is None and not policy_name:
+                    # An unmapped request without a policy name may also
+                    # have used any named policy and its local pacing rule.
+                    for candidate in (*traffic.policies.values(), self._unmapped_state(endpoint)):
+                        if candidate is not state:
                             self._record_request(candidate, reservation, now)
-                else:
-                    previous.in_flight -= 1
-                    if previous is not state:
-                        self._record_request(previous, reservation, now)
-                traffic.in_flight -= 1
-                traffic.response_received.set()
-                traffic.response_received = threading.Event()
+                elif previous is not None and previous is not state:
+                    self._record_request(previous, reservation, now)
+                for candidate in traffic.unnamed_policies.values():
+                    if candidate is not state:
+                        self._record_request(candidate, reservation, now)
+                self._finish_reservation(reservation, now)
 
     @staticmethod
     def _record_request(state: _TradeLimitState, reservation: _TradeReservation, now: float) -> None:
@@ -1130,13 +1202,18 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
     # retry after clearing pooled connections, so HTTP errors and connect errors
     # are never duplicated.
     for attempt in range(1, TRADE_READ_TIMEOUT_MAX_ATTEMPTS + 1):
+        timeout = urllib3.Timeout(total=TRADE_REQUEST_TIMEOUT_SECONDS)
         reservation = _reserve_trade_send_slot(rate_limiter, rate_endpoint)
         started = time.monotonic()
         try:
+            _raise_if_trade_cancelled()
+        except TradeSearchCancelled:
+            if reservation is not None:
+                rate_limiter.release(reservation)
+            raise
+        try:
             response = _trade_http_pool.request(
-                method, url, body=data, headers=headers,
-                timeout=urllib3.Timeout(total=TRADE_REQUEST_TIMEOUT_SECONDS),
-                retries=False,
+                method, url, body=data, headers=headers, timeout=timeout, retries=False,
             )
         except BaseException as exc:
             received_at = time.monotonic()
@@ -2832,6 +2909,7 @@ def _trade_stat_entries() -> tuple[dict, ...]:
     _require_trade_catalog_worker()
     with _trade_catalog_lock:
         if _stat_entries_cache is None:
+            _raise_if_trade_cancelled()
             data, _ = _request_json(f"{JP_API_ROOT}/data/stats")
             _stat_entries_cache = tuple(
                 entry for group in data.get("result", ()) for entry in group.get("entries", ())
@@ -2842,6 +2920,8 @@ def _trade_stat_entries() -> tuple[dict, ...]:
 def _trade_stat_entry_indexes(entries: tuple[dict, ...]):
     """Index official stats once instead of scanning all 13k rows for every mod."""
     global _stat_entry_indexes_cache
+    if not entries:
+        return {}, {}
     if (
         _stat_entry_indexes_cache is not None
         and _stat_entry_indexes_cache[0] is entries
@@ -2874,6 +2954,7 @@ _GUARDIAN_MAP_IDENTITY_STAT_IDS = {
 
 
 def _load_trade_item_catalog(api_root: str) -> _TradeItemCatalog:
+    _raise_if_trade_cancelled()
     data, _ = _request_json(f"{api_root}/data/items")
     result = data.get("result") if isinstance(data, dict) else None
     invalid_catalog = "PoE Trade APIから不正なアイテムカタログを受信しました。"

@@ -5,12 +5,11 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
     QIcon,
-    QKeySequence,
     QPainter,
     QPainterPath,
     QPen,
@@ -25,6 +24,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -44,6 +44,7 @@ from src.ui.custom_command_settings import (
     custom_command_hotkeys,
     normalized_custom_commands,
 )
+from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.update.qt_controller import UpdateController
 from src.update.release_client import parse_version
 from src.utils.chat_command import send_chat_command
@@ -307,19 +308,32 @@ class _LeagueSignals(QObject):
 
 
 class _PoetoreModeTitleBar(QWidget):
-    """ぽえなび本体と同じ構成のドラッグ可能なタイトルバー。"""
+    """タイトルとウィンドウ操作を並べるドラッグ可能なタイトルバー。"""
 
-    def __init__(self, window):
+    def __init__(self, window, poe_version=POE1):
         super().__init__(window)
         self._window = window
         self._drag_offset = None
         self.setObjectName("poetoreModeTitleBar")
-        self.setFixedHeight(38)
+        self.setMinimumHeight(UI_METRICS.toolbar_size)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(UI_METRICS.control_gap, UI_METRICS.control_gap,
-                                  UI_METRICS.control_gap, 0)
+        layout.setContentsMargins(
+            UI_METRICS.page_margin, UI_METRICS.inline_gap,
+            UI_METRICS.control_gap, UI_METRICS.inline_gap,
+        )
         layout.setSpacing(UI_METRICS.inline_gap)
+        self.title_label = QLabel("ぽえとれ", self)
+        mode_name = "PoE2" if poe_version == POE2 else "PoE1"
+        self.mode_label = QLabel(f"（{mode_name}）", self)
+        accent = resolve_app_theme(POETORE_THEME).accent
+        for label, size in ((self.title_label, 18), (self.mode_label, 14)):
+            label.setStyleSheet(
+                f"color: {accent}; font-size: {theme_font_size(size)}px; font-weight: bold;"
+            )
+            label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            layout.addWidget(label)
         layout.addStretch()
 
         button_style = f"""
@@ -392,7 +406,11 @@ class _PoetoreModeTitleBar(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._drag_offset = None
+        if event.button() == Qt.LeftButton and self._drag_offset is not None:
+            self._drag_offset = None
+            self._window._refresh_screen_geometry()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
 
@@ -437,12 +455,19 @@ class PoetoreModeWindow(QMainWindow):
         self._league_signals = _LeagueSignals(self)
         self._league_signals.ready.connect(self._queue_rate_sync)
         self._league_signals.failed.connect(self._show_rate_error)
+        self._screen_watcher = WindowScreenWatcher(self)
+        self._screen_watcher.changed.connect(self._queue_screen_geometry)
+        self._screen_metrics = None
+        self._screen_geometry_timer = QTimer(self)
+        self._screen_geometry_timer.setSingleShot(True)
+        self._screen_geometry_timer.setInterval(SCREEN_CHANGE_DEBOUNCE_MS)
+        self._screen_geometry_timer.timeout.connect(self._refresh_screen_geometry)
 
         self.setWindowTitle("ぽえとれ")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(500, 300)
-        self.resize(558, 360)
+        self.setMinimumWidth(500)
+        self.resize(558, 300)
         self._build_ui()
         self._background_update_controller = UpdateController(self)
         self._background_update_controller.check_finished.connect(
@@ -459,8 +484,6 @@ class PoetoreModeWindow(QMainWindow):
         self._sync_update_button_from_config()
         self._update_check_timer.start()
         self._hideout_notification = None
-        self.focus_button.setText("隠れ家滞在通知\nOFF")
-        self._apply_rate_panel_height()
         self._build_tray_icon()
         self._apply_window_settings()
         QTimer.singleShot(0, self._apply_startup_position)
@@ -565,6 +588,21 @@ class PoetoreModeWindow(QMainWindow):
                 border-radius: 10px;
             }}
             QWidget#poetoreModeTitleBar {{ border: none; background: transparent; }}
+            QScrollArea#poetoreRateScroll, QWidget#poetoreRatePanel {{
+                background: transparent;
+            }}
+            QScrollArea#poetoreRateScroll QScrollBar:vertical {{
+                background: {theme_color('surface', '#15191B')};
+                width: {UI_METRICS.overlay_margin}px;
+                margin: 0;
+            }}
+            QScrollArea#poetoreRateScroll QScrollBar::handle:vertical {{
+                background: {resolve_app_theme(POETORE_THEME).muted_text};
+                min-height: {UI_METRICS.overlay_control_height}px;
+                border-radius: {UI_METRICS.inline_gap}px;
+            }}
+            QScrollArea#poetoreRateScroll QScrollBar::add-line:vertical,
+            QScrollArea#poetoreRateScroll QScrollBar::sub-line:vertical {{ height: 0; }}
             QFrame#rateCard {{
                 background: {resolve_app_theme(POETORE_THEME).panel};
                 border: 1px solid {theme_color('border', '#343B3E')};
@@ -586,7 +624,7 @@ class PoetoreModeWindow(QMainWindow):
                 color: {resolve_app_theme(POETORE_THEME).text};
             }}
             QPushButton#poetoreFocusButton {{
-                padding: 0;
+                padding: 0 {UI_METRICS.inline_gap}px;
                 font-size: {theme_font_size(11)}px;
                 text-align: center;
             }}
@@ -611,53 +649,33 @@ class PoetoreModeWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.title_bar = _PoetoreModeTitleBar(self)
+        self.title_bar = _PoetoreModeTitleBar(self, self.poe_version)
+        self.title_label = self.title_bar.title_label
+        self.mode_label = self.title_bar.mode_label
         root.addWidget(self.title_bar)
 
         body = QWidget()
         body.setObjectName("poetoreModeBody")
         body.setStyleSheet("QWidget#poetoreModeBody { border: none; background: transparent; }")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(UI_METRICS.page_margin, UI_METRICS.control_gap,
+        body_layout.setContentsMargins(UI_METRICS.page_margin, UI_METRICS.inline_gap,
                                       UI_METRICS.page_margin, UI_METRICS.page_margin)
-        body_layout.setSpacing(UI_METRICS.section_gap)
+        body_layout.setSpacing(UI_METRICS.panel_padding)
 
+        toolbar = QVBoxLayout()
+        toolbar.setSpacing(UI_METRICS.inline_gap)
         header = QHBoxLayout()
         header.setSpacing(UI_METRICS.inline_gap)
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(6)
-        title_style = (
-            f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(26)}px; font-weight: bold;"
-        )
-        self.title_label = QLabel("ぽえとれ")
-        self.title_label.setStyleSheet(title_style)
-        mode_name = "PoE2" if self.poe_version == POE2 else "PoE1"
-        self.mode_label = QLabel(f"（{mode_name}）")
-        self.mode_label.setStyleSheet(
-            f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(22)}px; font-weight: bold;"
-        )
-        self.mode_label.setMinimumWidth(self.mode_label.sizeHint().width())
-        title_row.addWidget(self.title_label)
-        title_row.addWidget(self.mode_label)
-        subtitle = QLabel("価格チェック・トレード支援")
-        subtitle.setStyleSheet(
-            f"color: {resolve_app_theme(POETORE_THEME).muted_text}; font-size: {theme_font_size(12)}px;"
-        )
-        title_box.addLayout(title_row)
-        title_box.addWidget(subtitle)
-        header.addLayout(title_box)
-        header.addStretch()
 
         self.focus_button = QPushButton("隠れ家滞在通知\nOFF")
         self.focus_button.setObjectName("poetoreFocusButton")
         self.focus_button.setFocusPolicy(Qt.NoFocus)
         self.focus_button.setToolTip("隠れ家滞在通知の集中モードを切り替える")
-        self.focus_button.setFixedSize(108, UI_METRICS.toolbar_size)
+        self.focus_button.setMinimumWidth(108)
+        self.focus_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.focus_button.clicked.connect(self.toggle_focus_mode)
         header.addWidget(self.focus_button)
+        header.addStretch()
 
         self.memo_button = self._header_button("", "共通メモを開く")
         self.memo_button.setIcon(_memo_icon())
@@ -725,7 +743,7 @@ class PoetoreModeWindow(QMainWindow):
         )
         for button in self.header_action_buttons:
             header.addWidget(button)
-        body_layout.addLayout(header)
+        toolbar.addLayout(header)
 
         self.focus_message_label = QLabel("")
         self.focus_message_label.setObjectName("focusMessageLabel")
@@ -734,7 +752,8 @@ class PoetoreModeWindow(QMainWindow):
         )
         self.focus_message_label.setWordWrap(True)
         self.focus_message_label.hide()
-        body_layout.addWidget(self.focus_message_label)
+        toolbar.addWidget(self.focus_message_label)
+        body_layout.addLayout(toolbar)
 
         from src.poetore.official_exchange import (
             default_official_exchange_shadow_service,
@@ -750,23 +769,30 @@ class PoetoreModeWindow(QMainWindow):
             value_cache=self._rate_value_cache,
             icon_cache=self._rate_icon_cache,
             on_manage=self.open_exchange_rate_management,
-            on_rows_changed=self._apply_rate_panel_height,
+            on_rows_changed=self._queue_rate_panel_height,
             refresh_callback=self.refresh_currency_rate,
         )
-        body_layout.addWidget(self.rate_panel)
+        self.rate_panel.setObjectName("poetoreRatePanel")
+        self._rate_scroll = self.rate_panel.scroll_area
+        self._rate_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        body_layout.addWidget(self.rate_panel, 1)
+        # Let Qt lay out the wrapping and scrolling containers at their current width.
+        for widget in (self, central, body, self._rate_scroll,
+                       self._rate_scroll.viewport(), self.rate_panel, self.rate_panel.card):
+            widget.setProperty("themeLayoutManaged", True)
         self.rate_status = self.rate_panel.status_label
         self.rate_refresh_button = self.rate_panel.refresh_button
         self.divine_rate_value = self.rate_panel.findChild(QLabel, "customRateValue0")
-        body_layout.addStretch()
 
-        self.capture_hint = QLabel()
-        self.capture_hint.setObjectName("poetoreCaptureHint")
-        self.capture_hint.setAlignment(Qt.AlignCenter)
-        self.capture_hint.setWordWrap(True)
-        self.capture_hint.setStyleSheet(
+        footer = QVBoxLayout()
+        footer.setSpacing(UI_METRICS.control_gap)
+        self.capture_warning = QLabel("価格チェックのホットキーが設定されていません。")
+        self.capture_warning.setObjectName("poetoreCaptureWarning")
+        self.capture_warning.setWordWrap(True)
+        self.capture_warning.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).muted_text}; font-size: {theme_font_size(12)}px;"
         )
-        body_layout.addWidget(self.capture_hint)
+        footer.addWidget(self.capture_warning)
 
         self.update_button = QPushButton()
         self.update_button.setObjectName("poetoreUpdateButton")
@@ -777,7 +803,8 @@ class PoetoreModeWindow(QMainWindow):
         )
         self.update_button.clicked.connect(self._check_for_updates)
         self.update_button.hide()
-        body_layout.addWidget(self.update_button)
+        footer.addWidget(self.update_button)
+        body_layout.addLayout(footer)
         root.addWidget(body, 1)
         self.setCentralWidget(central)
         equalize_button_sizes(
@@ -785,9 +812,36 @@ class PoetoreModeWindow(QMainWindow):
             minimum_height=UI_METRICS.toolbar_size,
             equal_width=False,
         )
-        equalize_button_sizes((self.rate_panel.manage_button, self.rate_panel.refresh_button),
-                              minimum_width=UI_METRICS.action_width)
-        self._update_capture_hint()
+        for button in self.header_action_buttons:
+            button.setFixedWidth(button.height())
+        self._update_capture_hotkey_warning()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The appearance fitter can enlarge controls as their font is polished.
+        QTimer.singleShot(0, self, self._refresh_screen_geometry)
+
+    def event(self, event):
+        if event.type() == QEvent.DevicePixelRatioChange and hasattr(self, "_screen_geometry_timer"):
+            self._queue_screen_geometry()
+        return super().event(event)
+
+    def _queue_screen_geometry(self):
+        self._screen_geometry_timer.start()
+
+    def _refresh_screen_geometry(self):
+        if self.title_bar._drag_offset is not None:
+            return  # Apply pending screen changes on release.
+        self._screen_geometry_timer.stop()
+        self._screen_watcher.update()
+        screen = self._screen_watcher.screen
+        metrics = None if screen is None else (
+            screen, screen.availableGeometry(), screen.logicalDotsPerInch(),
+            screen.physicalDotsPerInch(), self.devicePixelRatioF(),
+        )
+        keep_on_screen = self._screen_metrics is not None and metrics != self._screen_metrics
+        self._screen_metrics = metrics
+        self._apply_rate_panel_height(keep_on_screen=keep_on_screen)
 
     def _apply_window_settings(self):
         self.setWindowOpacity(
@@ -874,7 +928,12 @@ class PoetoreModeWindow(QMainWindow):
             return
         self.focus_message_label.setText(text)
         self.focus_message_label.show()
-        QTimer.singleShot(6000, self.focus_message_label.hide)
+        self._apply_rate_panel_height()
+        QTimer.singleShot(6000, self, self._hide_focus_message)
+
+    def _hide_focus_message(self):
+        self.focus_message_label.hide()
+        self._apply_rate_panel_height()
 
     def _start_hotkeys(self):
         configured = self.config.get("hotkeys", {})
@@ -969,33 +1028,14 @@ class PoetoreModeWindow(QMainWindow):
         window = getattr(self, "_poetore_window", None)
         return getattr(window, "_poe_window_hwnd", None) if window is not None else None
 
-    @staticmethod
-    def _display_hotkey(hotkey):
-        value = str(hotkey or "").strip()
-        if not value or value.lower() == "none":
-            return ""
-        display = QKeySequence(value).toString(QKeySequence.PortableText) or value
-        return " + ".join(part.strip() for part in display.split("+"))
-
-    def _update_capture_hint(self):
+    def _update_capture_hotkey_warning(self):
         hotkeys = self.config.get("hotkeys", {})
-        interactive = self._display_hotkey(
-            hotkeys.get("poetore_capture", "alt+d")
+        assigned = any(
+            str(hotkeys.get(action, self.MODE_ACTION_DEFAULTS[action]) or "").strip().casefold()
+            not in {"", "none"}
+            for action in ("poetore_capture", "poetore_auto_hide")
         )
-        auto_hide = self._display_hotkey(
-            hotkeys.get("poetore_auto_hide", "ctrl+d")
-        )
-        modes = []
-        if interactive:
-            modes.append(f"{interactive} 操作モード")
-        if auto_hide:
-            modes.append(f"{auto_hide} AUTO-HIDE")
-        if modes:
-            self.capture_hint.setText(
-                "アイテムにマウスオーバーして " + " / ".join(modes)
-            )
-        else:
-            self.capture_hint.setText("価格チェックのホットキーが設定されていません。")
+        self.capture_warning.setVisible(not assigned)
 
     @property
     def active_service_names(self):
@@ -1076,26 +1116,51 @@ class PoetoreModeWindow(QMainWindow):
         self.divine_rate_value = self.rate_panel.findChild(
             QLabel, "customRateValue0"
         )
-        self._apply_rate_panel_height()
 
-    def _apply_rate_panel_height(self):
-        if not hasattr(self, "rate_panel"):
+    def _queue_rate_panel_height(self):
+        # Qt invalidates the layout for new rows and footer visibility via posted events.
+        QTimer.singleShot(0, self, self._apply_rate_panel_height)
+
+    def _apply_rate_panel_height(self, *, keep_on_screen=False):
+        if not hasattr(self, "_rate_scroll") or self.title_bar._drag_offset is not None:
             return
-        row_count = len(self._rate_pair_store.pairs(self.poe_version))
-        target_height = 338 + max(0, row_count - 1) * 48
-        if row_count == 0:
-            target_height = 330
-        self.resize(self.width(), target_height)
-        screen = QApplication.screenAt(self.frameGeometry().center())
-        if screen is None:
-            screen = self.screen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        if self.frameGeometry().bottom() > available.bottom():
+        root = self.centralWidget().layout()
+        rate_layout = self._rate_scroll.widget().layout()
+        self.rate_panel.ensurePolished()
+        body_insets = 2 * UI_METRICS.page_margin
+        rate_minimum = rate_layout.totalMinimumSize().width() + body_insets
+        chrome_minimum = max(self.minimumWidth(), root.minimumSize().width())
+        preferred = max(self.width(), rate_minimum, self.rate_panel.preferred_card_width() + body_insets)
+        screen = self._screen_watcher.screen or self.screen()
+        available = screen.availableGeometry() if screen is not None else None
+        width_limit = self.maximumWidth()
+        height_limit = self.maximumHeight()
+        if available is not None:
+            width_limit = available.width()
+            height_limit = available.height()
+            self.setMaximumHeight(height_limit)
+            if not keep_on_screen:
+                # Fit the rate content into the space below and to the right of the current position.
+                width_limit = min(width_limit, available.right() - self.x() + 1)
+                height_limit = min(height_limit, available.bottom() - self.y() + 1)
+        width = max(chrome_minimum, min(preferred, width_limit))
+        rate_height = rate_layout.totalHeightForWidth(width - body_insets)
+        if rate_height < 0:
+            rate_height = rate_layout.totalSizeHint().height()
+        # The fixed header and footer stay outside the scrollable rate content.
+        chrome_height = root.totalHeightForWidth(width)
+        if chrome_height < 0:
+            chrome_height = root.totalSizeHint().height()
+        height = chrome_height + rate_height
+        if height > height_limit:
+            scrollbar_width = self._rate_scroll.verticalScrollBar().sizeHint().width()
+            width = max(width, min(width_limit, rate_minimum + scrollbar_width))
+            height = max(chrome_height, height_limit)
+        self.resize(width, height)
+        if keep_on_screen and available is not None and not available.contains(self.frameGeometry()):
             self.move(
-                self.x(),
-                max(available.top(), available.bottom() - self.height() + 1),
+                max(available.left(), min(self.x(), available.right() - self.width() + 1)),
+                max(available.top(), min(self.y(), available.bottom() - self.height() + 1)),
             )
 
     def handle_hotkey(self, command):
@@ -1612,7 +1677,8 @@ class PoetoreModeWindow(QMainWindow):
             self.config.get("stash_tab_scroll_enabled", True)
         )
         self._restart_hotkeys()
-        self._update_capture_hint()
+        self._update_capture_hotkey_warning()
+        self._apply_rate_panel_height()
         self.refresh_currency_rate()
 
     def _check_for_updates(self, parent=None):
@@ -1635,11 +1701,12 @@ class PoetoreModeWindow(QMainWindow):
             is_newer = False
         if not is_newer:
             self.update_button.hide()
-            return
-        self.update_button.setText(
-            f"↑ v{version} アップデートあり　更新する"
-        )
-        self.update_button.show()
+        else:
+            self.update_button.setText(
+                f"↑ v{version} アップデートあり　更新する"
+            )
+            self.update_button.show()
+        self._queue_rate_panel_height()
 
     def _check_for_updates_in_background(self):
         """常駐中はダイアログを出さずに最新版だけ確認する。"""

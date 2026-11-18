@@ -128,9 +128,18 @@ def test_region_selector_painted_text_fits(qapp):
 def inspect_rate_labels(qapp):
     from src.ui.custom_exchange_rate_panel import DecimalAlignedRateLabel, ElidedLabel
     failures = []
-    rate = DecimalAlignedRateLabel("1 ＝ 999,999.000001")
-    rate.resize(rate.minimum_rate_width(), rate.sizeHint().height())
-    failures.extend(inspect_paint(rate))
+    rate = DecimalAlignedRateLabel("999,999.000001")
+    integer, fraction = rate.measured_columns()
+    rate.set_column_widths(integer, fraction)
+    rate.resize(rate.centered_width(), rate.sizeHint().height())
+    failures.extend(inspect_paint(rate, ("1", "＝", "999,999", ".000001")))
+    narrow_rate = DecimalAlignedRateLabel("100,000,000.1")
+    narrow_rate.set_column_widths(*narrow_rate.measured_columns())
+    narrow_rate.resize(narrow_rate.minimumWidth(), narrow_rate.sizeHint().height())
+    integer = narrow_rate._column_rects()[2]
+    elided = narrow_rate.fontMetrics().elidedText("100,000,000", Qt.ElideRight, integer.width())
+    assert "," in elided and elided.endswith("…")
+    failures.extend(inspect_paint(narrow_rate, ("1", "＝", elided, ".1")))
     label = ElidedLabel("非常に長いカレンシーの名称を省略表示")
     label.resize(200, label.sizeHint().height())
     failures.extend(inspect_paint(label))
@@ -222,6 +231,7 @@ PAINTERS = {
     "RegionPreview": "inspect_region_selectors",
     "DecimalAlignedRateLabel": "inspect_rate_labels",
     "ElidedLabel": "inspect_rate_labels (intentional elision)",
+    "_RateDeleteButton": "No painter text: delegates to QPushButton on hover or focus.",
     "ExpeditionPriceOverlay": "inspect_expedition_price",
     "_UniqueRollSlider": "test_unique_roll_painted_text_fits",
     "_SparklineWidget": "No text: only a baseline and a price-trend polyline.",
@@ -235,7 +245,7 @@ def test_custom_painter_inventory_is_complete():
         for cls in ast.walk(ast.parse(file.read_text(encoding="utf-8-sig"))):
             if isinstance(cls, ast.ClassDef) and any(isinstance(method, ast.FunctionDef) and method.name == "paintEvent" for method in cls.body):
                 found.add(cls.name)
-                if cls.name in ("_SparklineWidget", "CheatSheetOverlay"):
+                if cls.name in ("_SparklineWidget", "CheatSheetOverlay", "_RateDeleteButton"):
                     method = next(method for method in cls.body if isinstance(method, ast.FunctionDef) and method.name == "paintEvent")
                     assert not any(isinstance(call, ast.Attribute) and call.attr in ("drawText", "addText") for call in ast.walk(method))
     assert found == PAINTERS.keys()

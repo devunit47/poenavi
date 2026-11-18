@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, call, patch
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.poetore.exchange_catalog import exchange_catalog_by_id
+from src.ui.dialog_theme import UI_METRICS
 from src.ui.poetore_mode_window import (
     PoetoreModeWindow,
     _expedition_icon,
@@ -19,7 +20,7 @@ from src.utils.poe_version_data import POE1, POE2
 from src.version import APP_VERSION
 
 
-def test_main_header_shows_short_poe_version_four_pixels_smaller_than_title():
+def test_main_title_bar_shows_title_and_short_poe_version_without_eyebrow():
     app = QApplication.instance() or QApplication([])
 
     for poe_version, expected in (
@@ -36,8 +37,15 @@ def test_main_header_shows_short_poe_version_four_pixels_smaller_than_title():
 
         window.show()
         app.processEvents()
+        assert window.title_label.parentWidget() is window.title_bar
+        assert window.mode_label.parentWidget() is window.title_bar
         assert window.title_label.text() == "ぽえとれ"
         assert window.mode_label.text() == expected
+        assert window.windowTitle() == "ぽえとれ"
+        assert all(
+            label.text() != "価格チェック・トレード支援"
+            for label in window.findChildren(QLabel)
+        )
         assert window.mode_label.width() >= window.mode_label.sizeHint().width()
         assert (
             window.mode_label.font().pixelSize()
@@ -74,10 +82,7 @@ def test_poetore_update_banner_uses_notified_version_and_hourly_check():
     assert window.update_button.text() == "↑ v9.9.9 アップデートあり　更新する"
     assert window.update_button.objectName() == "poetoreUpdateButton"
     assert window.update_button.minimumHeight() == 40
-    body_layout = window.update_button.parentWidget().layout()
-    assert body_layout.indexOf(window.capture_hint) < body_layout.indexOf(
-        window.update_button
-    )
+    assert not window.capture_warning.isVisible()
     assert window._update_check_timer.interval() == 60 * 60 * 1000
     assert window._update_check_timer.isActive()
 
@@ -204,6 +209,8 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
         window.settings_button,
     )
     assert window.header_action_buttons == header_buttons
+    window.show()
+    app.processEvents()
     assert window.focus_button.text() == "隠れ家滞在通知\nOFF"
     assert window.focus_button.size().width() == 108
     assert window.focus_button.size().height() == 36
@@ -228,10 +235,7 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     assert window.minimumWidth() == 500
     assert window.width() == 558
     assert window.windowFlags() & Qt.FramelessWindowHint
-    assert window.capture_hint.text() == (
-        "アイテムにマウスオーバーして Alt + D 操作モード / "
-        "Ctrl + D AUTO-HIDE"
-    )
+    assert not window.capture_warning.isVisible()
     minimize_button = window.findChild(QPushButton, "poetoreMinimizeButton")
     close_button = window.findChild(QPushButton, "poetoreCloseButton")
     assert minimize_button.text() == "─"
@@ -935,7 +939,7 @@ def test_poetore_mode_starts_auto_hide_capture_and_forwards_release():
     window._poetore_window.capture_hotkey_released.assert_called_once_with()
 
 
-def test_poetore_mode_capture_hint_uses_configured_hotkey():
+def test_poetore_mode_warns_only_when_both_price_check_hotkeys_are_disabled():
     app = QApplication.instance() or QApplication([])
     config = {"hotkeys": {
         "poetore_capture": "Ctrl+Shift+P",
@@ -950,14 +954,19 @@ def test_poetore_mode_capture_hint_uses_configured_hotkey():
     ), patch.object(PoetoreModeWindow, "refresh_currency_rate"):
         window = PoetoreModeWindow()
 
-    assert window.capture_hint.text() == (
-        "アイテムにマウスオーバーして Ctrl + Shift + P 操作モード / "
-        "Alt + Q AUTO-HIDE"
-    )
+    window.show()
+    app.processEvents()
+    assert not window.capture_warning.isVisible()
     window.config["hotkeys"]["poetore_capture"] = "none"
+    window._update_capture_hotkey_warning()
+    assert not window.capture_warning.isVisible()
     window.config["hotkeys"]["poetore_auto_hide"] = "none"
-    window._update_capture_hint()
-    assert window.capture_hint.text() == "価格チェックのホットキーが設定されていません。"
+    window._update_capture_hotkey_warning()
+    assert window.capture_warning.isVisible()
+    assert window.capture_warning.text() == "価格チェックのホットキーが設定されていません。"
+    window.config["hotkeys"]["poetore_capture"] = "alt+d"
+    window._update_capture_hotkey_warning()
+    assert not window.capture_warning.isVisible()
     window.close()
     app.processEvents()
 
@@ -1024,7 +1033,7 @@ def test_poetore_mode_renders_default_divine_chaos_pair():
 
     assert window.rate_panel.findChild(QLabel, "customRateLeftName0").text() == "神のオーブ"
     assert window.rate_panel.findChild(QLabel, "customRateRightName0").text() == "カオスオーブ"
-    assert window.rate_panel.add_button is not None
+    assert not window.rate_panel.manage_button.icon().isNull()
     style = window.centralWidget().styleSheet()
     assert "#65FFCA" in style
     assert "#343B3E" in style
@@ -1033,7 +1042,7 @@ def test_poetore_mode_renders_default_divine_chaos_pair():
     app.processEvents()
 
 
-def test_main_window_height_expands_with_saved_rows_without_scroll():
+def test_main_window_height_expands_with_saved_rows_without_scroll(qtbot):
     app = QApplication.instance() or QApplication([])
     catalog_ids = list(exchange_catalog_by_id(POE1))
     pairs = [
@@ -1055,14 +1064,19 @@ def test_main_window_height_expands_with_saved_rows_without_scroll():
     ), patch.object(PoetoreModeWindow, "refresh_currency_rate"):
         window = PoetoreModeWindow()
 
+    window.show()
     assert len(window.rate_panel.row_widgets) == 10
-    assert window.rate_panel.add_button is None
-    assert window.height() == 770
+    assert window.rate_panel.manage_button.isVisible()
+    scroll = window._rate_scroll
+    qtbot.waitUntil(
+        lambda: scroll.viewport().rect().contains(scroll.widget().geometry())
+    )
+    assert scroll.verticalScrollBar().maximum() == 0
     window.close()
     app.processEvents()
 
 
-def test_main_window_zero_rows_is_compact_and_shows_centered_plus():
+def test_main_window_zero_rows_is_compact_and_keeps_management_entry(qtbot):
     app = QApplication.instance() or QApplication([])
     config = {
         "hotkeys": {},
@@ -1076,10 +1090,15 @@ def test_main_window_zero_rows_is_compact_and_shows_centered_plus():
     ), patch.object(PoetoreModeWindow, "refresh_currency_rate"):
         window = PoetoreModeWindow()
 
+    window.show()
+    app.processEvents()
     assert window.rate_panel.row_widgets == []
-    assert window.rate_panel.add_button.text() == "＋"
-    assert window.rate_panel.add_button.height() == 54
-    assert window.height() == 330
+    assert window.rate_panel.manage_button.isVisible()
+    assert not window.rate_panel.card.isVisible()
+    assert not window.capture_warning.isVisible()
+    scroll = window._rate_scroll
+    qtbot.waitUntil(lambda: scroll.viewport().rect().contains(scroll.widget().geometry()))
+    assert window.height() - scroll.mapTo(window, QPoint(0, scroll.height())).y() == UI_METRICS.page_margin
     window.close()
     app.processEvents()
 

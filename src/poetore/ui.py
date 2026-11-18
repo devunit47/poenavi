@@ -52,7 +52,8 @@ from .window_position import (
     relative_panel_position,
 )
 from .trade import (
-    PRESET_BASE, PRESET_FINISHED, PriceResult, TradeApiError, TradeCatalogRequired, TradeStatFilter,
+    PRESET_BASE, PRESET_FINISHED, PriceResult, TradeApiError, TradeCatalogRequired,
+    TradeSearchCancelled, TradeStatFilter, trade_search_scope,
     available_pc_leagues, available_trade_presets, default_pc_league,
     apply_search_range, cached_trade_catalogs_only, english_trade_identity, gem_metadata,
     elemental_dps, physical_dps_at_20_quality,
@@ -1154,6 +1155,7 @@ class PoetoreWindow(QWidget):
         self._has_searched_current_item = False
         self._search_dirty = False
         self._search_generation = 0
+        self._search_cancel = threading.Event()
         self._pending_trade_conditions = None
         self._active_item_key: str | None = None
         self._auto_search_queued = False
@@ -2236,10 +2238,15 @@ class PoetoreWindow(QWidget):
         self.price_status.clear()
         self._set_price_status_layout(compact=True)
 
+    def _advance_search_generation(self):
+        self._search_cancel.set()
+        self._search_cancel = threading.Event()
+        self._search_generation += 1
+
     def _mark_search_dirty(self, *_args):
         if not self._has_searched_current_item or getattr(self, "_parsed_item", None) is None:
             return
-        self._search_generation += 1
+        self._advance_search_generation()
         self._search_dirty = True
         self.price_list.clear()
         self._last_trade_url = ""
@@ -2261,7 +2268,7 @@ class PoetoreWindow(QWidget):
     def _auto_search_after_trade_option_change(self, *_args):
         if not self._has_searched_current_item or getattr(self, "_parsed_item", None) is None:
             return
-        self._search_generation += 1
+        self._advance_search_generation()
         self._search_dirty = False
         self.price_list.clear()
         self._last_trade_url = ""
@@ -5214,7 +5221,7 @@ class PoetoreWindow(QWidget):
         # Invalidate an older asynchronous search before parsing the new copy.
         # Otherwise an old result can arrive during a slower PoE2 parse and be
         # painted briefly for the newly captured item.
-        self._search_generation += 1
+        self._advance_search_generation()
         self._parsed_item = None
         self._parsed_item_source_text = None
         self._parsed_item_poe_version = None
@@ -5289,7 +5296,7 @@ class PoetoreWindow(QWidget):
         item = match.item
         copied_text = curio_item_text(item)
         self._clear_pending_trade_conditions()
-        self._search_generation += 1
+        self._advance_search_generation()
         search = item.search
         self._placement_context = placement_context
         self._capture_auto_hide = False
@@ -5532,7 +5539,7 @@ class PoetoreWindow(QWidget):
             trace.mark("ui_parse_completed", modifiers=len(item.modifiers))
         is_new_item = item.raw_text != self._active_item_key
         if is_new_item and not search_cycle_already_invalidated:
-            self._search_generation += 1
+            self._advance_search_generation()
         self._configure_trade_presets(item)
         preset = str(self.trade_preset_combo.currentData() or PRESET_FINISHED)
         resolved_rows = None
@@ -5790,8 +5797,9 @@ class PoetoreWindow(QWidget):
         trace.mark("search_ui_prepared")
         self._has_searched_current_item = True
         self._search_dirty = False
-        self._search_generation += 1
+        self._advance_search_generation()
         search_generation = self._search_generation
+        search_cancel = self._search_cancel
         self._search_performance_traces[search_generation] = trace
         self.price_button.setEnabled(False)
         self.trade_url_button.setEnabled(False)
@@ -5886,7 +5894,7 @@ class PoetoreWindow(QWidget):
             resolved_initial_filters = self._resolved_trade_filters(item, preset)
         resolved_initial_filters = tuple(resolved_initial_filters or ())
 
-        def run():
+        def search():
             try:
                 trace.mark("filter_resolution_started")
                 effective_filters = (
@@ -6015,6 +6023,13 @@ class PoetoreWindow(QWidget):
                 self._trade_signals.completed.emit(
                     result, filters_for_ui, search_generation,
                 )
+
+        def run():
+            try:
+                with trade_search_scope(search_cancel):
+                    search()
+            except TradeSearchCancelled:
+                self._trade_signals.failed.emit("", search_generation)
 
         threading.Thread(target=run, daemon=True).start()
         self._current_performance_trace = None
@@ -7301,13 +7316,17 @@ class PoetoreWindow(QWidget):
         if self.poe_version != POE2 or result is None or not result.next_result_ids:
             return
         search_generation = self._search_generation
+        search_cancel = self._search_cancel
         self.additional_results_button.setEnabled(False)
         self.additional_results_button.setText("取得中…")
 
         def run():
             try:
                 from .poe2.trade import fetch_additional_prices
-                expanded = fetch_additional_prices(result)
+                with trade_search_scope(search_cancel):
+                    expanded = fetch_additional_prices(result)
+            except TradeSearchCancelled:
+                return
             except (TradeApiError, ValueError) as exc:
                 self._trade_signals.additional_failed.emit(
                     str(exc), search_generation,

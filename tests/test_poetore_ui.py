@@ -858,6 +858,7 @@ def test_search_does_not_reuse_item_parsed_for_another_mode(qapp):
 def test_new_capture_invalidates_older_search_before_parse_finishes(qapp):
     window = PoetoreWindow()
     window._search_generation = 8
+    previous_search = window._search_cancel
     window._parsed_item = Mock()
     window._parsed_item_source_text = "old"
     window._parsed_item_poe_version = "poe1"
@@ -873,6 +874,8 @@ def test_new_capture_invalidates_older_search_before_parse_finishes(qapp):
             window._capture_item_copy()
 
         assert window._search_generation == 9
+        assert previous_search.is_set()
+        assert not window._search_cancel.is_set()
         assert window._parsed_item is None
         assert window._parsed_item_source_text is None
         assert window._parsed_item_poe_version is None

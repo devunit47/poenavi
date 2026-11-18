@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
@@ -375,11 +376,34 @@ class TradeApiError(RuntimeError):
     pass
 
 
+class TradeSearchCancelled(Exception):
+    """The search was replaced before its next request could be sent."""
+
+
+_trade_search_cancel = ContextVar[threading.Event | None]("trade_search_cancel", default=None)
+
+
+@contextmanager
+def trade_search_scope(cancel: threading.Event):
+    token = _trade_search_cancel.set(cancel)
+    try:
+        yield
+    finally:
+        _trade_search_cancel.reset(token)
+
+
+def _raise_if_trade_cancelled() -> None:
+    cancel = _trade_search_cancel.get()
+    if cancel is not None and cancel.is_set():
+        raise TradeSearchCancelled
+
+
 @dataclass
 class _RateLimitRule:
     maximum: int
     window_seconds: float
     borrowed_at: list[float] = field(default_factory=list)
+    name: str = ""
 
     def prune(self, now: float) -> None:
         threshold = now - self.window_seconds
@@ -389,34 +413,49 @@ class _RateLimitRule:
         self.prune(now)
         if len(self.borrowed_at) < self.maximum:
             return 0.0
-        return max(0.0, self.borrowed_at[0] + self.window_seconds - now)
+        oldest = self.borrowed_at[len(self.borrowed_at) - self.maximum]
+        return max(0.0, oldest + self.window_seconds - now)
+
+
+@dataclass
+class _TradeLimitState:
+    rules: list[_RateLimitRule]
+    restricted_until: float = 0.0
 
 
 class _TradeRateLimiter:
     """Awakened同様、公式Trade APIの複数制限窓をクライアント側で追跡する。"""
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._rules: dict[str, list[_RateLimitRule]] = {
-            "search": [_RateLimitRule(1, 5.0)],
-            "fetch": [_RateLimitRule(1, 5.0)],
-        }
+    def __init__(self, lock: threading.Lock, server_states: dict[str, _TradeLimitState]) -> None:
+        self._lock = lock
+        self._server_states = server_states
+        self._states: dict[str, _TradeLimitState] = {}
+        self._policy_names: dict[str, str] = {}
+        self.reset()
 
     def reset(self) -> None:
         with self._lock:
-            self._rules = {
-                "search": [_RateLimitRule(1, 5.0)],
-                "fetch": [_RateLimitRule(1, 5.0)],
+            for name in self._policy_names.values():
+                self._server_states.pop(name, None)
+            self._policy_names.clear()
+            self._states = {
+                "search": _TradeLimitState([_RateLimitRule(1, 5.0)]),
+                "fetch": _TradeLimitState([_RateLimitRule(1, 5.0)]),
             }
+
+    def _state(self, policy: str) -> _TradeLimitState:
+        return self._server_states.get(self._policy_names.get(policy, ""), self._states[policy])
 
     def estimate_wait(self, policy: str, count: int = 1) -> float:
         with self._lock:
             now = time.monotonic()
-            waits = []
-            for rule in self._rules[policy]:
+            state = self._state(policy)
+            restriction = max(0.0, state.restricted_until - now)
+            waits = [restriction]
+            for rule in state.rules:
                 rule.prune(now)
                 simulated = list(rule.borrowed_at)
-                elapsed = 0.0
+                elapsed = restriction
                 for _ in range(count):
                     simulated = [
                         value for value in simulated
@@ -425,7 +464,7 @@ class _TradeRateLimiter:
                     if len(simulated) >= rule.maximum:
                         elapsed = max(
                             elapsed,
-                            simulated[0] + rule.window_seconds - now,
+                            simulated[len(simulated) - rule.maximum] + rule.window_seconds - now,
                         )
                         simulated = [
                             value for value in simulated
@@ -435,73 +474,89 @@ class _TradeRateLimiter:
                 waits.append(elapsed)
             return max(waits, default=0.0)
 
-    def wait_and_borrow(self, policy: str) -> float:
-        waited = 0.0
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                wait_for = max(
-                    (rule.wait_seconds(now) for rule in self._rules[policy]),
-                    default=0.0,
-                )
-                if wait_for <= 0:
-                    for rule in self._rules[policy]:
-                        rule.borrowed_at.append(now)
-                    return waited
-            time.sleep(wait_for)
-            waited += wait_for
+    def try_borrow(self, policy: str) -> float:
+        """Reserve a transmission now, or return the delay without reserving."""
+        with self._lock:
+            _raise_if_trade_cancelled()
+            now = time.monotonic()
+            state = self._state(policy)
+            wait_for = max(
+                max(0.0, state.restricted_until - now),
+                max((rule.wait_seconds(now) for rule in state.rules), default=0.0),
+            )
+            if wait_for == 0:
+                for rule in state.rules:
+                    rule.borrowed_at.append(now)
+            return wait_for
 
-    def adjust(self, policy: str, headers: object) -> None:
+    def adjust(self, policy: str, headers: object, *, requested: bool = False, retry_after: int = 0) -> None:
         try:
             rule_names = str(headers.get("X-Rate-Limit-Rules", "")).strip()
+            policy_name = str(headers.get("X-Rate-Limit-Policy", "")).strip().casefold()
         except AttributeError:
             return
-        if not rule_names:
-            return
 
-        parsed: list[tuple[int, float, int]] = []
+        parsed: list[tuple[str, int, float, int]] = []
+        restriction = retry_after
         for rule_name in rule_names.split(","):
             rule_name = rule_name.strip()
+            if not rule_name:
+                continue
             limit_text = str(headers.get(f"X-Rate-Limit-{rule_name}", ""))
             state_text = str(headers.get(f"X-Rate-Limit-{rule_name}-State", ""))
             limits = [part.split(":") for part in limit_text.split(",")]
-            states = [part.split(":") for part in state_text.split(",")]
-            for index, parts in enumerate(limits):
+            state_parts = [part.split(":") for part in state_text.split(",")]
+            states = {parts[1]: parts for parts in state_parts if len(parts) >= 2}
+            for parts in limits:
                 if len(parts) < 2:
                     continue
                 try:
                     maximum = int(parts[0])
                     # Awakenedの既定値と同じ2秒を通信状態ずれの余裕として加える。
                     window_seconds = float(parts[1]) + 2.0
-                    active = int(states[index][0]) if index < len(states) else 0
+                    state = states.get(parts[1], ())
+                    active = int(state[0]) if state else 0
+                    if len(state) >= 3:
+                        restriction = max(restriction, int(state[2]))
                 except (TypeError, ValueError):
                     continue
-                if maximum <= 0 or window_seconds <= 0:
+                if maximum <= 0 or not math.isfinite(window_seconds) or window_seconds <= 0:
                     continue
-                parsed.append((maximum, window_seconds, max(0, active)))
-        if parsed:
-            with self._lock:
-                now = time.monotonic()
-                existing = self._rules[policy]
+                parsed.append((rule_name.casefold(), maximum, window_seconds, max(0, active)))
+        if not parsed and not restriction:
+            return
+
+        with self._lock:
+            now = time.monotonic()
+            previous = state = self._state(policy)
+            if policy_name and (parsed or policy_name in self._server_states):
+                if policy_name != self._policy_names.get(policy):
+                    state = self._server_states.setdefault(policy_name, _TradeLimitState([]))
+                    self._policy_names[policy] = policy_name
+            if restriction:
+                state.restricted_until = max(state.restricted_until, now + restriction)
+            if parsed:
                 synchronized: list[_RateLimitRule] = []
-                for maximum, window_seconds, active in parsed:
-                    current = next((
-                        rule for rule in existing
-                        if rule.maximum == maximum
-                        and rule.window_seconds == window_seconds
-                    ), None)
-                    if current is None:
-                        current = _RateLimitRule(maximum, window_seconds)
+                for name, maximum, window_seconds, active in parsed:
+                    matching = next((rule for rule in state.rules
+                                     if rule.name == name and rule.window_seconds == window_seconds), None)
+                    current = matching or _RateLimitRule(maximum, window_seconds, name=name)
+                    current.maximum = maximum
                     current.prune(now)
-                    missing = min(maximum, active) - len(current.borrowed_at)
-                    if missing > 0:
-                        current.borrowed_at.extend([now] * missing)
+                    if requested and (matching is None or state is not previous):
+                        current.borrowed_at.append(now)
+                    if active > maximum:
+                        current.borrowed_at[:] = [now] * maximum
+                    elif active > len(current.borrowed_at):
+                        current.borrowed_at.extend([now] * (active - len(current.borrowed_at)))
                     synchronized.append(current)
-                self._rules[policy] = synchronized
+                state.rules = synchronized
 
 
-_trade_rate_limiter = _TradeRateLimiter()
-_trade2_rate_limiter = _TradeRateLimiter()
+_trade_limit_lock = threading.Lock()
+_trade_server_limit_states: dict[str, _TradeLimitState] = {}
+_trade_rate_limiter = _TradeRateLimiter(_trade_limit_lock, _trade_server_limit_states)
+_trade2_rate_limiter = _TradeRateLimiter(_trade_limit_lock, _trade_server_limit_states)
 
 
 def _trade_rate_policy(url: str) -> str | None:
@@ -818,6 +873,8 @@ class _TtlLruCache:
 
 
 _trade_response_cache = _TtlLruCache()
+_trade_pending_lock = threading.Lock()
+_trade_pending_requests: dict[str, Future[tuple[dict, object]]] = {}
 _trade_http_pool = urllib3.PoolManager(num_pools=2, maxsize=1, block=True)
 _trade_http_request_lock = threading.Lock()
 
@@ -893,15 +950,77 @@ def _cached_request_json(
     prevent_queue: bool = False,
 ) -> tuple[dict, object, bool]:
     key = json.dumps([url, payload], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    cached = _trade_response_cache.get(key)
-    if cached is not None:
-        data, headers = cached
-        return data, headers, True
-    if prevent_queue:
-        _prevent_trade_queue(url)
-    data, headers = _request_json(url, payload)
-    _trade_response_cache.set(key, (data, headers))
-    return data, headers, False
+    while True:
+        _raise_if_trade_cancelled()
+        with _trade_pending_lock:
+            cached = _trade_response_cache.get(key)
+            if cached is not None:
+                return *cached, True
+            pending = _trade_pending_requests.get(key)
+            if pending is None:
+                future = _trade_pending_requests[key] = Future()
+                break
+        try:
+            if _trade_search_cancel.get() is None:
+                data, headers = pending.result()
+            else:
+                while True:
+                    _raise_if_trade_cancelled()
+                    try:
+                        data, headers = pending.result(timeout=0.05)
+                    except FutureTimeout:
+                        if pending.done():
+                            data, headers = pending.result()
+                        else:
+                            continue
+                    break
+            return data, headers, True
+        except TradeSearchCancelled:
+            # The leader may have been replaced before sending. A current
+            # follower can take over once the cancelled entry is removed.
+            _raise_if_trade_cancelled()
+
+    try:
+        if prevent_queue:
+            _prevent_trade_queue(url)
+        data, headers = _request_json(url, payload)
+        _trade_response_cache.set(key, (data, headers))
+    except BaseException as exc:
+        with _trade_pending_lock:
+            del _trade_pending_requests[key]
+            future.set_exception(exc)
+        raise
+    else:
+        with _trade_pending_lock:
+            del _trade_pending_requests[key]
+            future.set_result((data, headers))
+        return data, headers, False
+
+
+@contextmanager
+def _trade_send_slot(limiter: _TradeRateLimiter | None, policy: str | None):
+    while True:
+        # Serialize sends through header reconciliation. Release the gate
+        # before waiting for a policy window so unrelated policies can send.
+        with _trade_http_request_lock:
+            _raise_if_trade_cancelled()
+            wait = limiter.try_borrow(policy) if limiter is not None and policy is not None else 0.0
+            if wait == 0:
+                yield
+                return
+        _trade_log(f"rate limit wait: policy={policy} seconds={wait:.3f}")
+        cancel = _trade_search_cancel.get()
+        if cancel is None:
+            time.sleep(wait)
+        elif cancel.wait(wait):
+            raise TradeSearchCancelled
+
+
+def _trade_retry_after(headers: object) -> int:
+    try:
+        return max(0, math.ceil(float(headers.get("Retry-After", ""))))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
@@ -916,17 +1035,12 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
     response = None
     response_elapsed = 0.0
     response_attempt = 1
+    retry_after = 0
     # urllib3's own retries stay disabled. Only a read timeout gets one explicit
     # retry after clearing pooled connections, so HTTP errors and connect errors
     # are never duplicated.
-    with _trade_http_request_lock:
-        for attempt in range(1, TRADE_READ_TIMEOUT_MAX_ATTEMPTS + 1):
-            if rate_limiter is not None and rate_policy is not None:
-                waited = rate_limiter.wait_and_borrow(rate_policy)
-                if waited > 0:
-                    _trade_log(
-                        f"rate limit wait: policy={rate_policy} seconds={waited:.3f}"
-                    )
+    for attempt in range(1, TRADE_READ_TIMEOUT_MAX_ATTEMPTS + 1):
+        with _trade_send_slot(rate_limiter, rate_policy):
             started = time.monotonic()
             try:
                 response = _trade_http_pool.request(
@@ -936,7 +1050,6 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
                 )
                 response_elapsed = time.monotonic() - started
                 response_attempt = attempt
-                break
             except Exception as exc:
                 elapsed = time.monotonic() - started
                 retrying = (
@@ -956,9 +1069,12 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
                 raise TradeApiError(
                     f"PoE Trade APIへの接続に失敗しました: {exc}"
                 ) from exc
+            if response.status == 429:
+                retry_after = _trade_retry_after(response.headers)
+            if rate_limiter is not None and rate_policy is not None:
+                rate_limiter.adjust(rate_policy, response.headers, requested=True, retry_after=retry_after)
+            break
     assert response is not None
-    if rate_limiter is not None and rate_policy is not None:
-        rate_limiter.adjust(rate_policy, response.headers)
     body = response.data.decode("utf-8", errors="replace")
     if response.status == 429:
         _trade_request_diagnostic(
@@ -966,10 +1082,6 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
             attempt=response_attempt, elapsed=response_elapsed,
             status=response.status, outcome="http_error",
         )
-        try:
-            retry_after = max(0, int(float(response.headers.get("Retry-After", ""))))
-        except (AttributeError, TypeError, ValueError):
-            retry_after = 0
         if retry_after:
             retry_minutes = max(1, (retry_after + 59) // 60)
             retry_note = f" 約{retry_minutes}分後に、もう一度検索してください。"

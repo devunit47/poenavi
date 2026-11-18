@@ -1127,6 +1127,59 @@ def test_poe1_condition_worker_reports_failure_and_enables_search(qtbot, monkeyp
     search.assert_not_called()
 
 
+def test_poe1_search_retry_prepares_translated_unique_variants_before_price_search(qtbot, monkeypatch):
+    from src.poetore import trade
+
+    copied = (
+        "アイテムクラス: 兜\nレアリティ: ユニーク\nゴールドリム\n革の帽子\n"
+        "--------\nアイテムレベル: 68\n--------\n全ての元素耐性 +35%\n"
+    )
+    window = PoetoreWindow(app_config={"poe_version": POE1})
+    qtbot.addWidget(window)
+    monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
+    monkeypatch.setattr(trade, "_stat_entries_cache", None)
+    monkeypatch.setattr(trade, "_stat_entry_indexes_cache", None)
+    monkeypatch.setattr(window, "show_at_context", lambda *_args, **_kwargs: window.show())
+    monkeypatch.setattr(window, "_queue_poe_ninja_price", Mock())
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", lambda _clipboard: copied)
+    search = Mock(return_value=PriceResult("Standard", "query", 0, ()))
+    monkeypatch.setattr("src.poetore.ui.search_prices", search)
+    item_requests = []
+
+    def request(url):
+        assert threading.current_thread() is not threading.main_thread()
+        if url.endswith("/stats"):
+            return {"result": []}, {}
+        assert url.endswith("/data/items")
+        item_requests.append(url)
+        if len(item_requests) == 1:
+            raise trade.TradeApiError("temporary catalog failure")
+        name, base = ("ゴールドリム", "革の帽子") if url.startswith(trade.JP_API_ROOT) else ("Goldrim", "Leather Cap")
+        unique = {"type": base, "name": name, "text": name, "flags": {"unique": True}}
+        return {"result": [{"id": "armour", "entries": [
+            {"type": base}, unique, {**unique, "text": f"{name} Legacy", "disc": "legacy"},
+        ]}]}, {}
+
+    monkeypatch.setattr(trade, "_request_json", request)
+    window._capture_item_copy()
+    qtbot.waitUntil(lambda: "temporary catalog failure" in window.price_status.text())
+    search.assert_not_called()
+
+    window.price_button.click()
+    qtbot.waitUntil(lambda: not window.unique_variant_combo.isHidden())
+    assert item_requests == [f"{trade.JP_API_ROOT}/data/items"] * 2 + [f"{trade.API_ROOT}/data/items"]
+    assert window.unique_variant_combo.count() == 2
+    search.assert_not_called()
+
+    window.unique_variant_combo.setCurrentIndex(1)
+    window.price_button.click()
+    qtbot.waitUntil(lambda: search.called and window.price_button.isEnabled())
+    assert search.call_count == 1
+    assert search.call_args.args[1] == "Leather Cap"
+    assert search.call_args.kwargs["trade_name"] == "Goldrim"
+    assert search.call_args.kwargs["trade_discriminator"] == "legacy"
+
+
 def test_early_and_post_ui_poe2_search_send_identical_request(qapp):
     copied = "アイテムクラス: ベルト\nレアリティ: ユニーク\n試験の帯\n重厚なベルト\n"
     item = ParsedItem(

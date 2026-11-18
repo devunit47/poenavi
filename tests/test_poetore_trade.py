@@ -377,7 +377,8 @@ def test_329_japanese_copy_resolves_base_type_for_nonunique_items():
         assert english_trade_identity(
             item, item.base_type, item.name,
         ) == ("Mesh Boots", "破滅の足跡")
-    item_type.assert_called_once_with("メッシュブーツ", "armour")
+    item_type.assert_called_once()
+    assert item_type.call_args.args == ("メッシュブーツ", "armour")
     item_name.assert_not_called()
 
 
@@ -5333,7 +5334,7 @@ def test_scrying_orb_searches_the_official_map_area_variant():
 
     with patch(
         "src.poetore.trade._aligned_trade_item_pairs",
-        side_effect=lambda: iter(aligned),
+        side_effect=lambda *_args: iter(aligned),
     ):
         trade_type, trade_name = english_trade_identity(item)
         query = build_search_query(item, trade_type)["query"]
@@ -5874,7 +5875,7 @@ def test_330_japanese_blighted_map_uses_area_variant_and_true_filter():
 
     with patch(
         "src.poetore.trade._aligned_trade_item_pairs",
-        side_effect=lambda: iter(aligned),
+        side_effect=lambda *_args: iter(aligned),
     ):
         trade_type, trade_name = english_trade_identity(item)
         filters = resolve_trade_stat_filters(item)
@@ -5893,7 +5894,7 @@ def test_330_japanese_blighted_map_uses_area_variant_and_true_filter():
 
     with patch(
         "src.poetore.trade._aligned_trade_item_pairs",
-        side_effect=lambda: iter(()),
+        side_effect=lambda *_args: iter(()),
     ):
         fallback_type, fallback_name = english_trade_identity(item)
         fallback_query = build_search_query(

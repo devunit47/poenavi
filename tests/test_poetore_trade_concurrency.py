@@ -14,9 +14,9 @@ from src.poetore import trade
 
 @pytest.fixture(autouse=True)
 def isolate_requests(monkeypatch):
-    lock, server_states = threading.Lock(), {}
+    traffic = trade._TradeRateLimitTraffic()
     for name in ("_trade_rate_limiter", "_trade2_rate_limiter"):
-        monkeypatch.setattr(trade, name, trade._TradeRateLimiter(lock, server_states))
+        monkeypatch.setattr(trade, name, trade._TradeRateLimiter(traffic))
     monkeypatch.setattr(trade, "_trade_response_cache", trade._TtlLruCache())
 
 
@@ -25,7 +25,7 @@ def response(payload=None, *, status=200, headers=None):
 
 
 @pytest.mark.parametrize("shared_policy", [False, True])
-def test_new_search_overlaps_inflight_fetch_only_for_independent_policies(monkeypatch, shared_policy):
+def test_new_search_overlaps_inflight_fetch_with_available_quota(monkeypatch, shared_policy):
     root = trade.API_ROOT
     headers = {"X-Rate-Limit-Rules": "Ip", "X-Rate-Limit-Ip": "5:10:0"}
     for route in ("search", "fetch"):
@@ -53,14 +53,78 @@ def test_new_search_overlaps_inflight_fetch_only_for_independent_policies(monkey
             assert old_sent.wait(1)
             cancel.set()
             latest = pool.submit(trade._cached_request_json, f"{root}/search/Standard", {"query": {}})
-            if shared_policy:
-                assert not new_sent.wait(0.1)
-            else:
-                assert new_sent.wait(1)
+            assert new_sent.wait(1)
         finally:
             release_old.set()
         old.result(timeout=1)
         latest.result(timeout=1)
+
+
+def test_shared_policy_keeps_an_inflight_reservation_past_the_send_window(monkeypatch):
+    now = 100.0
+    headers = {
+        "X-Rate-Limit-Policy": "shared",
+        "X-Rate-Limit-Rules": "Ip",
+        "X-Rate-Limit-Ip": "5:10:0",
+    }
+    limiter = trade._trade_rate_limiter
+    for endpoint in ("search", "fetch"):
+        limiter.adjust(endpoint, headers)
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    for _ in range(5):
+        assert isinstance(limiter.try_reserve("fetch"), trade._TradeReservation)
+    now += 20
+    assert isinstance(limiter.try_reserve("search"), threading.Event)
+
+
+def test_first_fetch_waits_for_shared_quota_and_blocks_search_until_policy_is_known(monkeypatch):
+    now = 100.0
+    search = f"{trade.API_ROOT}/search/Standard"
+    fetch = f"{trade.API_ROOT}/fetch/old"
+    headers = {
+        "X-Rate-Limit-Policy": "shared",
+        "X-Rate-Limit-Rules": "Ip",
+        "X-Rate-Limit-Ip": "1:10:0",
+    }
+    sent = []
+    fetch_sent, release_fetch, search_waiting = (threading.Event() for _ in range(3))
+    limiter = trade._trade_rate_limiter
+    try_reserve = limiter.try_reserve
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def request(_method, url, **_kwargs):
+        sent.append((url, now))
+        if url == fetch:
+            fetch_sent.set()
+            assert release_fetch.wait(3)
+        return response(headers=headers)
+
+    def observe_reservation(endpoint):
+        result = try_reserve(endpoint)
+        if endpoint == "search" and not isinstance(result, trade._TradeReservation):
+            search_waiting.set()
+        return result
+
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(trade._trade_http_pool, "request", request)
+    monkeypatch.setattr(limiter, "try_reserve", observe_reservation)
+    trade._request_json(search, {"query": {}})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        previous = pool.submit(trade._request_json, fetch)
+        try:
+            assert fetch_sent.wait(1)
+            assert sent == [(search, 100.0), (fetch, 112.0)]
+            latest = pool.submit(trade._request_json, search, {"query": {}})
+            assert search_waiting.wait(1)
+            assert len(sent) == 2
+        finally:
+            release_fetch.set()
+        previous.result(timeout=1)
+        latest.result(timeout=1)
+    assert sent == [(search, 100.0), (fetch, 112.0), (search, 124.0)]
 
 
 @pytest.mark.parametrize("repeats_headers", [True, False])
@@ -160,6 +224,43 @@ def test_aligned_catalog_reader_keeps_both_locales_across_refresh(monkeypatch):
         assert old.result(timeout=1) == expected
 
 
+def test_english_identity_keeps_catalog_snapshot_between_base_and_unique_name(monkeypatch):
+    monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
+    item = trade.ParsedItem("靴", "ユニーク", "破滅の軌跡", "メッシュブーツ", "armour")
+    english = "Mesh Boots", "Wake of Destruction"
+    base_resolved, resume = threading.Event(), threading.Event()
+    translate_type = trade._english_trade_item_type
+
+    def request(url):
+        base, name = english if url.startswith(trade.API_ROOT) else (item.base_type, item.name)
+        return {"result": [{"id": "armour", "entries": [
+            {"type": base, "name": name, "flags": {"unique": True}},
+        ]}]}, {}
+
+    def pause_after_base(*args, **kwargs):
+        base = translate_type(*args, **kwargs)
+        if threading.current_thread() is not threading.main_thread():
+            base_resolved.set()
+            assert resume.wait(3)
+        return base
+
+    def resolve():
+        return trade.english_trade_identity(item, item.base_type, item.name)
+
+    monkeypatch.setattr(trade, "_request_json", request)
+    monkeypatch.setattr(trade, "_english_trade_item_type", pause_after_base)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        old = pool.submit(resolve)
+        try:
+            assert base_resolved.wait(1)
+            english = "New Mesh Boots", "New Wake of Destruction"
+            trade._clear_trade_item_catalog_cache()
+            assert resolve() == english
+        finally:
+            resume.set()
+        assert old.result(timeout=1) == ("Mesh Boots", "Wake of Destruction")
+
+
 @pytest.mark.parametrize("retry_after", ["25", formatdate(1_800_000_025, usegmt=True)])
 def test_catalog_429_delays_next_catalog_request(monkeypatch, retry_after):
     now = 100.0
@@ -187,6 +288,34 @@ def test_catalog_429_delays_next_catalog_request(monkeypatch, retry_after):
     assert sent == [(items, 100.0), (stats, 125.0)]
 
 
+def test_first_catalog_429_with_only_policy_and_retry_after_blocks_search(monkeypatch):
+    now = 100.0
+    sent = []
+    items = f"{trade.API_ROOT}/data/items"
+    search = f"{trade.API_ROOT}/search/Standard"
+
+    def request(_method, url, **_kwargs):
+        sent.append((url, now))
+        if url == items:
+            return response(status=429, headers={
+                "X-Rate-Limit-Policy": "shared", "Retry-After": "60",
+            })
+        return response({"id": "resumed"}, headers={"X-Rate-Limit-Policy": "shared"})
+
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(trade._trade_http_pool, "request", request)
+    with pytest.raises(trade.TradeApiError, match="利用制限に達しました"):
+        trade._request_json(items)
+    assert trade._trade_rate_limiter.estimate_wait("search") == 60
+    now += 55
+    with pytest.raises(trade.TradeApiError, match="約5秒後"):
+        trade._cached_request_json(search, {"query": {}}, prevent_queue=True)
+    assert sent == [(items, 100.0)]
+    now += 5
+    assert trade._cached_request_json(search, {"query": {}}, prevent_queue=True)[0] == {"id": "resumed"}
+    assert sent == [(items, 100.0), (search, 160.0)]
+
+
 @pytest.mark.parametrize("api_path", ["trade", "trade2"])
 def test_superseded_search_is_cancelled_before_sending(monkeypatch, api_path):
     def unexpected_request(*_args, **_kwargs):
@@ -208,14 +337,14 @@ def test_new_search_sends_while_superseded_fetch_waits_for_quota(monkeypatch, ap
 
     wait_entered = threading.Event()
     cancel = threading.Event()
-    wait_before_send = limiter.wait_before_send
+    try_reserve = limiter.try_reserve
     sent = []
 
     def observe_wait(policy):
-        wait = wait_before_send(policy)
-        if policy == "fetch" and wait > 0:
+        result = try_reserve(policy)
+        if policy == "fetch" and isinstance(result, float):
             wait_entered.set()
-        return wait
+        return result
 
     def request(_method, url, **_kwargs):
         sent.append(url)
@@ -225,7 +354,7 @@ def test_new_search_sends_while_superseded_fetch_waits_for_quota(monkeypatch, ap
         with trade.trade_search_scope(cancel):
             return trade._cached_request_json(f"{root}/fetch/second")
 
-    monkeypatch.setattr(limiter, "wait_before_send", observe_wait)
+    monkeypatch.setattr(limiter, "try_reserve", observe_wait)
     monkeypatch.setattr(trade._trade_http_pool, "request", request)
     with ThreadPoolExecutor(max_workers=2) as pool:
         old = pool.submit(old_fetch)

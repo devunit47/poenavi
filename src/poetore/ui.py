@@ -1157,6 +1157,7 @@ class PoetoreWindow(QWidget):
         self._search_generation = 0
         self._search_cancel = threading.Event()
         self._pending_trade_conditions = None
+        self._pending_capture_identity_text: str | None = None
         self._active_item_key: str | None = None
         self._auto_search_queued = False
         self._unique_icon_manager = QNetworkAccessManager(self)
@@ -5215,6 +5216,7 @@ class PoetoreWindow(QWidget):
     def _capture_item_copy(self):
         trace = self._pending_performance_trace
         self._clear_pending_trade_conditions()
+        self._pending_capture_identity_text = None
         copied_text = read_item_clipboard(QApplication.clipboard())
         if trace is not None:
             trace.mark("clipboard_read", characters=len(copied_text))
@@ -5296,6 +5298,7 @@ class PoetoreWindow(QWidget):
         item = match.item
         copied_text = curio_item_text(item)
         self._clear_pending_trade_conditions()
+        self._pending_capture_identity_text = None
         self._advance_search_generation()
         search = item.search
         self._placement_context = placement_context
@@ -5544,6 +5547,9 @@ class PoetoreWindow(QWidget):
         preset = str(self.trade_preset_combo.currentData() or PRESET_FINISHED)
         resolved_rows = None
         if self.poe_version != POE2:
+            if resolve_capture_identity:
+                self._pending_capture_identity_text = current_text
+            resolve_capture_identity = current_text == self._pending_capture_identity_text
             base_type, name = self._trade_base_type, self._trade_item_name
 
             def prepare():
@@ -5579,6 +5585,7 @@ class PoetoreWindow(QWidget):
                             return
                         self._pending_performance_trace = trace
                         self.parse_current_text(
+                            preserve_virtual_augment_selection=preserve_virtual_augment_selection,
                             parsed_item=item,
                             search_cycle_already_invalidated=True,
                             start_initial_trade_search=start_initial_trade_search,
@@ -5607,6 +5614,8 @@ class PoetoreWindow(QWidget):
                     threading.Thread(target=run, daemon=True).start()
                     return
             self._trade_base_type, self._trade_item_name, rows = prepared_poe1_conditions
+            if resolve_capture_identity:
+                self._pending_capture_identity_text = None
             resolved_rows = self._resolved_trade_filters(item, preset, resolved_rows=rows)
 
         if is_new_item:

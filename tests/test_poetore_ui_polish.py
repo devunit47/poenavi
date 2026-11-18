@@ -357,9 +357,14 @@ def test_main_rates_reflow_after_screen_move(
     assert window.maximumHeight() == destination.geometry.height()
     assert (window.height() > original_height) == start_small
     assert window.rect().contains(QRect(window.update_button.mapTo(window, QPoint()), window.update_button.size()))
-    scroll.ensureWidgetVisible(window.rate_refresh_button, 0, 0)
+    refresh = window.rate_refresh_button
+    assert window.rect().contains(QRect(refresh.mapTo(window, QPoint()), refresh.size()))
+    last_delete = window.rate_panel.row_widgets[-1].findChild(
+        QPushButton, f"customRateDelete{MAX_RATE_PAIRS - 1}"
+    )
+    scroll.ensureWidgetVisible(last_delete, 0, 0)
     viewport = scroll.viewport()
-    assert viewport.rect().contains(QRect(window.rate_refresh_button.mapTo(viewport, QPoint()), window.rate_refresh_button.size()))
+    assert viewport.rect().contains(QRect(last_delete.mapTo(viewport, QPoint()), last_delete.size()))
 
 
 @pytest.mark.parametrize("notification", ["available", "logical_dpi", "physical_dpi", "device_ratio"])
@@ -491,7 +496,7 @@ def test_main_same_screen_relayout_recovers_offscreen_controls(qapp, tmp_path, m
     window.move(position)
     controls = (
         window.title_bar.close_button, window.title_bar.minimize_button,
-        window.rate_panel.manage_button, window.update_button,
+        window.rate_panel.manage_button, window.rate_refresh_button, window.update_button,
     )
     assert all(button.isVisible() for button in controls)
     manage = window.rate_panel.manage_button

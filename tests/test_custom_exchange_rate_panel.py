@@ -32,6 +32,7 @@ from src.ui.custom_exchange_rate_panel import (
     DecimalAlignedRateLabel,
     format_display_rate,
 )
+from src.ui.dialog_theme import UI_METRICS
 from src.utils.poe_version_data import POE1, POE2
 
 
@@ -188,6 +189,24 @@ def test_zero_through_ten_rows_have_one_management_entry(
         panel.close()
 
 
+def test_refresh_button_sits_next_to_manage_button_in_title_row(qapp, tmp_path):
+    panel, *_ = make_panel(qapp, tmp_path)
+    try:
+        title_row = panel.layout().itemAt(0).layout()
+        manage = panel.manage_button
+        refresh = panel.refresh_button
+        assert title_row.indexOf(refresh) == title_row.indexOf(manage) + 1
+        assert refresh.y() == manage.y()
+        assert refresh.size() == manage.size()
+        assert refresh.x() - manage.geometry().right() - 1 == UI_METRICS.inline_gap
+        footer = panel.scroll_area.widget().layout().itemAt(1).layout()
+        assert footer.count() == 1
+        assert footer.itemAt(0).widget() is panel.status_label
+    finally:
+        panel.stop()
+        panel.close()
+
+
 def test_available_no_trade_unconfirmed_and_unavailable_are_distinct(qapp, tmp_path):
     ids = list(exchange_catalog_by_id(POE1))[:8]
     pairs = [RatePair(ids[index], ids[index + 4]) for index in range(4)]
@@ -275,10 +294,12 @@ def test_delete_reveals_on_row_hover_without_moving_columns(qapp, tmp_path):
 
         panel.manage_button.setFocus(Qt.TabFocusReason)
         QTest.keyClick(panel.manage_button, Qt.Key_Tab)
+        assert panel.refresh_button.hasFocus()
+        QTest.keyClick(panel.refresh_button, Qt.Key_Tab)
         assert delete.hasFocus()
         assert delete_pixels() != idle
         QTest.keyClick(delete, Qt.Key_Backtab)
-        assert not delete.hasFocus()
+        assert panel.refresh_button.hasFocus()
         assert delete_pixels() == idle
 
         move_to(delete)
@@ -348,6 +369,25 @@ def test_official_hourly_explanation_is_exact(qapp, tmp_path):
         assert not panel.refresh_button.icon().isNull()
         assert panel.refresh_button.accessibleName() == "公式取引データを再取得"
         assert panel.refresh_button.toolTip() == f"公式取引データを再取得\n\n{OFFICIAL_DATA_TOOLTIP}"
+    finally:
+        panel.stop()
+        panel.close()
+
+
+def test_successful_refresh_keeps_hourly_status(qapp, tmp_path):
+    service = FakeService()
+    panel, *_ = make_panel(qapp, tmp_path, service=service)
+    try:
+        QTest.mouseClick(panel.refresh_button, Qt.LeftButton)
+        assert not panel.refresh_button.isEnabled()
+        service.state = ExchangeSyncState(POE1, "League", 720, 720, 0, False, True)
+        _, _, on_complete, on_checked = service.queued[-1]
+        result = SyncCheckResult("updated", POE1, "League", 720)
+        on_complete(result)
+        on_checked(result)
+        qapp.processEvents()
+        assert panel.status_label.text() == "League ・ 公式取引データ（1時間単位・自動取得）"
+        assert panel.refresh_button.isEnabled()
     finally:
         panel.stop()
         panel.close()

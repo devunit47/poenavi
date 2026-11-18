@@ -275,6 +275,7 @@ class CustomExchangeRatePanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(UI_METRICS.control_gap)
         title_row = QHBoxLayout()
+        title_row.setSpacing(UI_METRICS.inline_gap)
         self.title_label = QLabel("カレンシー交換レート")
         self.title_label.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(15)}px; font-weight: bold;"
@@ -291,6 +292,17 @@ class CustomExchangeRatePanel(QWidget):
         self.manage_button.setToolTip("交換レートの表示を管理（追加・削除・並べ替え）")
         self.manage_button.clicked.connect(self.on_manage)
         title_row.addWidget(self.manage_button)
+
+        self.refresh_button = ToolbarButton()
+        self.refresh_button.setIcon(reload_icon(theme.muted_text))
+        self.refresh_button.setIconSize(QSize(24, 24))
+        self.refresh_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
+        self.refresh_button.setAccessibleName("公式取引データを再取得")
+        self.refresh_button.setToolTip(f"公式取引データを再取得\n\n{OFFICIAL_DATA_TOOLTIP}")
+        self.refresh_button.clicked.connect(
+            lambda: self.refresh_callback(manual=True)
+        )
+        title_row.addWidget(self.refresh_button)
         root.addLayout(title_row)
 
         content = QWidget()
@@ -328,16 +340,6 @@ class CustomExchangeRatePanel(QWidget):
         self.status_label.setWordWrap(True)
         self.status_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
         footer.addWidget(self.status_label, 1)
-        self.refresh_button = ToolbarButton()
-        self.refresh_button.setIcon(reload_icon(theme.muted_text))
-        self.refresh_button.setIconSize(QSize(24, 24))
-        self.refresh_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
-        self.refresh_button.setAccessibleName("公式取引データを再取得")
-        self.refresh_button.setToolTip(f"公式取引データを再取得\n\n{OFFICIAL_DATA_TOOLTIP}")
-        self.refresh_button.clicked.connect(
-            lambda: self.refresh_callback(manual=True)
-        )
-        footer.addWidget(self.refresh_button)
         content_layout.addLayout(footer)
 
     def render_rows(self) -> None:
@@ -351,7 +353,8 @@ class CustomExchangeRatePanel(QWidget):
         pairs = self.store.pairs(self.poe_version)
         value_labels = []
         latest_cached_at = None
-        previous_button = self.manage_button
+        QWidget.setTabOrder(self.manage_button, self.refresh_button)
+        previous_button = self.refresh_button
         for index, pair in enumerate(pairs):
             display_is_rate = False
             result = self.service.direct_pair(
@@ -398,7 +401,6 @@ class CustomExchangeRatePanel(QWidget):
             previous_button = delete
             self.row_widgets.append(row)
             value_labels.append(value)
-        QWidget.setTabOrder(previous_button, self.refresh_button)
 
         rate_labels = [value for value in value_labels if isinstance(value, DecimalAlignedRateLabel)]
         if rate_labels:
@@ -545,9 +547,7 @@ class CustomExchangeRatePanel(QWidget):
         manual = self._manual_check
         self._manual_check = False
         self.render_rows()
-        if result.status == "updated":
-            self.status_label.setText("最新の公式データへ更新しました")
-        elif result.status == "no_market_data":
+        if result.status == "no_market_data":
             self.status_label.setText(
                 "このリーグの取引データはまだありません（自動確認中）"
             )

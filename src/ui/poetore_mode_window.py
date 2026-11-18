@@ -1047,7 +1047,7 @@ class PoetoreModeWindow(QMainWindow):
             QRect(button.mapToGlobal(button.rect().topLeft()), button.size())
             for button in (
                 self.title_bar.minimize_button, self.title_bar.close_button,
-                self.rate_panel.manage_button, self.update_button,
+                self.rate_panel.manage_button, self.rate_refresh_button, self.update_button,
             )
             if button.isVisible()
         ]

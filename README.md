@@ -1,5 +1,13 @@
 # ぽえなび（PoENavi）
 
+> このリポジトリは[buri34/poenavi](https://github.com/buri34/poenavi)のフォークです。フォークではソースのみを公開しています。ビルド済みZIPは[本家のReleases](https://github.com/buri34/poenavi/releases)から入手し、本家公式版の不具合は[本家のIssues](https://github.com/buri34/poenavi/issues)へ報告してください。
+
+フォークで加えた主な変更
+
+- 設定から配色・フォント・基準文字サイズを変更できるようにしました。
+- ぽえとれのタイトルをタイトルバーに移し、画面の余白やアイコンボタンのホバー表示を調整しました。
+- ぽえとれのレート表示が幅に収まらないときも、省略記号が残るようにしました。
+
 Path of Exile 1 / Path of Exile 2向けの、Windows用プレイ支援ツールです。
 
 攻略・レベリングを支援する「ぽえなび」と、日本語アイテムの価格検索・取引検索を支援する「ぽえとれ」を、起動時に選択して利用できます。
@@ -38,25 +46,29 @@ Path of Exile 1 / Path of Exile 2向けの、Windows用プレイ支援ツール�
 - タスクトレイへの格納と復帰
 - 自動アップデート
 
-詳しい機能説明と画像付きの使い方は、以下の記事へまとめています。
+詳しい機能説明と画像付きの使い方は、原作者Buriの以下の記事にまとまっています。
 
 - [ぽえなびの使い方を解説](https://note.com/buri8857/n/nd1e6a07b8a29)
 - [ぽえとれの使い方を解説](https://note.com/buri8857/n/n8a5047edab08)
 
 ## ダウンロード
 
-1. [Releases](../../releases)から最新版の`PoENavi.zip`をダウンロード
+1. [本家のReleases](https://github.com/buri34/poenavi/releases)から、本家で配布されている公式版の最新版`PoENavi.zip`をダウンロード
 2. ZIPを右クリックし、Windows標準の「すべて展開」で解凍
 3. 解凍先の`PoENavi.exe`を起動
 
 Pythonのインストールは不要です。設定やメモは`%APPDATA%\PoENavi\`へ保存されるため、アプリを更新しても引き継がれます。
 
+フォークの変更を試す場合は、[ソースから起動](#ソースから起動)してください。
+
 > [!WARNING]
 > 現在の配布版はコード署名証明書を使用していません。また、PyInstaller製アプリの内部構造や利用実績などにより、SmartScreenの警告や一部のウイルス対策ソフトによる誤検知が発生する場合があります。
 >
-> SmartScreenが表示された場合は、発行元とダウンロード元がこのリポジトリであることを確認したうえで、「詳細情報」から実行できます。不安な場合は実行せず、公開ソースから直接起動してください。
+> SmartScreenが表示された場合は、発行元とダウンロード元が本家のリポジトリであることを確認したうえで、「詳細情報」から実行できます。不安な場合は実行せず、公開ソースから直接起動してください。
 
 ### 配布ファイルのウイルス検査
+
+以下は本家で配布されている公式版についての記載です。
 
 各リリースの`PoENavi.zip`はVirusTotalでスキャンし、
 検査結果URLとSHA-256を該当するReleaseページへ掲載しています。
@@ -68,9 +80,11 @@ SHA-256が一致することで、検査対象と配布ファイルが同一で�
 VirusTotalの結果は安全性を完全に保証するものではありませんが、
 第三者サービスによる確認材料として公開しています。
 
-最新版の結果は[Releases](../../releases)から確認してください。
+最新版の結果は[本家のReleases](https://github.com/buri34/poenavi/releases)から確認してください。
 
 ### コード署名
+
+以下は本家で配布されている公式版についての記載です。
 
 Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
@@ -214,6 +228,8 @@ Some non-OCR features can send search text or chat commands to PoE, but only in 
 
 ## アップデート
 
+自動アップデートは[本家のReleases](https://github.com/buri34/poenavi/releases)を参照する公式版の機能です。ソースから起動したフォーク版を更新する場合は、フォークのソースを取得し直してください。
+
 起動時にGitHub Releasesの安定版を確認します。「今すぐアップデート」を選ぶと、ZIPのダウンロードとSHA-256検証を行い、ファイル更新後にPoENaviを再起動します。
 
 手動確認は、設定画面の「アプリ情報 → アップデートを確認」から行えます。
@@ -226,7 +242,7 @@ PoENaviはインストーラーやWindowsサービスを使用しません。ア
 
 ## 不具合報告・要望
 
-[GitHub Issues](../../issues)へ、次の情報を添えて報告してください。
+本家公式版の不具合や要望は、[本家のGitHub Issues](https://github.com/buri34/poenavi/issues)へ、次の情報を添えて報告してください。
 
 - PoENaviのバージョン
 - PoE1 / PoE2と、ぽえなび / ぽえとれのどちらか
@@ -235,13 +251,21 @@ PoENaviはインストーラーやWindowsサービスを使用しません。ア
 
 個人情報、PoEの認証情報、APIキーなどは掲載しないでください。
 
+フォーク固有の変更に起因する問題は、本家への報告を控え、このフォークのPull Requestなどでお知らせください。
+
 ## ソースから起動
 
 ```bash
-git clone https://github.com/buri34/poenavi.git
+git clone https://github.com/devunit47/poenavi.git
 cd poenavi
 pip install -r requirements.txt
 python main.py
+```
+
+本家のソースから起動する場合は、次のURLでクローンし、同じ手順で起動してください。
+
+```bash
+git clone https://github.com/buri34/poenavi.git
 ```
 
 テストは次のコマンドで実行できます。
@@ -268,13 +292,14 @@ python -m pytest -q
 - [Privacy policy](PRIVACY.md)
 - [Code signing policy](docs/CODE_SIGNING_POLICY.md)
 - [Path of Exile](https://www.pathofexile.com/) by Grinding Gear Games
-- Built with ❤️ by [Buri](https://github.com/buri34)
+- 原作者（本家） [Buri](https://github.com/buri34)
+- フォーク管理者 [devunit47](https://github.com/devunit47)
 
 Path of Exile、ゲーム内名称、アイテムおよび関連ゲームデータの権利はGrinding Gear Gamesに帰属します。
 
 ## サポート
 
-ぽえなびを気に入っていただけたら、開発環境の維持・改善を応援していただけると嬉しいです。
+ぽえなびを気に入っていただけたら、以下のリンクから本家作者Buriの開発環境の維持・改善を応援できます。
 
 - [OFUSE（おふせ）](https://ofuse.me/48eca107)
 - [Ko-fi](https://ko-fi.com/buri8857)

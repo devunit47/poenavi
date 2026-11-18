@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QFontDatabase, QFontMetrics
+from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QIcon, QImage, QPainter, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStyleOptionViewItem, QSystemTrayIcon, QWidget
 
@@ -15,11 +15,12 @@ from src.poetore.exchange_rate_settings import (
 from src.poetore.official_exchange import DirectPairPrice
 from src.ui.appearance import (
     PRESETS, apply_application_appearance, configure_appearance,
-    current_appearance, requested_appearance,
+    current_appearance, requested_appearance, resolve_tokens,
 )
-from src.ui.dialog_theme import UI_METRICS
+from src.ui.dialog_theme import UI_METRICS, icon_button_stylesheet
 from src.update.release_client import ReleaseInfo
 from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
+from tests.test_theme_contrast_audit import contrast
 from tests.test_theme_geometry_audit import geometry_failures
 from tests.test_theme_painter_audit import inspect_paint
 
@@ -52,6 +53,175 @@ def assert_peers(buttons, *, width=True):
     if width:
         # QBoxLayout distributes an odd spare pixel between expanding peers.
         assert max(b.width() for b in buttons) - min(b.width() for b in buttons) <= 1, [(b.text(), b.size()) for b in buttons]
+
+
+def _button_pixels(button):
+    image = QImage(button.size(), QImage.Format_ARGB32)
+    image.fill(Qt.transparent)
+    with QPainter(image) as painter:
+        button.render(painter, QPoint(), QRegion(), QWidget.DrawChildren)
+    return image
+
+
+def _composite(ink, background):
+    alpha = ink.alphaF()
+    return QColor(*(round(ink.getRgb()[i] * alpha + background.getRgb()[i] * (1 - alpha))
+                    for i in range(3)))
+
+
+@pytest.mark.parametrize("appearance", [{"preset": name} for name in PRESETS] + [
+    {"overrides": {"muted_text": "#BAA4D4"}},
+])
+def test_poetore_toolbar_icons_use_a_single_theme_ink(qapp, tmp_path, appearance):
+    apply_application_appearance(qapp, {"appearance": appearance})
+    window = build_scenario("main", tmp_path)
+    ink = QColor(resolve_tokens(appearance, "poetore").muted_text).getRgb()[:3]
+    for button in (*window.header_action_buttons, window.rate_panel.manage_button):
+        icon = button.icon()
+        normal = icon.pixmap(button.iconSize()).toImage()
+        pixels = [normal.pixelColor(x, y) for x in range(normal.width()) for y in range(normal.height())]
+        visible = [pixel for pixel in pixels if pixel.alpha() >= 128]
+        assert visible and all(
+            all(abs(actual - expected) <= 3 for actual, expected in zip(pixel.getRgb()[:3], ink))
+            for pixel in visible
+        ), button.toolTip()
+        assert sum(pixel.alphaF() for pixel in pixels) < len(pixels) * 0.28, button.toolTip()
+        disabled = icon.pixmap(button.iconSize(), QIcon.Disabled).toImage()
+        assert max(disabled.pixelColor(x, y).alpha() for x in range(disabled.width())
+                   for y in range(disabled.height())) < max(pixel.alpha() for pixel in visible)
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+@pytest.mark.parametrize("version", ["poe1", "poe2"])
+def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path, preset, version):
+    apply_application_appearance(qapp, {"appearance": {"preset": preset, "overrides": {"base_font_size": 13}}})
+    main = build_scenario("main", tmp_path, version)
+    trade = build_scenario("trade", tmp_path, version)
+    tokens = resolve_tokens({"preset": preset}, "poetore")
+    focus_color = QColor(tokens.accent)
+    rate_row = main.rate_panel.row_widgets[0]
+    rate_delete = rate_row.findChild(QPushButton, "customRateDelete0")
+    for window, buttons in (
+        (main, (
+            *((button, (36, 36)) for button in main.header_action_buttons if not button.isHidden()),
+            (main.title_bar.minimize_button, (32, 20)),
+            (main.title_bar.close_button, (32, 20)),
+            (main.rate_panel.manage_button, (36, 36)),
+            (rate_delete, (32, 32)),
+        )),
+        (trade, ((trade.league_popup_button, (36, 33)), (trade.poetore_close_button, (36, 33)))),
+    ):
+        settle(qapp, window)
+        handle = window.windowHandle()
+        for button, expected_size in buttons:
+            original = button.geometry()
+            assert (original.width(), original.height()) == expected_size
+
+            def move_to(position):
+                QTest.mouseMove(handle, position)
+                qapp.processEvents()
+
+            away = (rate_row.mapTo(main, QPoint(10, rate_row.height() // 2))
+                    if button is rate_delete else QPoint(5, 5))
+            button.clearFocus()
+            move_to(away)
+            idle = _button_pixels(button)
+            edge = QPoint(button.width() // 2, 0)
+            assert idle.pixelColor(edge).alpha() == 0, button.toolTip()
+            icon_ink = [idle.pixelColor(p) for p in (
+                button.rect().center() + QPoint(x, y) for x in range(-5, 6) for y in range(-5, 6)
+            )]
+            assert any(pixel.alpha() for pixel in icon_ink), button.toolTip()
+
+            move_to(button.mapTo(window, button.rect().center()))
+            assert button.underMouse()
+            hovered = _button_pixels(button)
+            hover_fill = hovered.pixelColor(edge)
+            assert hover_fill.alpha() > 0, button.toolTip()
+            assert hover_fill.red() == hover_fill.green() == hover_fill.blue()
+            assert hovered.pixelColor(0, 0).alpha() == 0
+            button.setDown(True)
+            assert _button_pixels(button).pixelColor(edge).alpha() > hover_fill.alpha()
+            button.setDown(False)
+
+            surface = QColor(tokens.control if button is rate_delete else tokens.background)
+            hover_background = _composite(hovered.pixelColor(edge + QPoint(0, 2)), surface)
+            for background in (surface, hover_background):
+                assert max(contrast(_composite(pixel, background), background) for pixel in icon_ink) >= 3
+                assert contrast(focus_color, background) >= 3
+
+            move_to(away)
+            assert button.focusPolicy() & Qt.TabFocus
+            button.setFocus(Qt.TabFocusReason)
+            assert button.hasFocus()
+            focused = _button_pixels(button)
+            assert any(
+                focused.pixelColor(edge + QPoint(0, y)) == focus_color
+                and idle.pixelColor(edge + QPoint(0, y)).alpha() == 0
+                for y in range(button.height() // 2)
+            ), button.toolTip()
+            assert button.geometry() == original
+        window.hide()
+
+
+def test_auxiliary_poetore_icon_buttons_render_transparently(qapp, tmp_path):
+    from src.app_mode import POETORE_MODE
+    from src.ui.app_theme import POETORE_THEME
+    from src.ui.cheat_sheets import CheatSheetOverlay
+    from src.ui.map_check import MapCheckWindow
+    from src.ui.memo_dialog import MemoDialog
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    exchange = build_scenario("exchange", tmp_path)
+    settings = build_scenario("settings", tmp_path)
+    map_check = MapCheckWindow({}, app_mode=POETORE_MODE)
+    memo = MemoDialog(notes_path=str(tmp_path / "memo.json"), theme=POETORE_THEME, app_mode=POETORE_MODE)
+    cheat_sheets = CheatSheetOverlay({}, theme=POETORE_THEME, app_mode=POETORE_MODE)
+    for window, buttons in (
+        (exchange, exchange.registered_widget._rows[0].findChildren(QPushButton)),
+        (settings, (settings.hideout_minutes_up_button, settings.hideout_minutes_down_button,
+                    settings.hideout_seconds_up_button, settings.hideout_seconds_down_button)),
+        (map_check, [button for button in map_check.findChildren(QPushButton) if button.text() == "×"]),
+        (memo, [button for button in memo.findChildren(QPushButton) if button.text() == "✕"]),
+        (cheat_sheets, [button for button in cheat_sheets.findChildren(QPushButton) if button.text() == "×"]),
+    ):
+        settle(qapp, window)
+        QTest.mouseMove(window.windowHandle(), QPoint(1, 1))
+        for button in buttons:
+            button.clearFocus()
+            idle = _button_pixels(button)
+            assert idle.pixelColor(button.width() // 2, 0).alpha() == 0
+            assert idle.pixelColor(0, button.height() // 2).alpha() == 0
+        window.hide()
+
+
+def test_icon_button_fill_uses_custom_appearance_and_preserves_checked_state(qapp):
+    appearance = {"overrides": {"text": "#08A8DD"}}
+    apply_application_appearance(qapp, {"appearance": appearance})
+    button = QPushButton("×")
+    button.setFixedSize(36, 36)
+    button.setCheckable(True)
+    button.setStyleSheet(icon_button_stylesheet())
+    settle(qapp, button)
+    point = QPoint(18, 2)
+    button.clearFocus()
+    assert _button_pixels(button).pixelColor(point).alpha() == 0
+    button.setChecked(True)
+    fill = _button_pixels(button).pixelColor(point)
+    gray = resolve_tokens(appearance).icon_button_gray
+    assert fill.alpha() > 0
+    assert all(abs(channel - gray) <= 5 for channel in fill.getRgb()[:3])
+    assert gray != resolve_tokens(None, "poetore").icon_button_gray
+    button.setEnabled(False)
+    disabled = _button_pixels(button)
+    assert disabled.pixelColor(point).alpha() == 0
+    ink = max(
+        (disabled.pixelColor(x, y) for x in range(button.width()) for y in range(button.height())),
+        key=QColor.alpha,
+    )
+    expected = QColor(resolve_tokens(appearance).disabled)
+    assert ink.alpha() > 0
+    assert all(abs(actual - target) <= 2 for actual, target in zip(ink.getRgb()[:3], expected.getRgb()[:3]))
 
 
 @pytest.mark.parametrize("locked", [False, True])

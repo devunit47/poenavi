@@ -219,7 +219,7 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     assert all(button.text() == "" for button in header_buttons)
     assert all(not button.icon().isNull() for button in header_buttons)
     assert all(button.iconSize() == QSize(24, 24) for button in header_buttons)
-    assert all(button.focusPolicy() == Qt.NoFocus for button in header_buttons)
+    assert all(button.focusPolicy() == Qt.TabFocus for button in header_buttons)
     icon_images = [
         button.icon().pixmap(QSize(24, 24)).toImage() for button in header_buttons
     ]
@@ -240,8 +240,8 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     close_button = window.findChild(QPushButton, "poetoreCloseButton")
     assert minimize_button.text() == "─"
     assert close_button.text() == "×"
-    assert minimize_button.focusPolicy() == Qt.NoFocus
-    assert close_button.focusPolicy() == Qt.NoFocus
+    assert minimize_button.focusPolicy() == Qt.TabFocus
+    assert close_button.focusPolicy() == Qt.TabFocus
     assert window.rate_refresh_button.text() == "最新データ確認"
     assert window.rate_refresh_button.focusPolicy() == Qt.NoFocus
     assert window.tray_icon.toolTip() == "ぽえとれ"

@@ -44,6 +44,12 @@ class ThemeTokens:
     font_family: str = DEFAULT_FONT_FAMILY
     base_font_size: int = DEFAULT_FONT_SIZE
 
+    @property
+    def icon_button_gray(self) -> int:
+        """Neutral ink for translucent icon-button states."""
+        red, green, blue = (int(self.text[index:index + 2], 16) for index in (1, 3, 5))
+        return round(.299 * red + .587 * green + .114 * blue)
+
 
 LEGACY_DIALOG_TOKENS = ThemeTokens()
 POENAVI_TOKENS = replace(

@@ -171,9 +171,50 @@ def test_unique_roll_painted_text_fits(qapp, profile):
         assert not (failures := inspect_paint(slider)), "\n".join(failures)
 
 
+def inspect_scope_button(qapp):
+    from src.poetore.ui import PoetoreWindow
+    from PySide6.QtWidgets import QStyle
+
+    window = PoetoreWindow(app_config={})
+    toggle = window.base_scope_toggle
+    full_text = "とても長いベースアイテム名" * 10
+    toggle.setItemText(0, full_text)
+    button = toggle._buttons[0]
+    button.ensurePolished()
+    button.resize(160, button.sizeHint().height())
+    painted = []
+    failures = []
+
+    class RecordingStylePainter(QPainter):
+        def __init__(self, target):
+            self.canvas = QImage(target.size(), QImage.Format_ARGB32_Premultiplied)
+            self.canvas.fill(Qt.transparent)
+            super().__init__(self.canvas)
+
+        def drawControl(self, element, option):
+            rect = button.style().subElementRect(QStyle.SE_PushButtonContents, option, button)
+            metrics = button.fontMetrics()
+            painted.append(option.text)
+            if metrics.horizontalAdvance(option.text) > rect.width() or metrics.height() > rect.height():
+                failures.append(f"scope text does not fit: {option.text!r}, {rect}")
+            button.style().drawControl(element, option, self, button)
+            self.end()
+
+    with patch("src.poetore.ui.QStylePainter", RecordingStylePainter):
+        button.paintEvent(None)
+    assert painted and painted[0] != full_text
+    assert button.text() == button.toolTip() == full_text
+    return failures
+
+
+def test_scope_button_painted_text_fits(qapp):
+    assert not (failures := inspect_scope_button(qapp)), "\n".join(failures)
+
+
 # Every custom painter is explicitly accounted for. Adding one requires an
 # inspector, so a new chip/overlay cannot silently escape this audit.
 PAINTERS = {
+    "_ElidedScopeButton": "inspect_scope_button",
     "DesecrationTierOverlay": "inspect_desecration",
     "OutlinedLabel": "inspect_ocr_status",
     "ExpeditionRegionSelector": "inspect_region_selectors",

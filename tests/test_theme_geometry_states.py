@@ -72,7 +72,7 @@ def test_trade_obs_collapse_disable_reenable_and_expand(qapp, size):
         assert window.height() > 30
         if size != 13:
             assert window.minimumHeight() > 30
-        assert window.maximumHeight() == 16777215
+        assert 30 < window.height() <= window.maximumHeight() <= window._trade_available_geometry().height()
         window.collapse_for_obs()
         _settle(qapp)
         assert window.height() == 30
@@ -81,7 +81,7 @@ def test_trade_obs_collapse_disable_reenable_and_expand(qapp, size):
         _settle(qapp)
         if size != 13:
             assert window.minimumHeight() > 30
-        assert window.maximumHeight() == 16777215
+        assert 30 < window.height() <= window.maximumHeight() <= window._trade_available_geometry().height()
 
 
 @pytest.mark.parametrize("size", [14, 18, 24])

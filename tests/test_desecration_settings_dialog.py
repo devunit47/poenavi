@@ -176,9 +176,9 @@ def test_desecration_settings_explains_required_and_closed_regions(qtbot):
         "読取時は「インベントリを開いた状態」を先に確認し、読取に失敗した場合は"
         "「閉じた状態」を確認します。"
     )
-    assert warning.text() == (
-        "PoE2のウィンドウサイズを変更した場合、位置が変わるため再設定が必要です。"
-    )
+    assert "ウィンドウサイズ変更後" in warning.text()
+    assert "範囲を再設定" in warning.text()
+    assert "位置が変わるため再設定が必要" in warning.toolTip()
 
 
 def test_desecration_settings_warns_that_screen_reading_must_be_enabled(qtbot):
@@ -186,7 +186,8 @@ def test_desecration_settings_warns_that_screen_reading_must_be_enabled(qtbot):
     qtbot.addWidget(dialog)
 
     hint = dialog.findChild(QLabel, "screenReadingEnableRequiredHint")
-    assert hint.text() == "※使用するにはチェックをONにしてください"
+    assert hint.text() == "有効時のみ読み取り"
+    assert "チェックをONにしてください" in dialog.enabled_checkbox.toolTip()
     assert hint.property("state") == "warning"
     assert "#F6C85F" in dialog.styleSheet()
     assert "font-weight: 600" in dialog.styleSheet()

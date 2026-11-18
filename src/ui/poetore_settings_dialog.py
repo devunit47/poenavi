@@ -51,6 +51,7 @@ from src.ui.app_info_widget import AppInfoWidget
 from src.ui.appearance_settings import AppearanceSettingsWidget
 from src.ui.custom_command_settings import CustomCommandSettingsWidget
 from src.ui.dialog_theme import (
+    UI_METRICS, equalize_button_sizes, fit_scroll_content_width,
     POETORE_DIALOG_THEME,
     apply_dialog_theme,
     build_dialog_stylesheet,
@@ -117,20 +118,22 @@ class PoetoreSettingsDialog(QDialog):
         apply_dialog_theme(self, self.theme)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 14)
-        root.setSpacing(12)
+        root.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        root.setSpacing(UI_METRICS.section_gap)
         self.title_label = QLabel("設定")
         self.title_label.setProperty("uiRole", "title")
         root.addWidget(self.title_label)
         tabs = QTabWidget()
         basic_tab = QWidget()
         basic_layout = QVBoxLayout(basic_tab)
-        basic_layout.setContentsMargins(12, 12, 12, 12)
-        basic_layout.setSpacing(12)
+        basic_layout.setContentsMargins(*([UI_METRICS.panel_padding] * 4))
+        basic_layout.setSpacing(UI_METRICS.section_gap)
 
         startup_group = QGroupBox("起動設定")
         startup_layout = QVBoxLayout(startup_group)
         startup_layout.addWidget(QLabel("PoEバージョン"))
+        version_row = QHBoxLayout()
+        version_row.setSpacing(UI_METRICS.control_gap)
         self.poe_version_group = QButtonGroup(self)
         self.poe_version_radios = {}
         for version in POE_VERSION_ORDER:
@@ -141,12 +144,16 @@ class PoetoreSettingsDialog(QDialog):
             radio.toggled.connect(
                 lambda checked, selected=version: self._on_poe_version_changed(selected, checked)
             )
-            startup_layout.addWidget(radio)
+            version_row.addWidget(radio)
+        version_row.addStretch()
+        startup_layout.addLayout(version_row)
         saved_version_mode = str(self.current_config.get("poe_version_mode", "ask"))
 
         startup = self.current_config.get("startup")
         startup = startup if isinstance(startup, dict) else {}
         startup_layout.addWidget(QLabel("起動モード"))
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(UI_METRICS.control_gap)
         preferred = normalize_app_mode(
             startup.get("preferred_mode", POETORE_MODE)
         )
@@ -160,7 +167,9 @@ class PoetoreSettingsDialog(QDialog):
             radio.setChecked(mode == preferred)
             self.app_mode_group.addButton(radio)
             self.app_mode_radios[mode] = radio
-            startup_layout.addWidget(radio)
+            mode_row.addWidget(radio)
+        mode_row.addStretch()
+        startup_layout.addLayout(mode_row)
         self.skip_startup_selector_checkbox = QCheckBox("次回からこの設定で直接起動")
         self.skip_startup_selector_checkbox.setChecked(
             saved_version_mode in POE_VERSION_ORDER
@@ -168,7 +177,7 @@ class PoetoreSettingsDialog(QDialog):
         )
         startup_layout.addWidget(self.skip_startup_selector_checkbox)
         self.startup_change_note = QLabel(
-            "PoEバージョン・起動モードの変更は、次回起動時から適用されます。"
+            "PoEバージョン・起動モードは次回起動時に適用されます。"
         )
         self.startup_change_note.setObjectName("startupChangeNote")
         self.startup_change_note.setProperty("uiRole", "muted")
@@ -183,7 +192,7 @@ class PoetoreSettingsDialog(QDialog):
         )
         startup_layout.addWidget(self.windows_autostart_poetore_checkbox)
         self.windows_autostart_note = QLabel(
-            "有効にすると、次回のWindowsログイン時からぽえとれを自動起動します。"
+            "次回のWindowsログインから適用されます。"
         )
         self.windows_autostart_note.setObjectName("windowsAutostartNote")
         self.windows_autostart_note.setProperty("uiRole", "muted")
@@ -439,7 +448,7 @@ class PoetoreSettingsDialog(QDialog):
         )
         display_form.addRow("フォントサイズ:", self.result_font_size_combo)
         display_note = QLabel(
-            "文字に合わせてボタンや入力欄、検索結果ウィンドウの大きさも調整します。"
+            "ボタン・入力欄・結果ウィンドウも文字サイズに追従します。"
         )
         display_note.setObjectName("resultFontSizeNote")
         display_note.setProperty("uiRole", "muted")
@@ -484,9 +493,9 @@ class PoetoreSettingsDialog(QDialog):
         self.obs_title_bar_opacity_slider.setToolTip(
             "待機中に表示される「ぽえとれ検索ウィンドウ」バーの透過率"
         )
-        obs_note = QLabel(
-            "待機中はタイトルバーだけを表示し、検索すると検索結果を当該タイトルバーの下に"
-            "展開します。OBSでは「ぽえとれ - 検索結果ウィンドウ」として認識されます。\n"
+        obs_note = QLabel("待機中はバーのみ表示し、検索時に結果を展開します。")
+        obs_note.setToolTip(
+            "OBSでは「ぽえとれ - 検索結果ウィンドウ」として認識されます。\n"
             "待機中のタイトルバーは透過率を変更できます。"
         )
         obs_note.setObjectName("obsStreamingNote")
@@ -576,6 +585,16 @@ class PoetoreSettingsDialog(QDialog):
         root.addLayout(self.footer_layout)
 
         self._clear_legacy_control_styles()
+        equalize_button_sizes((self.cancel_button, self.save_button), minimum_width=UI_METRICS.action_width)
+        equalize_button_sizes((self.custom_commands_widget.add_button,
+                               self.custom_commands_widget.remove_button), minimum_width=UI_METRICS.action_width)
+        for group in basic_tab.findChildren(QGroupBox):
+            if group.layout() is not None:
+                group.layout().setContentsMargins(*([UI_METRICS.panel_padding] * 4))
+                group.layout().setSpacing(UI_METRICS.control_gap)
+        for form in basic_tab.findChildren(QFormLayout):
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        fit_scroll_content_width(basic_scroll)
 
     def _clear_legacy_control_styles(self):
         """ぽえとれ設定内だけ、旧インラインQSSを共通テーマへ委譲する。"""

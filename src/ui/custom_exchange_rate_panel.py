@@ -26,6 +26,7 @@ from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import MAX_RATE_PAIRS, ExchangeRatePairStore
 from src.poetore.official_exchange import OfficialExchangeShadowService
 from src.ui.app_theme import POETORE_THEME
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 
 RATE_CHECK_INTERVAL_MSEC = 10 * 60 * 1000
 OFFICIAL_DATA_TOOLTIP = (
@@ -201,7 +202,7 @@ class CustomExchangeRatePanel(QWidget):
         """)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setSpacing(UI_METRICS.control_gap)
         title_row = QHBoxLayout()
         self.title_label = QLabel("カレンシー交換レート")
         self.title_label.setStyleSheet(
@@ -226,8 +227,9 @@ class CustomExchangeRatePanel(QWidget):
             }}
         """)
         self.rows_layout = QVBoxLayout(self.card)
-        self.rows_layout.setContentsMargins(10, 8, 10, 8)
-        self.rows_layout.setSpacing(4)
+        self.rows_layout.setContentsMargins(UI_METRICS.overlay_margin, UI_METRICS.control_gap,
+                                           UI_METRICS.overlay_margin, UI_METRICS.control_gap)
+        self.rows_layout.setSpacing(UI_METRICS.inline_gap)
         root.addWidget(self.card)
 
         footer = QHBoxLayout()
@@ -244,6 +246,7 @@ class CustomExchangeRatePanel(QWidget):
         )
         footer.addWidget(self.refresh_button)
         root.addLayout(footer)
+        equalize_button_sizes((self.manage_button, self.refresh_button), minimum_width=UI_METRICS.action_width)
 
     def render_rows(self) -> None:
         while self.rows_layout.count():

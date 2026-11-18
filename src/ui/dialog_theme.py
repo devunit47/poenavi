@@ -11,6 +11,79 @@ from src.app_mode import POETORE_MODE, normalize_app_mode
 
 
 @dataclass(frozen=True)
+class UiMetrics:
+    """Logical pixels shared by PoE trade dialogs and compact overlays."""
+
+    inline_gap: int = 4
+    control_gap: int = 8
+    section_gap: int = 16
+    page_margin: int = 16
+    panel_padding: int = 12
+    button_padding: int = 12
+    action_width: int = 96
+    toolbar_size: int = 36
+    overlay_margin: int = 10
+    overlay_gap: int = 6
+    overlay_control_height: int = 28
+
+
+UI_METRICS = UiMetrics()
+
+
+def fit_scroll_content_width(scroll):
+    """Keep a settings page's controls reachable without sideways scrolling."""
+    content = scroll.widget()
+    content.ensurePolished()
+    content.layout().activate()
+    scroll.setMinimumWidth(content.minimumSizeHint().width()
+                           + scroll.verticalScrollBar().sizeHint().width()
+                           + 2 * scroll.frameWidth())
+
+
+def equalize_button_sizes(buttons, *, minimum_width=0, minimum_height=0, expanding=False, equal_width=True):
+    """Fit a peer group to its longest label and tallest font, including QSS.
+
+    Expanding groups share the available row width; footer/toolbar groups keep
+    the same natural width. Calling after labels/styles are set preserves the
+    application's font-aware geometry fitting.
+    """
+    from PySide6.QtCore import QSize, Qt
+    from PySide6.QtWidgets import QPushButton, QSizePolicy, QStyle, QStyleOptionButton
+
+    buttons = tuple(buttons)
+    if not buttons:
+        return
+    sizes = []
+    for button in buttons:
+        button.ensurePolished()
+        needed = button.sizeHint()
+        if isinstance(button, QPushButton):
+            option = QStyleOptionButton()
+            button.initStyleOption(option)
+            content = button.style().subElementRect(QStyle.SE_PushButtonContents, option, button)
+            metrics = button.fontMetrics()
+            text_width = max((metrics.horizontalAdvance(line.replace("&", "")) for line in button.text().splitlines()), default=0)
+            if not button.icon().isNull():
+                text_width += button.iconSize().width() + 4
+            needed = needed.expandedTo(QSize(
+                text_width + button.width() - content.width(),
+                metrics.size(Qt.TextShowMnemonic, button.text()).height() + button.height() - content.height(),
+            ))
+        sizes.append(needed)
+    width = max(minimum_width, *(size.width() for size in sizes))
+    height = max(minimum_height, *(size.height() for size in sizes))
+    for button in buttons:
+        button.setFixedHeight(height)
+        if not equal_width:
+            continue
+        if expanding:
+            button.setMinimumWidth(width)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        else:
+            button.setFixedWidth(width)
+
+
+@dataclass(frozen=True)
 class DialogTheme:
     """対象ダイアログ用の意味トークンと共通寸法。"""
 
@@ -141,7 +214,7 @@ def build_dialog_stylesheet(theme: DialogTheme) -> str:
 {root} QPushButton,
 {root} QToolButton {{
     min-height: {theme.form_control_height}px;
-    padding: 0 12px;
+    padding: 0 {UI_METRICS.button_padding}px;
     color: {theme.text};
     background-color: {theme.control};
     border: 1px solid {theme.border_strong};
@@ -327,6 +400,12 @@ def build_dialog_stylesheet(theme: DialogTheme) -> str:
     padding: 0 4px;
     color: {theme.text};
     background-color: transparent;
+}}
+/* PoE trade groups own their inner spacing in the layout, once. */
+QDialog[dialogTheme="poetore"] QGroupBox {{
+    padding: 0;
+    padding-top: 4px;
+    margin-top: 20px;
 }}
 
 {root} QTabWidget::pane {{

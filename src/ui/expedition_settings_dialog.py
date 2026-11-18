@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from src.ui.appearance import resolve_dialog_theme, theme_font_size
 from src.poetore.window_position import path_of_exile_client_rect
 from src.ui.dialog_theme import (
+    UI_METRICS, equalize_button_sizes, fit_scroll_content_width,
     POETORE_DIALOG_THEME,
     DialogTheme,
     apply_dialog_theme,
@@ -231,8 +232,8 @@ class ExpeditionSettingsDialog(QDialog):
         apply_dialog_theme(self, self.theme)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        root.setSpacing(UI_METRICS.section_gap)
         self.title_label = QLabel("エクスペ報酬チェック設定")
         self.title_label.setProperty("uiRole", "title")
         root.addWidget(self.title_label)
@@ -244,8 +245,8 @@ class ExpeditionSettingsDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         content_widget = QWidget()
         content = QVBoxLayout(content_widget)
-        content.setContentsMargins(4, 4, 4, 4)
-        content.setSpacing(10)
+        content.setContentsMargins(0, 0, UI_METRICS.inline_gap, 0)
+        content.setSpacing(UI_METRICS.section_gap)
         scroll.setWidget(content_widget)
         root.addWidget(scroll, 1)
 
@@ -255,19 +256,21 @@ class ExpeditionSettingsDialog(QDialog):
         self.enabled_checkbox = QCheckBox("ゲーム画面の読み取り機能を有効にする")
         self.enabled_checkbox.setChecked(bool(screen_reading_enabled))
         reading_toggle_row.addWidget(self.enabled_checkbox)
-        self.enable_required_hint = QLabel("※使用するにはチェックをONにしてください")
+        self.enable_required_hint = QLabel("有効時のみ読み取り")
+        self.enabled_checkbox.setToolTip("使用するにはチェックをONにしてください。無効時はOCRとホットキーを起動しません。")
         self.enable_required_hint.setObjectName("screenReadingEnableRequiredHint")
-        reading_toggle_row.addWidget(self.enable_required_hint)
         reading_toggle_row.addStretch()
         basic.addLayout(reading_toggle_row)
+        basic.addWidget(self.enable_required_hint)
         shared_hint = QLabel(
-            "エクスペ報酬価格チェックとアビス冒涜Modティアチェックで共通の設定です。"
+            "アビス冒涜Modチェックと共通の有効設定です。"
         )
         shared_hint.setWordWrap(True)
         shared_hint.setProperty("uiRole", "muted")
         basic.addWidget(shared_hint)
 
         hotkey_form = QFormLayout()
+        hotkey_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         hotkey_form.setContentsMargins(0, 2, 0, 0)
         self.hotkey_widget = AutoHideHotkeyWidget(
             hotkey,
@@ -291,8 +294,9 @@ class ExpeditionSettingsDialog(QDialog):
         instruction.setProperty("uiRole", "muted")
         ranges.addWidget(instruction)
         size_warning = QLabel(
-            "PoE2のウィンドウサイズを変更した場合、位置が変わるため再設定が必要です。"
+            "PoE2のウィンドウサイズ変更後は、範囲を再設定してください。"
         )
+        size_warning.setToolTip("PoE2のウィンドウサイズを変更した場合、位置が変わるため再設定が必要です。")
         size_warning.setWordWrap(True)
         size_warning.setObjectName("screenSizeRegionWarning")
         size_warning.setProperty("state", "warning")
@@ -327,7 +331,7 @@ class ExpeditionSettingsDialog(QDialog):
         example_title.setProperty("uiRole", "section")
         example_heading.addWidget(example_title)
         self.example_hint_label = QLabel(
-            "※以下の画像をクリックするとポップアップで拡大表示します"
+            "クリックで拡大"
         )
         self.example_hint_label.setObjectName("expeditionExampleHint")
         self.example_hint_label.setProperty("uiRole", "muted")
@@ -340,6 +344,7 @@ class ExpeditionSettingsDialog(QDialog):
         self.example_thumbnail.setAlignment(Qt.AlignCenter)
         self.example_thumbnail.setFixedHeight(150)
         self.example_thumbnail.setCursor(Qt.PointingHandCursor)
+        self.example_thumbnail.setToolTip("画像をクリックすると指定例を別ウィンドウで拡大表示します")
         self.example_thumbnail.clicked.connect(self._show_example_popup)
         ranges.addWidget(self.example_thumbnail)
         self._load_example_thumbnail()
@@ -361,14 +366,17 @@ class ExpeditionSettingsDialog(QDialog):
         self.enable_required_hint.setProperty("state", "warning")
         self._clear_legacy_control_styles()
         self._refresh_region_state()
+        equalize_button_sizes((self.cancel_button, self.save_button), minimum_width=UI_METRICS.action_width)
+        equalize_button_sizes((self.set_region_button, self.reset_region_button), expanding=True)
+        fit_scroll_content_width(scroll)
 
     @staticmethod
     def _section_group(title: str, object_name: str):
         group = QGroupBox(title)
         group.setObjectName(object_name)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(12, 18, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*([UI_METRICS.panel_padding] * 4))
+        layout.setSpacing(UI_METRICS.control_gap)
         return group, layout
 
     def settings(self) -> tuple[dict, str, bool]:

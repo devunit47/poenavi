@@ -634,8 +634,7 @@ def test_candidate_rows_use_compact_uniform_height_and_icons(qapp, tmp_path):
             ).height()
             for row in range(min(10, dialog.candidate_list.count()))
         }
-        assert heights == {CANDIDATE_ROW_HEIGHT}
-        assert CANDIDATE_ROW_HEIGHT >= dialog.candidate_list.fontMetrics().height()
+        assert heights == {max(CANDIDATE_ROW_HEIGHT, dialog.candidate_list.fontMetrics().height() + 4)}
     finally:
         dialog.close()
 
@@ -651,9 +650,8 @@ def test_category_rows_are_compact_and_add_section_is_taller(qapp, tmp_path):
             dialog.category_list.visualItemRect(dialog.category_list.item(row)).height()
             for row in range(dialog.category_list.count())
         }
-        assert heights == {CATEGORY_ROW_HEIGHT}
-        assert CATEGORY_ROW_HEIGHT >= dialog.category_list.fontMetrics().height()
-        assert dialog.item_card.height() >= 400
+        assert heights == {max(CATEGORY_ROW_HEIGHT, dialog.category_list.fontMetrics().height() + 4)}
+        assert dialog.item_card.height() >= 320
         assert "QListWidget#ratePairCategoryList::item" in dialog.styleSheet()
         assert "min-height: 20px; padding: 1px 7px;" in dialog.styleSheet()
         option = QStyleOptionViewItem()

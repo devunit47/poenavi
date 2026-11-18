@@ -625,13 +625,13 @@ def test_poetore_windows_autostart_has_blank_line_and_saves_setting():
     direct_index = layout.indexOf(dialog.skip_startup_selector_checkbox)
     assert layout.itemAt(direct_index + 1).widget() is dialog.startup_change_note
     assert dialog.startup_change_note.text() == (
-        "PoEバージョン・起動モードの変更は、次回起動時から適用されます。"
+        "PoEバージョン・起動モードは次回起動時に適用されます。"
     )
     assert layout.itemAt(direct_index + 2).spacerItem().sizeHint().height() == 13
     assert layout.itemAt(direct_index + 3).widget() is checkbox
     assert layout.itemAt(direct_index + 4).widget() is dialog.windows_autostart_note
     assert dialog.windows_autostart_note.text() == (
-        "有効にすると、次回のWindowsログイン時からぽえとれを自動起動します。"
+        "次回のWindowsログインから適用されます。"
     )
     checkbox.setChecked(False)
     assert dialog.get_settings()["startup"]["windows_autostart_poetore"] is False
@@ -719,7 +719,7 @@ def test_poetore_settings_saves_result_font_size():
 
     assert dialog.get_settings()["poetore"]["result_font_size"] == "large"
     note = dialog.findChild(QLabel, "resultFontSizeNote")
-    assert "ボタンや入力欄" in note.text()
+    assert "ボタン・入力欄" in note.text()
     dialog.close()
 
 
@@ -734,11 +734,9 @@ def test_poetore_settings_describes_obs_result_window_behavior():
     assert dialog.obs_title_bar_opacity_slider.maximum() == 100
     assert dialog.obs_title_bar_opacity_slider.value() == 100
     note = dialog.findChild(QLabel, "obsStreamingNote")
-    assert note.text() == (
-        "待機中はタイトルバーだけを表示し、検索すると検索結果を当該タイトルバーの下に"
-        "展開します。OBSでは「ぽえとれ - 検索結果ウィンドウ」として認識されます。\n"
-        "待機中のタイトルバーは透過率を変更できます。"
-    )
+    assert note.text() == "待機中はバーのみ表示し、検索時に結果を展開します。"
+    assert "ぽえとれ - 検索結果ウィンドウ" in note.toolTip()
+    assert "タイトルバーは透過率を変更できます" in note.toolTip()
     dialog.close()
 
 

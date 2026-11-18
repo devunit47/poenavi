@@ -37,7 +37,7 @@ from src.poetore.window_position import (
     capture_placement_context,
     position_for_context_at_cursor_y,
 )
-from src.ui.dialog_theme import POETORE_DIALOG_THEME, apply_dialog_theme
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, POETORE_DIALOG_THEME, apply_dialog_theme
 from src.utils.window_focus import (
     focus_window,
     get_foreground_window,
@@ -78,8 +78,8 @@ class MapModManagerDialog(QDialog):
             """
         )
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        root.setSpacing(UI_METRICS.section_gap)
         self.title_label = QLabel("Map Mod管理")
         self.title_label.setProperty("uiRole", "title")
         root.addWidget(self.title_label)
@@ -122,6 +122,7 @@ class MapModManagerDialog(QDialog):
         self.close_button.clicked.connect(self.accept)
         footer.addWidget(self.close_button)
         root.addLayout(footer)
+        equalize_button_sizes(self.profile_buttons)
         self._select_profile(self.config["profile"])
 
     def _set_show_new(self, checked):
@@ -223,7 +224,10 @@ class MapCheckWindow(QDialog):
         )
         self._apply_font_size()
         self.root = QVBoxLayout(self)
+        self.root.setContentsMargins(*([UI_METRICS.overlay_margin] * 4))
+        self.root.setSpacing(UI_METRICS.overlay_gap)
         header = QHBoxLayout()
+        header.setSpacing(UI_METRICS.inline_gap)
         self.title = QLabel("Map Check")
         self.title.setStyleSheet(f"font-size:{theme_font_size(15)}px;font-weight:bold;")
         header.addWidget(self.title, 1)
@@ -246,9 +250,12 @@ class MapCheckWindow(QDialog):
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.body = QWidget()
         self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(*([UI_METRICS.control_gap] * 4))
+        self.body_layout.setSpacing(UI_METRICS.inline_gap)
         self.scroll.setWidget(self.body)
         self.root.addWidget(self.scroll, 1)
         self._select_profile(self.config["profile"], save=False)
+        equalize_button_sizes(self.profile_buttons, minimum_width=32)
 
     def reload_config(self, config):
         self.config = normalized_map_check_config(config)

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.ui.appearance import resolve_dialog_theme, theme_color, theme_font_size
+from src.ui.appearance import has_custom_theme_font, resolve_dialog_theme, theme_color, theme_font_size
 from src.poetore.exchange_catalog import (
     ExchangeCatalogItem,
     category_labels,
@@ -43,6 +43,7 @@ from src.poetore.exchange_rate_settings import (
     RatePairValidationError,
 )
 from src.ui.dialog_theme import (
+    UI_METRICS, equalize_button_sizes,
     POETORE_DIALOG_THEME,
     apply_dialog_theme,
 )
@@ -75,7 +76,7 @@ class _CategoryItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index) -> QSize:
         size = super().sizeHint(option, index)
-        size.setHeight(CATEGORY_ROW_HEIGHT)
+        size.setHeight(max(CATEGORY_ROW_HEIGHT, option.fontMetrics.height() + 4))
         return size
 
 
@@ -291,8 +292,8 @@ class ExchangeRateManagementDialog(QDialog):
             """
         )
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        root.setSpacing(UI_METRICS.control_gap)
 
         self.title_label = QLabel()
         self.title_label.setProperty("uiRole", "title")
@@ -305,7 +306,7 @@ class ExchangeRateManagementDialog(QDialog):
         self.registered_scroll.setObjectName("registeredPairsScroll")
         self.registered_scroll.setWidgetResizable(True)
         self.registered_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.registered_scroll.setFixedHeight(175)
+        self.registered_scroll.setFixedHeight(112)
         self.registered_scroll.viewport().setStyleSheet(
             f"background: {theme.surface}; color: {theme.text};"
         )
@@ -324,6 +325,7 @@ class ExchangeRateManagementDialog(QDialog):
 
         self.add_title = QLabel("追加するペア")
         self.add_title.setProperty("uiRole", "section")
+        root.addSpacing(UI_METRICS.control_gap)
         root.addWidget(self.add_title)
 
         selection_row = QHBoxLayout()
@@ -332,10 +334,10 @@ class ExchangeRateManagementDialog(QDialog):
         self.item_card = QFrame()
         self.item_card.setObjectName("ratePairItemCard")
         self.item_card.setProperty("uiRole", "surface")
-        self.item_card.setMinimumHeight(400)
+        self.item_card.setMinimumHeight(320)
         item_card_layout = QVBoxLayout(self.item_card)
         item_card_layout.setContentsMargins(10, 10, 10, 10)
-        item_card_layout.setSpacing(8)
+        item_card_layout.setSpacing(UI_METRICS.control_gap)
         self.item_card_title = QLabel("価格を確認するアイテム")
         self.item_card_title.setObjectName("ratePairItemCardTitle")
         self.item_card_title.setProperty("uiRole", "section")
@@ -366,6 +368,12 @@ class ExchangeRateManagementDialog(QDialog):
         self.category_list.setFixedWidth(145)
         self.category_list.addItem("すべて")
         self.category_list.addItems(category_labels(self.poe_version))
+        self.category_list.ensurePolished()
+        if has_custom_theme_font():
+            self.category_list.setFixedWidth(max(145, max(
+                self.category_list.fontMetrics().horizontalAdvance(self.category_list.item(index).text())
+                for index in range(self.category_list.count())
+            ) + 24))
         self.category_list.setUniformItemSizes(True)
         self.category_list.setItemDelegate(_CategoryItemDelegate(self.category_list))
         self.category_list.setCurrentRow(0)
@@ -402,7 +410,7 @@ class ExchangeRateManagementDialog(QDialog):
         self.currency_card.setFixedWidth(165)
         currency_layout = QVBoxLayout(self.currency_card)
         currency_layout.setContentsMargins(10, 10, 10, 10)
-        currency_layout.setSpacing(8)
+        currency_layout.setSpacing(UI_METRICS.control_gap)
         self.currency_card_title = QLabel("通貨")
         self.currency_card_title.setObjectName("ratePairCurrencyCardTitle")
         self.currency_card_title.setProperty("uiRole", "section")
@@ -450,6 +458,8 @@ class ExchangeRateManagementDialog(QDialog):
         self.close_button.clicked.connect(self.accept)
         footer.addWidget(self.close_button)
         root.addLayout(footer)
+        equalize_button_sizes((self.add_button, self.close_button), minimum_width=UI_METRICS.action_width)
+        equalize_button_sizes(self.currency_buttons.values(), expanding=True)
 
         for item_id in BASE_CURRENCY_IDS:
             self._request_item_icon(item_id)
@@ -497,19 +507,21 @@ class ExchangeRateManagementDialog(QDialog):
             category: label for category, label in self._category_label_pairs()
         }
         filtered_items = self._filtered_items()
+        self.candidate_list.ensurePolished()
+        row_height = max(CANDIDATE_ROW_HEIGHT, self.candidate_list.fontMetrics().height() + 4)
         if not filtered_items and not self._available_item_ids:
             row = QListWidgetItem(
                 "このリーグの取引データはまだありません（自動確認中）"
             )
             row.setFlags(Qt.NoItemFlags)
-            row.setSizeHint(QSize(0, CANDIDATE_ROW_HEIGHT))
+            row.setSizeHint(QSize(0, row_height))
             self.candidate_list.addItem(row)
         for item in filtered_items:
             text = item.japanese_name
             if query:
                 text = f"{text}  ·  {category_name[item.category]}"
             row = QListWidgetItem(text)
-            row.setSizeHint(QSize(0, CANDIDATE_ROW_HEIGHT))
+            row.setSizeHint(QSize(0, row_height))
             row.setData(Qt.UserRole, item.item_id)
             row.setToolTip(item.japanese_name)
             self.candidate_list.addItem(row)
@@ -681,6 +693,7 @@ class ExchangeRateManagementDialog(QDialog):
             row_layout.addWidget(down)
             row_layout.addWidget(delete)
             self.registered_layout.addWidget(row)
+            equalize_button_sizes((up, down, delete), minimum_width=34, minimum_height=34)
             registered_rows.append(row)
         self.registered_widget.set_rows(registered_rows)
         self.registered_layout.addStretch()

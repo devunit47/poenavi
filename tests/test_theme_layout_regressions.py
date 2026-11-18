@@ -107,7 +107,7 @@ def test_filter_chips_fit_font_and_keep_default_height(qapp, profile, size, cust
         chip.show()
         _render(qapp, window)
         if size == 13 and not custom_family:
-            assert chip.height() == {"small": 25, "medium": 25, "large": 27}[profile]
+            assert chip.height() == {"small": 25, "medium": 28, "large": 32}[profile]
         else:
             for _, chip in window._filter_chips:
                 if isinstance(chip, QAbstractButton):

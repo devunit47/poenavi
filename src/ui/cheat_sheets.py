@@ -46,6 +46,7 @@ from src.ui.appearance import (
 from src.poetore.window_position import path_of_exile_client_rect
 from src.ui.app_theme import POENAVI_THEME, POETORE_THEME
 from src.ui.dialog_theme import (
+    UI_METRICS, equalize_button_sizes,
     POENAVI_DIALOG_THEME,
     POETORE_DIALOG_THEME,
     DialogTheme,
@@ -258,6 +259,11 @@ class CheatSheetManagerDialog(QDialog):
         self.footer_layout.addWidget(self.save_button)
         layout.addLayout(self.footer_layout)
         self._refresh_list()
+        if self.theme.name == "poetore":
+            layout.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+            layout.setSpacing(UI_METRICS.section_gap)
+            equalize_button_sizes((self.cancel_button, self.save_button), minimum_width=UI_METRICS.action_width)
+            equalize_button_sizes((self.up_button, self.down_button), expanding=True)
 
     @staticmethod
     def _dialog_theme(theme) -> DialogTheme:

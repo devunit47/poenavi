@@ -6,6 +6,7 @@ from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QDialog
 
+from src.poetore import trade
 from src.poetore.heist_curio import (
     CurioHeaderBand,
     CurioMatch,
@@ -34,6 +35,12 @@ from src.poetore.window_position import PlacementContext
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def cached_trade_stats(monkeypatch):
+    monkeypatch.setattr(trade, "_stat_entries_cache", ())
+    monkeypatch.setattr(trade, "_stat_entry_indexes_cache", None)
 
 
 def test_bundled_dictionary_has_the_verified_260_items_including_trinket():
@@ -601,7 +608,7 @@ def test_high_accuracy_status_explains_cold_start(qapp):
     assert "初回のみ10～15秒ほどかかります" in lines
 
 
-def test_experimental_base_opens_existing_search_with_empty_optional_ilvl(qapp):
+def test_experimental_base_opens_existing_search_with_empty_optional_ilvl(qapp, cached_trade_stats):
     item = next(
         item for item in load_curio_items() if item.name_ja == "信者のチェーンメイル"
     )
@@ -630,7 +637,7 @@ def test_experimental_base_opens_existing_search_with_empty_optional_ilvl(qapp):
         window.close()
 
 
-def test_heist_unique_opens_fixed_mod_candidates_blank_and_disabled(qapp):
+def test_heist_unique_opens_fixed_mod_candidates_blank_and_disabled(qapp, cached_trade_stats):
     item = next(
         item for item in load_curio_items() if item.name_en == "Replica Abyssus"
     )
@@ -658,7 +665,7 @@ def test_heist_unique_opens_fixed_mod_candidates_blank_and_disabled(qapp):
         window.close()
 
 
-def test_replica_paradoxica_does_not_invent_fixed_mod_candidates(qapp):
+def test_replica_paradoxica_does_not_invent_fixed_mod_candidates(qapp, cached_trade_stats):
     item = next(
         row for row in load_curio_items() if row.name_en == "Replica Paradoxica"
     )
@@ -679,7 +686,7 @@ def test_replica_paradoxica_does_not_invent_fixed_mod_candidates(qapp):
         window.close()
 
 
-def test_heist_trinket_opens_detected_mods_with_values_and_disabled(qapp):
+def test_heist_trinket_opens_detected_mods_with_values_and_disabled(qapp, cached_trade_stats):
     item = next(item for item in load_curio_items() if item.category == "trinket")
     recognized = recognize_trinket_mods(_TRINKET_OCR_TEXT)
     match = CurioMatch(
@@ -716,7 +723,7 @@ def test_heist_trinket_opens_detected_mods_with_values_and_disabled(qapp):
         window.close()
 
 
-def test_repeated_trinket_scan_replaces_previous_detected_mods(qapp):
+def test_repeated_trinket_scan_replaces_previous_detected_mods(qapp, cached_trade_stats):
     item = next(row for row in load_curio_items() if row.category == "trinket")
     definitions = load_trinket_mod_definitions()
     first = rank_trinket_mod_line(

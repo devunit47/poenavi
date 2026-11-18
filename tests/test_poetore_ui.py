@@ -1046,8 +1046,8 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, mon
     )
     window = PoetoreWindow(app_config={"poe_version": POE1})
     qtbot.addWidget(window)
-    for cache in ("_item_entries_cache", "_item_groups_cache", "_jp_item_entries_cache",
-                  "_jp_item_groups_cache", "_stat_entries_cache", "_stat_entry_indexes_cache"):
+    monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
+    for cache in ("_stat_entries_cache", "_stat_entry_indexes_cache"):
         monkeypatch.setattr(trade, cache, None)
     monkeypatch.setattr(window, "show_at_context", Mock())
     monkeypatch.setattr("src.poetore.ui.read_item_clipboard", lambda _clipboard: copied)
@@ -1089,6 +1089,42 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, mon
     window._capture_item_copy()
     qtbot.waitUntil(lambda: len(searches) == 2 and window.price_button.isEnabled())
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize("failure", ["invalid_items", "unexpected"])
+def test_poe1_condition_worker_reports_failure_and_enables_search(qtbot, monkeypatch, failure):
+    from src.poetore import trade
+
+    copied = (
+        "アイテムクラス: 兜\nレアリティ: ユニーク\nゴールドリム\n革の帽子\n"
+        "--------\nアイテムレベル: 68\n--------\n全ての元素耐性 +35%\n"
+    )
+    window = PoetoreWindow(app_config={"poe_version": POE1})
+    qtbot.addWidget(window)
+    monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
+    for cache in ("_stat_entries_cache", "_stat_entry_indexes_cache"):
+        monkeypatch.setattr(trade, cache, None)
+    monkeypatch.setattr(window, "show_at_context", Mock())
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", lambda _clipboard: copied)
+    search = Mock()
+    monkeypatch.setattr("src.poetore.ui.search_prices", search)
+
+    def request(url):
+        assert url.endswith("/data/items")
+        assert threading.current_thread() is not threading.main_thread()
+        if failure == "unexpected":
+            raise RuntimeError("unexpected condition failure")
+        return [], {}
+
+    monkeypatch.setattr(trade, "_request_json", request)
+    window._capture_item_copy()
+    assert not window.price_button.isEnabled()
+    qtbot.waitUntil(window.price_button.isEnabled)
+    assert window._pending_trade_conditions is None
+    assert window._obs_content.isEnabled()
+    expected = "不正なアイテムカタログ" if failure == "invalid_items" else "unexpected condition failure"
+    assert expected in window.price_status.text()
+    search.assert_not_called()
 
 
 def test_early_and_post_ui_poe2_search_send_identical_request(qapp):

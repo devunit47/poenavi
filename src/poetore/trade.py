@@ -6,6 +6,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 from contextlib import contextmanager
 from contextvars import ContextVar
+from email.utils import mktime_tz, parsedate_tz
 import json
 import math
 from pathlib import Path
@@ -404,6 +405,17 @@ class _RateLimitRule:
     window_seconds: float
     borrowed_at: list[float] = field(default_factory=list)
     name: str = ""
+    window_padding: float | None = None
+
+    def record_request(self, sent_at: float, received_at: float) -> None:
+        # Before discovery the local fallback paces send times. Advertised
+        # windows must end at least one full server window after receipt.
+        recorded_at = sent_at
+        if self.window_padding is not None:
+            recorded_at = max(sent_at, received_at - self.window_padding)
+        if self.borrowed_at:
+            recorded_at = max(recorded_at, self.borrowed_at[-1])
+        self.borrowed_at.append(recorded_at)
 
     def prune(self, now: float) -> None:
         threshold = now - self.window_seconds
@@ -421,6 +433,7 @@ class _RateLimitRule:
 class _TradeLimitState:
     rules: list[_RateLimitRule]
     restricted_until: float = 0.0
+    send_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class _TradeRateLimiter:
@@ -441,10 +454,15 @@ class _TradeRateLimiter:
             self._states = {
                 "search": _TradeLimitState([_RateLimitRule(1, 5.0)]),
                 "fetch": _TradeLimitState([_RateLimitRule(1, 5.0)]),
+                "metadata": _TradeLimitState([]),
             }
 
     def _state(self, policy: str) -> _TradeLimitState:
         return self._server_states.get(self._policy_names.get(policy, ""), self._states[policy])
+
+    def send_lock(self, policy: str) -> threading.Lock:
+        with self._lock:
+            return self._state(policy).send_lock
 
     def estimate_wait(self, policy: str, count: int = 1) -> float:
         with self._lock:
@@ -474,30 +492,25 @@ class _TradeRateLimiter:
                 waits.append(elapsed)
             return max(waits, default=0.0)
 
-    def try_borrow(self, policy: str) -> float:
-        """Reserve a transmission now, or return the delay without reserving."""
+    def wait_before_send(self, policy: str) -> float:
         with self._lock:
             _raise_if_trade_cancelled()
             now = time.monotonic()
             state = self._state(policy)
-            wait_for = max(
+            return max(
                 max(0.0, state.restricted_until - now),
                 max((rule.wait_seconds(now) for rule in state.rules), default=0.0),
             )
-            if wait_for == 0:
-                for rule in state.rules:
-                    rule.borrowed_at.append(now)
-            return wait_for
 
-    def adjust(self, policy: str, headers: object, *, requested: bool = False, retry_after: int = 0) -> None:
-        try:
-            rule_names = str(headers.get("X-Rate-Limit-Rules", "")).strip()
-            policy_name = str(headers.get("X-Rate-Limit-Policy", "")).strip().casefold()
-        except AttributeError:
-            return
+    def adjust(
+        self, policy: str, headers: object, *, sent_at: float | None = None, retry_after: int = 0,
+    ) -> None:
+        rule_names = str(headers.get("X-Rate-Limit-Rules", "")).strip()
+        policy_name = str(headers.get("X-Rate-Limit-Policy", "")).strip().casefold()
 
         parsed: list[tuple[str, int, float, int]] = []
         restriction = retry_after
+        window_padding = 2.0
         for rule_name in rule_names.split(","):
             rule_name = rule_name.strip()
             if not rule_name:
@@ -513,7 +526,7 @@ class _TradeRateLimiter:
                 try:
                     maximum = int(parts[0])
                     # Awakenedの既定値と同じ2秒を通信状態ずれの余裕として加える。
-                    window_seconds = float(parts[1]) + 2.0
+                    window_seconds = float(parts[1]) + window_padding
                     state = states.get(parts[1], ())
                     active = int(state[0]) if state else 0
                     if len(state) >= 3:
@@ -523,34 +536,38 @@ class _TradeRateLimiter:
                 if maximum <= 0 or not math.isfinite(window_seconds) or window_seconds <= 0:
                     continue
                 parsed.append((rule_name.casefold(), maximum, window_seconds, max(0, active)))
-        if not parsed and not restriction:
-            return
-
         with self._lock:
             now = time.monotonic()
-            previous = state = self._state(policy)
+            state = self._state(policy)
             if policy_name and (parsed or policy_name in self._server_states):
                 if policy_name != self._policy_names.get(policy):
                     state = self._server_states.setdefault(policy_name, _TradeLimitState([]))
                     self._policy_names[policy] = policy_name
             if restriction:
                 state.restricted_until = max(state.restricted_until, now + restriction)
-            if parsed:
-                synchronized: list[_RateLimitRule] = []
-                for name, maximum, window_seconds, active in parsed:
-                    matching = next((rule for rule in state.rules
-                                     if rule.name == name and rule.window_seconds == window_seconds), None)
-                    current = matching or _RateLimitRule(maximum, window_seconds, name=name)
-                    current.maximum = maximum
-                    current.prune(now)
-                    if requested and (matching is None or state is not previous):
-                        current.borrowed_at.append(now)
-                    if active > maximum:
-                        current.borrowed_at[:] = [now] * maximum
-                    elif active > len(current.borrowed_at):
-                        current.borrowed_at.extend([now] * (active - len(current.borrowed_at)))
-                    synchronized.append(current)
-                state.rules = synchronized
+            if not parsed:
+                if sent_at is not None:
+                    for rule in state.rules:
+                        rule.prune(now)
+                        rule.record_request(sent_at, now)
+                return
+            synchronized: list[_RateLimitRule] = []
+            for name, maximum, window_seconds, active in parsed:
+                matching = next((rule for rule in state.rules
+                                 if rule.name == name and rule.window_seconds == window_seconds), None)
+                current = matching or _RateLimitRule(
+                    maximum, window_seconds, name=name, window_padding=window_padding,
+                )
+                current.maximum = maximum
+                current.prune(now)
+                if sent_at is not None:
+                    current.record_request(sent_at, now)
+                if active > maximum:
+                    current.borrowed_at[:] = [now] * maximum
+                elif active > len(current.borrowed_at):
+                    current.borrowed_at.extend([now] * (active - len(current.borrowed_at)))
+                synchronized.append(current)
+            state.rules = synchronized
 
 
 _trade_limit_lock = threading.Lock()
@@ -565,6 +582,8 @@ def _trade_rate_policy(url: str) -> str | None:
         return "search"
     if "/api/trade/fetch/" in path:
         return "fetch"
+    if path.startswith("/api/trade/data/") or path == "/api/leagues":
+        return "metadata"
     return None
 
 
@@ -574,6 +593,8 @@ def _trade2_rate_policy(url: str) -> str | None:
         return "search"
     if "/api/trade2/fetch/" in path:
         return "fetch"
+    if path.startswith("/api/trade2/data/"):
+        return "metadata"
     return None
 
 
@@ -588,15 +609,10 @@ def _rate_limit_context(url: str) -> tuple[_TradeRateLimiter | None, str | None]
 
 
 def _prevent_trade_queue(url: str | None = None) -> None:
-    limiter = _trade_rate_limiter
-    if url is not None:
-        limiter, _ = _rate_limit_context(url)
-        if limiter is None:
-            return
-    wait_seconds = max(
-        limiter.estimate_wait("search"),
-        limiter.estimate_wait("fetch"),
-    )
+    limiter, policy = (_trade_rate_limiter, "search") if url is None else _rate_limit_context(url)
+    if limiter is None or policy is None:
+        return
+    wait_seconds = limiter.estimate_wait(policy)
     # Awakenedと同じく、長い待ちになる新規検索は予約せず即座に返す。
     if wait_seconds >= 1.5:
         raise TradeApiError(
@@ -875,8 +891,7 @@ class _TtlLruCache:
 _trade_response_cache = _TtlLruCache()
 _trade_pending_lock = threading.Lock()
 _trade_pending_requests: dict[str, Future[tuple[dict, object]]] = {}
-_trade_http_pool = urllib3.PoolManager(num_pools=2, maxsize=1, block=True)
-_trade_http_request_lock = threading.Lock()
+_trade_http_pool = urllib3.PoolManager(num_pools=2, maxsize=2)
 
 
 def _trade_request_stage(url: str, payload: dict | None) -> str:
@@ -999,17 +1014,28 @@ def _cached_request_json(
 
 @contextmanager
 def _trade_send_slot(limiter: _TradeRateLimiter | None, policy: str | None):
+    if limiter is None or policy is None:
+        _raise_if_trade_cancelled()
+        yield
+        return
+
+    cancel = _trade_search_cancel.get()
     while True:
-        # Serialize sends through header reconciliation. Release the gate
-        # before waiting for a policy window so unrelated policies can send.
-        with _trade_http_request_lock:
-            _raise_if_trade_cancelled()
-            wait = limiter.try_borrow(policy) if limiter is not None and policy is not None else 0.0
+        _raise_if_trade_cancelled()
+        lock = limiter.send_lock(policy)
+        if not lock.acquire(timeout=0.05 if cancel is not None else -1):
+            continue
+        try:
+            # A response can bind this route to a shared server policy.
+            if lock is not limiter.send_lock(policy):
+                continue
+            wait = limiter.wait_before_send(policy)
             if wait == 0:
                 yield
                 return
+        finally:
+            lock.release()
         _trade_log(f"rate limit wait: policy={policy} seconds={wait:.3f}")
-        cancel = _trade_search_cancel.get()
         if cancel is None:
             time.sleep(wait)
         elif cancel.wait(wait):
@@ -1017,9 +1043,19 @@ def _trade_send_slot(limiter: _TradeRateLimiter | None, policy: str | None):
 
 
 def _trade_retry_after(headers: object) -> int:
+    value = headers.get("Retry-After")
+    if not value:
+        return 0
     try:
-        return max(0, math.ceil(float(headers.get("Retry-After", ""))))
-    except (AttributeError, TypeError, ValueError, OverflowError):
+        try:
+            seconds = float(value)
+        except ValueError:
+            retry_date = parsedate_tz(value)
+            if retry_date is None:
+                return 0
+            seconds = mktime_tz(retry_date) - time.time()
+        return max(0, math.ceil(seconds))
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -1052,6 +1088,9 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
                 response_attempt = attempt
             except Exception as exc:
                 elapsed = time.monotonic() - started
+                if rate_limiter is not None and rate_policy is not None:
+                    # A failed response can still have consumed a server slot.
+                    rate_limiter.adjust(rate_policy, {}, sent_at=started)
                 retrying = (
                     attempt < TRADE_READ_TIMEOUT_MAX_ATTEMPTS
                     and _is_read_timeout(exc)
@@ -1072,7 +1111,7 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
             if response.status == 429:
                 retry_after = _trade_retry_after(response.headers)
             if rate_limiter is not None and rate_policy is not None:
-                rate_limiter.adjust(rate_policy, response.headers, requested=True, retry_after=retry_after)
+                rate_limiter.adjust(rate_policy, response.headers, sent_at=started, retry_after=retry_after)
             break
     assert response is not None
     body = response.data.decode("utf-8", errors="replace")
@@ -2622,12 +2661,24 @@ def _apply_pseudo_relations(filters: list[TradeStatFilter]) -> list[TradeStatFil
     return sorted(kept, key=lambda row: (row.kind != "property", row.stat_id, row.text))
 
 
+@dataclass(frozen=True)
+class _TradeItemCatalog:
+    groups: tuple[tuple[str, tuple[dict, ...]], ...]
+    entries: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class _TradeItemCatalogSnapshot:
+    by_root: dict[str, _TradeItemCatalog] = field(default_factory=dict)
+    paired: bool = False
+
+    def contains(self, api_roots: tuple[str, ...]) -> bool:
+        return (self.paired or len(api_roots) == 1) and all(root in self.by_root for root in api_roots)
+
+
 _stat_entries_cache: tuple[dict, ...] | None = None
 _stat_entry_indexes_cache = None
-_item_entries_cache: tuple[dict, ...] | None = None
-_jp_item_entries_cache: tuple[dict, ...] | None = None
-_item_groups_cache: tuple[tuple[str, tuple[dict, ...]], ...] | None = None
-_jp_item_groups_cache: tuple[tuple[str, tuple[dict, ...]], ...] | None = None
+_item_catalogs_cache = _TradeItemCatalogSnapshot()
 _trade_catalog_lock = threading.RLock()
 _cached_catalogs_only = ContextVar("cached_trade_catalogs_only", default=False)
 
@@ -2652,13 +2703,9 @@ def _require_trade_catalog_worker() -> None:
 
 def _clear_trade_item_catalog_cache() -> None:
     """Discard both locale views so the next identity lookup fetches one fresh pair."""
-    global _item_entries_cache, _jp_item_entries_cache
-    global _item_groups_cache, _jp_item_groups_cache
+    global _item_catalogs_cache
     with _trade_catalog_lock:
-        _item_entries_cache = None
-        _jp_item_entries_cache = None
-        _item_groups_cache = None
-        _jp_item_groups_cache = None
+        _item_catalogs_cache = _TradeItemCatalogSnapshot()
 
 
 def _normalized_stat_text(text: str) -> str:
@@ -2766,64 +2813,52 @@ _GUARDIAN_MAP_IDENTITY_STAT_IDS = {
 }
 
 
-def _load_trade_item_catalog(api_root: str):
+def _load_trade_item_catalog(api_root: str) -> _TradeItemCatalog:
     data, _ = _request_json(f"{api_root}/data/items")
-    groups = tuple(
-        (str(group.get("id", "")), tuple(group.get("entries", ())))
-        for group in data.get("result", ())
-    )
-    return (
-        tuple((group_id, rows) for group_id, rows in groups if group_id),
-        tuple(row for _group_id, rows in groups for row in rows),
-    )
+    result = data.get("result") if isinstance(data, dict) else None
+    invalid_catalog = "PoE Trade APIから不正なアイテムカタログを受信しました。"
+    if not isinstance(result, list):
+        raise TradeApiError(invalid_catalog)
+    groups = []
+    entries = []
+    for group in result:
+        rows = group.get("entries") if isinstance(group, dict) else None
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict)
+            or (row.get("flags") is not None and not isinstance(row["flags"], dict))
+            for row in rows
+        ):
+            raise TradeApiError(invalid_catalog)
+        group_id = str(group.get("id", ""))
+        if group_id:
+            groups.append((group_id, tuple(rows)))
+        entries.extend(rows)
+    return _TradeItemCatalog(tuple(groups), tuple(entries))
+
+
+def _trade_item_catalogs_for(*api_roots: str) -> dict[str, _TradeItemCatalog]:
+    global _item_catalogs_cache
+    cached = _item_catalogs_cache
+    if cached.contains(api_roots):
+        return cached.by_root
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        if not _item_catalogs_cache.contains(api_roots):
+            # Publish a new snapshot only after all requested locales load.
+            # A paired lookup fetches both even if they were loaded separately.
+            loaded = {root: _load_trade_item_catalog(root) for root in api_roots}
+            _item_catalogs_cache = _TradeItemCatalogSnapshot(
+                {**_item_catalogs_cache.by_root, **loaded}, paired=len(api_roots) == 2,
+            )
+        return _item_catalogs_cache.by_root
 
 
 def _trade_item_entries() -> tuple[dict, ...]:
-    global _item_groups_cache, _item_entries_cache
-    cached = _item_entries_cache
-    if cached is not None:
-        return cached
-    _require_trade_catalog_worker()
-    with _trade_catalog_lock:
-        if _item_entries_cache is None:
-            _item_groups_cache, _item_entries_cache = _load_trade_item_catalog(API_ROOT)
-        return _item_entries_cache
+    return _trade_item_catalogs_for(API_ROOT)[API_ROOT].entries
 
 
 def _jp_trade_item_entries() -> tuple[dict, ...]:
-    global _jp_item_groups_cache, _jp_item_entries_cache
-    cached = _jp_item_entries_cache
-    if cached is not None:
-        return cached
-    _require_trade_catalog_worker()
-    with _trade_catalog_lock:
-        if _jp_item_entries_cache is None:
-            _jp_item_groups_cache, _jp_item_entries_cache = _load_trade_item_catalog(JP_API_ROOT)
-        return _jp_item_entries_cache
-
-
-def _trade_item_groups() -> tuple[tuple[str, tuple[dict, ...]], ...]:
-    global _item_groups_cache, _item_entries_cache
-    cached = _item_groups_cache
-    if cached is not None:
-        return cached
-    _require_trade_catalog_worker()
-    with _trade_catalog_lock:
-        if _item_groups_cache is None:
-            _item_groups_cache, _item_entries_cache = _load_trade_item_catalog(API_ROOT)
-        return _item_groups_cache
-
-
-def _jp_trade_item_groups() -> tuple[tuple[str, tuple[dict, ...]], ...]:
-    global _jp_item_groups_cache, _jp_item_entries_cache
-    cached = _jp_item_groups_cache
-    if cached is not None:
-        return cached
-    _require_trade_catalog_worker()
-    with _trade_catalog_lock:
-        if _jp_item_groups_cache is None:
-            _jp_item_groups_cache, _jp_item_entries_cache = _load_trade_item_catalog(JP_API_ROOT)
-        return _jp_item_groups_cache
+    return _trade_item_catalogs_for(JP_API_ROOT)[JP_API_ROOT].entries
 
 
 def _aligned_trade_item_pairs():
@@ -2843,8 +2878,9 @@ def _aligned_trade_item_pairs():
             tuple(sorted(flags)),
         )
 
-    japanese_groups = dict(_jp_trade_item_groups())
-    for group_id, english_group in _trade_item_groups():
+    catalogs = _trade_item_catalogs_for(JP_API_ROOT, API_ROOT)
+    japanese_groups = dict(catalogs[JP_API_ROOT].groups)
+    for group_id, english_group in catalogs[API_ROOT].groups:
         japanese_group = japanese_groups.get(group_id)
         if japanese_group is None:
             continue

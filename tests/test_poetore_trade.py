@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import urllib3
 
+from src.poetore import trade
 from src.poetore.parser import parse_item_text
 from src.poetore.metadata import unique_fixed_stats
 from src.poetore.models import ItemModifier, ParsedItem
@@ -299,8 +300,10 @@ def test_japanese_type_mapping_keeps_safe_prefix_of_unequal_item_groups():
                   "flags": {"unique": True}},
                  {"type": "聖戦士のグローブ", "name": "悔恨",
                   "flags": {"unique": True}})),)
-    with patch("src.poetore.trade._trade_item_groups", return_value=english), patch(
-        "src.poetore.trade._jp_trade_item_groups", return_value=japanese,
+    with patch("src.poetore.trade._trade_item_catalogs_for", return_value={
+        trade.API_ROOT: trade._TradeItemCatalog(english, ()),
+        trade.JP_API_ROOT: trade._TradeItemCatalog(japanese, ()),
+    },
     ):
         assert _japanese_trade_item_type("Syndicate's Garb") == "シンジケートの服"
         # 欠落entry自体を誤った日本語typeへ変換せず、その後のUnique境界で再同期する。
@@ -319,8 +322,10 @@ def test_item_mapping_uses_stable_group_id_instead_of_group_order():
                      "flags": {"unique": True}},)),
         ("accessory", ({"type": "鉄の指輪"},)),
     )
-    with patch("src.poetore.trade._trade_item_groups", return_value=english), patch(
-        "src.poetore.trade._jp_trade_item_groups", return_value=japanese,
+    with patch("src.poetore.trade._trade_item_catalogs_for", return_value={
+        trade.API_ROOT: trade._TradeItemCatalog(english, ()),
+        trade.JP_API_ROOT: trade._TradeItemCatalog(japanese, ()),
+    },
     ):
         assert _english_trade_item_type("メッシュブーツ") == "Mesh Boots"
         assert _english_trade_item_name("破滅の軌跡") == "Wake of Destruction"
@@ -335,8 +340,10 @@ def test_item_mapping_rejects_ambiguous_localized_identity():
         {"type": "重い矢筒"},
         {"type": "重い矢筒"},
     )),)
-    with patch("src.poetore.trade._trade_item_groups", return_value=english), patch(
-        "src.poetore.trade._jp_trade_item_groups", return_value=japanese,
+    with patch("src.poetore.trade._trade_item_catalogs_for", return_value={
+        trade.API_ROOT: trade._TradeItemCatalog(english, ()),
+        trade.JP_API_ROOT: trade._TradeItemCatalog(japanese, ()),
+    },
     ):
         assert _english_trade_item_type("重い矢筒") is None
 
@@ -418,11 +425,7 @@ def test_japanese_identity_refreshes_stale_catalog_once_and_reaches_search():
     def request_json(url, _payload=None):
         return responses[url].pop(0), {}
 
-    with patch("src.poetore.trade._item_entries_cache", None), patch(
-        "src.poetore.trade._jp_item_entries_cache", None,
-    ), patch("src.poetore.trade._item_groups_cache", None), patch(
-        "src.poetore.trade._jp_item_groups_cache", None,
-    ), patch("src.poetore.trade._request_json", side_effect=request_json) as request:
+    with patch.object(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot()), patch("src.poetore.trade._request_json", side_effect=request_json) as request:
         result = search_prices(
             _storm_sail_item(), "腐ったラウンドシールド", "Covens",
             trade_name="ストームセールの舵輪",
@@ -448,11 +451,7 @@ def test_japanese_identity_stops_after_one_failed_catalog_refresh():
     def request_json(url):
         return responses[url].pop(0), {}
 
-    with patch("src.poetore.trade._item_entries_cache", None), patch(
-        "src.poetore.trade._jp_item_entries_cache", None,
-    ), patch("src.poetore.trade._item_groups_cache", None), patch(
-        "src.poetore.trade._jp_item_groups_cache", None,
-    ), patch("src.poetore.trade._request_json", side_effect=request_json) as request:
+    with patch.object(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot()), patch("src.poetore.trade._request_json", side_effect=request_json) as request:
         identity = english_trade_identity(
             _storm_sail_item(), "腐ったラウンドシールド", "ストームセールの舵輪",
         )
@@ -475,11 +474,7 @@ def test_japanese_identity_does_not_refresh_a_complete_item_catalog():
     def request_json(url):
         return responses[url].pop(0), {}
 
-    with patch("src.poetore.trade._item_entries_cache", None), patch(
-        "src.poetore.trade._jp_item_entries_cache", None,
-    ), patch("src.poetore.trade._item_groups_cache", None), patch(
-        "src.poetore.trade._jp_item_groups_cache", None,
-    ), patch("src.poetore.trade._request_json", side_effect=request_json) as request:
+    with patch.object(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot()), patch("src.poetore.trade._request_json", side_effect=request_json) as request:
         identity = english_trade_identity(
             _storm_sail_item(), "腐ったラウンドシールド", "ストームセールの舵輪",
         )
@@ -492,8 +487,10 @@ def test_japanese_identity_does_not_refresh_a_complete_item_catalog():
 def test_329_japanese_magic_one_line_name_resolves_contained_base_type():
     english = (("flask", ({"type": "Jade Flask"}, {"type": "Blood Sap Tincture"})),)
     japanese = (("flask", ({"type": "翡翠のフラスコ"}, {"type": "血の樹液のチンキ"})),)
-    with patch("src.poetore.trade._trade_item_groups", return_value=english), patch(
-        "src.poetore.trade._jp_trade_item_groups", return_value=japanese,
+    with patch("src.poetore.trade._trade_item_catalogs_for", return_value={
+        trade.API_ROOT: trade._TradeItemCatalog(english, ()),
+        trade.JP_API_ROOT: trade._TradeItemCatalog(japanese, ()),
+    },
     ):
         assert _english_trade_item_type(
             "初学者の 消費の 翡翠のフラスコ",
@@ -3685,9 +3682,7 @@ def test_unique_candidates_come_from_official_item_data():
         {"name": "Another Example", "type": "Gold Amulet", "flags": {"unique": True}},
         {"name": "Not Unique", "type": "Gold Amulet", "flags": {}},
     ]}]}
-    with patch("src.poetore.trade._item_entries_cache", None), patch(
-        "src.poetore.trade._item_groups_cache", None,
-    ), patch(
+    with patch.object(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot()), patch(
         "src.poetore.trade._request_json", return_value=(payload, {}),
     ):
         assert unique_candidates("Gold Amulet") == ("Another Example", "The Example")
@@ -3697,9 +3692,7 @@ def test_unique_candidate_details_include_official_icon_urls():
     payload = {"result": [{"entries": [
         {"name": "The Example", "type": "Gold Amulet", "flags": {"unique": True}},
     ]}]}
-    with patch("src.poetore.trade._item_entries_cache", None), patch(
-        "src.poetore.trade._item_groups_cache", None,
-    ), patch(
+    with patch.object(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot()), patch(
         "src.poetore.trade._request_json", return_value=(payload, {}),
     ), patch(
         "src.poetore.trade.unique_icon_url",
@@ -3721,9 +3714,7 @@ def test_unique_candidate_details_fall_back_to_wiki_icon_and_english_name():
     payload = {"result": [{"entries": [
         {"name": "The Example", "type": "Gold Amulet", "flags": {"unique": True}},
     ]}]}
-    with patch("src.poetore.trade._item_entries_cache", None), patch(
-        "src.poetore.trade._item_groups_cache", None,
-    ), patch(
+    with patch.object(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot()), patch(
         "src.poetore.trade._request_json", return_value=(payload, {}),
     ), patch(
         "src.poetore.trade.unique_icon_url", return_value=None,
@@ -3745,7 +3736,7 @@ def test_unique_variants_preserve_trade_discriminator():
         {"name": "Auxium", "type": "Chain Belt", "text": "Auxium Chain Belt", "flags": {"unique": True}},
         {"name": "Auxium", "type": "Chain Belt", "text": "Auxium Chain Belt (Legacy)", "disc": "legacy", "flags": {"unique": True}},
     )
-    with patch("src.poetore.trade._item_entries_cache", entries):
+    with patch("src.poetore.trade._trade_item_entries", return_value=entries):
         assert unique_variants("Auxium", "Chain Belt") == (
             ("Auxium Chain Belt", None), ("Auxium Chain Belt (Legacy)", "legacy"),
         )

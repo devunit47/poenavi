@@ -5549,11 +5549,7 @@ class PoetoreWindow(QWidget):
             def prepare():
                 resolved_base, resolved_name = base_type, name
                 if resolve_capture_identity and item.category != "viscera":
-                    try:
-                        resolved_base, resolved_name = english_trade_identity(item, base_type, name)
-                    except TradeApiError:
-                        # The search worker can retry the identity lookup.
-                        pass
+                    resolved_base, resolved_name = english_trade_identity(item, base_type, name)
                 if trace is not None:
                     if resolve_capture_identity:
                         trace.mark("capture_identity_resolved")
@@ -5577,7 +5573,7 @@ class PoetoreWindow(QWidget):
                         if isinstance(result, Exception):
                             self._pending_performance_trace = None
                             self.price_button.setEnabled(True)
-                            self._set_price_status(str(result))
+                            self._set_price_status(str(result) or "検索条件を準備できませんでした。")
                             if trace is not None:
                                 trace.mark("search_error_displayed", error_type=type(result).__name__)
                             return
@@ -5604,7 +5600,7 @@ class PoetoreWindow(QWidget):
                     def run():
                         try:
                             result = prepare()
-                        except (TradeApiError, ValueError) as exc:
+                        except Exception as exc:
                             result = exc
                         self._trade_signals.conditions_ready.emit(apply, result)
 

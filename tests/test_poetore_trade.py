@@ -3686,6 +3686,8 @@ def test_unique_candidates_come_from_official_item_data():
         {"name": "Not Unique", "type": "Gold Amulet", "flags": {}},
     ]}]}
     with patch("src.poetore.trade._item_entries_cache", None), patch(
+        "src.poetore.trade._item_groups_cache", None,
+    ), patch(
         "src.poetore.trade._request_json", return_value=(payload, {}),
     ):
         assert unique_candidates("Gold Amulet") == ("Another Example", "The Example")
@@ -3696,6 +3698,8 @@ def test_unique_candidate_details_include_official_icon_urls():
         {"name": "The Example", "type": "Gold Amulet", "flags": {"unique": True}},
     ]}]}
     with patch("src.poetore.trade._item_entries_cache", None), patch(
+        "src.poetore.trade._item_groups_cache", None,
+    ), patch(
         "src.poetore.trade._request_json", return_value=(payload, {}),
     ), patch(
         "src.poetore.trade.unique_icon_url",
@@ -3718,6 +3722,8 @@ def test_unique_candidate_details_fall_back_to_wiki_icon_and_english_name():
         {"name": "The Example", "type": "Gold Amulet", "flags": {"unique": True}},
     ]}]}
     with patch("src.poetore.trade._item_entries_cache", None), patch(
+        "src.poetore.trade._item_groups_cache", None,
+    ), patch(
         "src.poetore.trade._request_json", return_value=(payload, {}),
     ), patch(
         "src.poetore.trade.unique_icon_url", return_value=None,

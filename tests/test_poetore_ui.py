@@ -751,7 +751,9 @@ def test_329_single_copy_is_parsed_without_normal_and_detailed_merge(qapp):
         ), patch(
             "src.poetore.ui.english_trade_identity",
             return_value=("Mesh Boots", "Wake of Destruction"),
-        ), patch.object(window, "parse_current_text") as parse, patch.object(
+        ), patch("src.poetore.ui.resolve_trade_stat_filters", return_value=()), patch.object(
+            window, "parse_current_text", wraps=window.parse_current_text,
+        ) as parse, patch.object(
             window, "show_at_context",
         ) as show, patch.object(window, "search_current_item") as search:
             window._capture_item_copy()
@@ -763,9 +765,10 @@ def test_329_single_copy_is_parsed_without_normal_and_detailed_merge(qapp):
             parsed_item=parsed,
             search_cycle_already_invalidated=True,
             start_initial_trade_search=True,
+            resolve_capture_identity=True,
         )
         show.assert_called_once_with(window._placement_context, activate=True)
-        search.assert_not_called()
+        search.assert_called_once_with(initial_filters=())
         assert not hasattr(window, "_normal_copy_text")
     finally:
         window.close()
@@ -847,7 +850,7 @@ def test_search_does_not_reuse_item_parsed_for_another_mode(qapp):
         ) as parse:
             window.search_current_item()
 
-        parse.assert_called_once_with(preserve_virtual_augment_selection=True)
+        parse.assert_called_once_with(preserve_virtual_augment_selection=True, search_after_parse=True)
     finally:
         window.close()
 
@@ -1014,8 +1017,8 @@ def test_poe1_capture_starts_trade_before_filter_ui_finishes(qapp):
         ), patch(
             "src.poetore.ui.english_trade_identity",
             return_value=("Mesh Boots", None),
-        ), patch.object(
-            window, "_resolved_trade_filters", return_value=(),
+        ), patch(
+            "src.poetore.ui.resolve_trade_stat_filters", return_value=(),
         ), patch.object(
             window, "_populate_stat_filters", side_effect=populate,
         ) as populate_mock, patch(
@@ -1029,6 +1032,60 @@ def test_poe1_capture_starts_trade_before_filter_ui_finishes(qapp):
         assert populate_mock.call_count == 1
     finally:
         window.close()
+
+
+def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, monkeypatch):
+    from src.poetore import trade
+
+    copied = (
+        "アイテムクラス: 兜\nレアリティ: ユニーク\nゴールドリム\n革の帽子\n"
+        "--------\nアイテムレベル: 68\n--------\n全ての元素耐性 +35%\n"
+    )
+    window = PoetoreWindow(app_config={"poe_version": POE1})
+    qtbot.addWidget(window)
+    for cache in ("_item_entries_cache", "_item_groups_cache", "_jp_item_entries_cache",
+                  "_jp_item_groups_cache", "_stat_entries_cache", "_stat_entry_indexes_cache"):
+        monkeypatch.setattr(trade, cache, None)
+    monkeypatch.setattr(window, "show_at_context", Mock())
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", lambda _clipboard: copied)
+    monkeypatch.setattr("src.poetore.ui.unique_variants", lambda *_args: ())
+    started, release = threading.Event(), threading.Event()
+    calls, searches = [], []
+
+    def request(url, _payload=None):
+        calls.append((url, threading.current_thread()))
+        assert threading.current_thread() is not threading.main_thread()
+        started.set()
+        assert release.wait(timeout=3)
+        if url.endswith("/stats"):
+            return {"result": []}, {}
+        name, base = ("ゴールドリム", "革の帽子") if url.startswith(trade.JP_API_ROOT) else ("Goldrim", "Leather Cap")
+        return {"result": [{"id": "armour", "entries": [
+            {"type": base, "text": base},
+            {"type": base, "name": name, "text": f"{name} {base}", "flags": {"unique": True}},
+        ]}]}, {}
+
+    def search(_item, base_type, **kwargs):
+        searches.append((base_type, kwargs["trade_name"]))
+        return PriceResult("Standard", "query", 0, ())
+
+    monkeypatch.setattr(trade, "_request_json", request)
+    monkeypatch.setattr("src.poetore.ui.search_prices", search)
+    try:
+        window._capture_item_copy()
+        assert started.wait(1)
+        assert not window.price_button.isEnabled()
+        window.search_current_item()
+        assert not searches
+    finally:
+        release.set()
+
+    qtbot.waitUntil(lambda: len(searches) == 1 and window.price_button.isEnabled())
+    assert searches == [("Leather Cap", "Goldrim")]
+    assert len(calls) == 3
+    window._capture_item_copy()
+    qtbot.waitUntil(lambda: len(searches) == 2 and window.price_button.isEnabled())
+    assert len(calls) == 3
 
 
 def test_early_and_post_ui_poe2_search_send_identical_request(qapp):
@@ -1886,7 +1943,7 @@ def test_filter_kind_column_marks_awakened_source_generations(qapp):
         window.close()
 
 
-def test_reported_infamous_helmet_resolves_and_is_labelled_in_real_panel(qapp):
+def test_reported_infamous_helmet_resolves_and_is_labelled_in_real_panel(qapp, qtbot):
     text = """アイテムクラス: 兜
 レアリティ: レア
 恐ろしい堅塁
@@ -1919,6 +1976,7 @@ def test_reported_infamous_helmet_resolves_and_is_labelled_in_real_panel(qapp):
     try:
         window.input_edit.setPlainText(text)
         window.parse_current_text()
+        qtbot.waitUntil(lambda: window._parsed_item is not None)
 
         rows = [
             window.mod_filter_tree.topLevelItem(index)
@@ -1934,7 +1992,7 @@ def test_reported_infamous_helmet_resolves_and_is_labelled_in_real_panel(qapp):
         window.close()
 
 
-def test_foulborn_unique_uses_normal_name_and_enables_variable_mods_in_real_panel(qapp):
+def test_foulborn_unique_uses_normal_name_and_enables_variable_mods_in_real_panel(qapp, qtbot):
     window = PoetoreWindow()
     try:
         window._trade_base_type = "Iron Ring"
@@ -1957,6 +2015,7 @@ def test_foulborn_unique_uses_normal_name_and_enables_variable_mods_in_real_pane
 """)
         window.parse_current_text()
 
+        qtbot.waitUntil(lambda: window._parsed_item is not None)
         assert window._parsed_item.name == "皆を繋ぐもの"
         assert window.item_name_label.text() == "皆を繋ぐもの"
         assert window.mod_filter_tree.topLevelItemCount() == 4

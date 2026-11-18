@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from collections import OrderedDict
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import math
 from pathlib import Path
@@ -2514,16 +2516,37 @@ _item_entries_cache: tuple[dict, ...] | None = None
 _jp_item_entries_cache: tuple[dict, ...] | None = None
 _item_groups_cache: tuple[tuple[str, tuple[dict, ...]], ...] | None = None
 _jp_item_groups_cache: tuple[tuple[str, tuple[dict, ...]], ...] | None = None
+_trade_catalog_lock = threading.RLock()
+_cached_catalogs_only = ContextVar("cached_trade_catalogs_only", default=False)
+
+
+class TradeCatalogRequired(Exception):
+    """The caller needs to continue its catalog lookup on a worker."""
+
+
+@contextmanager
+def cached_trade_catalogs_only():
+    token = _cached_catalogs_only.set(True)
+    try:
+        yield
+    finally:
+        _cached_catalogs_only.reset(token)
+
+
+def _require_trade_catalog_worker() -> None:
+    if _cached_catalogs_only.get():
+        raise TradeCatalogRequired
 
 
 def _clear_trade_item_catalog_cache() -> None:
     """Discard both locale views so the next identity lookup fetches one fresh pair."""
     global _item_entries_cache, _jp_item_entries_cache
     global _item_groups_cache, _jp_item_groups_cache
-    _item_entries_cache = None
-    _jp_item_entries_cache = None
-    _item_groups_cache = None
-    _jp_item_groups_cache = None
+    with _trade_catalog_lock:
+        _item_entries_cache = None
+        _jp_item_entries_cache = None
+        _item_groups_cache = None
+        _jp_item_groups_cache = None
 
 
 def _normalized_stat_text(text: str) -> str:
@@ -2584,12 +2607,17 @@ def _value_for_template(
 
 def _trade_stat_entries() -> tuple[dict, ...]:
     global _stat_entries_cache
-    if _stat_entries_cache is None:
-        data, _ = _request_json(f"{JP_API_ROOT}/data/stats")
-        _stat_entries_cache = tuple(
-            entry for group in data.get("result", ()) for entry in group.get("entries", ())
-        )
-    return _stat_entries_cache
+    cached = _stat_entries_cache
+    if cached is not None:
+        return cached
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        if _stat_entries_cache is None:
+            data, _ = _request_json(f"{JP_API_ROOT}/data/stats")
+            _stat_entries_cache = tuple(
+                entry for group in data.get("result", ()) for entry in group.get("entries", ())
+            )
+        return _stat_entries_cache
 
 
 def _trade_stat_entry_indexes(entries: tuple[dict, ...]):
@@ -2626,48 +2654,64 @@ _GUARDIAN_MAP_IDENTITY_STAT_IDS = {
 }
 
 
+def _load_trade_item_catalog(api_root: str):
+    data, _ = _request_json(f"{api_root}/data/items")
+    groups = tuple(
+        (str(group.get("id", "")), tuple(group.get("entries", ())))
+        for group in data.get("result", ())
+    )
+    return (
+        tuple((group_id, rows) for group_id, rows in groups if group_id),
+        tuple(row for _group_id, rows in groups for row in rows),
+    )
+
+
 def _trade_item_entries() -> tuple[dict, ...]:
-    global _item_entries_cache
-    if _item_entries_cache is None:
-        data, _ = _request_json(f"{API_ROOT}/data/items")
-        _item_entries_cache = tuple(
-            entry for group in data.get("result", ()) for entry in group.get("entries", ())
-        )
-    return _item_entries_cache
+    global _item_groups_cache, _item_entries_cache
+    cached = _item_entries_cache
+    if cached is not None:
+        return cached
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        if _item_entries_cache is None:
+            _item_groups_cache, _item_entries_cache = _load_trade_item_catalog(API_ROOT)
+        return _item_entries_cache
 
 
 def _jp_trade_item_entries() -> tuple[dict, ...]:
-    global _jp_item_entries_cache
-    if _jp_item_entries_cache is None:
-        data, _ = _request_json(f"{JP_API_ROOT}/data/items")
-        _jp_item_entries_cache = tuple(
-            entry for group in data.get("result", ()) for entry in group.get("entries", ())
-        )
-    return _jp_item_entries_cache
+    global _jp_item_groups_cache, _jp_item_entries_cache
+    cached = _jp_item_entries_cache
+    if cached is not None:
+        return cached
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        if _jp_item_entries_cache is None:
+            _jp_item_groups_cache, _jp_item_entries_cache = _load_trade_item_catalog(JP_API_ROOT)
+        return _jp_item_entries_cache
 
 
 def _trade_item_groups() -> tuple[tuple[str, tuple[dict, ...]], ...]:
-    global _item_groups_cache
-    if _item_groups_cache is None:
-        data, _ = _request_json(f"{API_ROOT}/data/items")
-        _item_groups_cache = tuple(
-            (str(group.get("id", "")), tuple(group.get("entries", ())))
-            for group in data.get("result", ())
-            if str(group.get("id", ""))
-        )
-    return _item_groups_cache
+    global _item_groups_cache, _item_entries_cache
+    cached = _item_groups_cache
+    if cached is not None:
+        return cached
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        if _item_groups_cache is None:
+            _item_groups_cache, _item_entries_cache = _load_trade_item_catalog(API_ROOT)
+        return _item_groups_cache
 
 
 def _jp_trade_item_groups() -> tuple[tuple[str, tuple[dict, ...]], ...]:
-    global _jp_item_groups_cache
-    if _jp_item_groups_cache is None:
-        data, _ = _request_json(f"{JP_API_ROOT}/data/items")
-        _jp_item_groups_cache = tuple(
-            (str(group.get("id", "")), tuple(group.get("entries", ())))
-            for group in data.get("result", ())
-            if str(group.get("id", ""))
-        )
-    return _jp_item_groups_cache
+    global _jp_item_groups_cache, _jp_item_entries_cache
+    cached = _jp_item_groups_cache
+    if cached is not None:
+        return cached
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        if _jp_item_groups_cache is None:
+            _jp_item_groups_cache, _jp_item_entries_cache = _load_trade_item_catalog(JP_API_ROOT)
+        return _jp_item_groups_cache
 
 
 def _aligned_trade_item_pairs():
@@ -3578,7 +3622,7 @@ def resolve_trade_stat_filters(
         return ()
     if item.category == "gem":
         return _gem_filters(item, trade_base_type)
-    entries = _trade_stat_entries()
+    entries = _trade_stat_entries() if item.modifiers or _is_atzoatl_chronicle(item) else ()
     entries_by_id, entries_by_text = _trade_stat_entry_indexes(entries)
     resolved: list[TradeStatFilter] = []
     unique_item = _is_unique(item)
@@ -4718,8 +4762,10 @@ def english_trade_identity(
     if not needs_refresh:
         return resolved
 
-    _clear_trade_item_catalog_cache()
-    return _english_trade_identity_once(item, base_type, name)
+    _require_trade_catalog_worker()
+    with _trade_catalog_lock:
+        _clear_trade_item_catalog_cache()
+        return _english_trade_identity_once(item, base_type, name)
 
 
 def _require_english_search_identity(payload: dict) -> None:

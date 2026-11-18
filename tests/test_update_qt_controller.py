@@ -1,5 +1,7 @@
 import sys
 from pathlib import Path
+from threading import Thread
+from unittest.mock import Mock
 
 import pytest
 
@@ -44,6 +46,36 @@ def test_check_emits_release_and_manual_flag(monkeypatch):
     controller.check(True)
 
     assert received == [(release, True)]
+
+
+def test_worker_completion_keeps_check_in_flight_until_qt_delivers_result(qt_app, monkeypatch):
+    workers = []
+
+    def make_thread(target):
+        worker = Thread(target=target, daemon=True)
+        workers.append(worker)
+        return worker
+
+    fetch = Mock(return_value=None)
+    monkeypatch.setattr("src.update.qt_controller.fetch_latest_release", fetch)
+    controller = UpdateController(thread_factory=make_thread)
+    received = Mock()
+    controller.check_finished.connect(received)
+
+    controller.check(False)
+    workers[0].join(timeout=5)
+    assert not workers[0].is_alive()
+    assert controller.checking
+
+    controller.check(True)
+    assert len(workers) == 1
+    assert fetch.call_count == 1
+    received.assert_not_called()
+
+    qt_app.processEvents()
+
+    assert not controller.checking
+    received.assert_called_once_with(None, False)
 
 
 def test_launch_updater_copies_executable_archive_and_uses_argument_list(

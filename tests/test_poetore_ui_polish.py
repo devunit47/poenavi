@@ -97,6 +97,25 @@ def test_poetore_toolbar_icons_use_a_single_theme_ink(qapp, tmp_path, appearance
 
 
 @pytest.mark.parametrize("preset", PRESETS)
+def test_update_checking_status_has_contrast_while_disabled(qapp, tmp_path, monkeypatch, preset):
+    appearance = {"preset": preset}
+    apply_application_appearance(qapp, {"appearance": appearance})
+    window = build_scenario("main", tmp_path)
+    settle(qapp, window)
+    monkeypatch.setattr(window._update_controller, "_checking", True)
+    window._sync_update_button_from_config()
+    button = window.update_button
+    assert not button.isEnabled()
+    assert button.toolTip() == "アプリの更新を確認中…"
+    image = _button_pixels(button)
+    background = QColor(resolve_tokens(appearance, "poetore").background)
+    assert max(
+        contrast(_composite(image.pixelColor(x, y), background), background)
+        for x in range(image.width()) for y in range(image.height())
+    ) >= 3
+
+
+@pytest.mark.parametrize("preset", PRESETS)
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
 def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path, preset, version):
     apply_application_appearance(qapp, {"appearance": {"preset": preset, "overrides": {"base_font_size": 13}}})
@@ -388,7 +407,7 @@ def test_main_periodic_update_preserves_offscreen_position(qapp, tmp_path, locke
     window.move(position)
     release = ReleaseInfo("99.99.99", "test", "https://example.com", "", "")
 
-    window._handle_background_update_result(release, False)
+    window._handle_update_check_result(release, False)
     assert_geometry_converges(qapp, window)
     assert window.update_button.isVisible()
     assert window.update_button.toolTip() == "v99.99.99 に更新"
@@ -414,7 +433,7 @@ def test_main_update_fits_at_screen_bottom_without_moving(qapp, tmp_path, monkey
     assert window.frameGeometry().bottom() == screen.geometry.bottom()
     release = ReleaseInfo("99.99.99", "test", "https://example.com", "", "")
 
-    window._handle_background_update_result(release, False)
+    window._handle_update_check_result(release, False)
     assert_geometry_converges(qapp, window)
 
     assert window.pos() == position
@@ -517,7 +536,7 @@ def test_main_same_screen_relayout_preserves_partially_visible_management(qapp, 
     assert window.pos() == position
 
 
-def test_main_update_action_states_keep_compact_height(qapp, tmp_path):
+def test_main_update_action_states_keep_compact_height(qapp, tmp_path, monkeypatch):
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
     window = build_scenario("main", tmp_path)
     settle(qapp, window)
@@ -532,7 +551,7 @@ def test_main_update_action_states_keep_compact_height(qapp, tmp_path):
         ("99.99.99", False, "v99.99.99 に更新"),
     ):
         window.config["notified_update_version"] = version
-        window._update_check_pending = checking
+        monkeypatch.setattr(window._update_controller, "_checking", checking)
         window._sync_update_button_from_config()
         assert_geometry_converges(qapp, window)
         assert button.isVisible() and button.toolTip() == title

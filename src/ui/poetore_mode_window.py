@@ -52,8 +52,8 @@ from src.ui.toolbar_icons import (
     line_icon_canvas, update_check_icon,
 )
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
-from src.update.qt_controller import UpdateController
 from src.update.release_client import parse_version
+from src.update.startup_gate import record_update_check_result, shared_update_controller
 from src.utils.chat_command import send_chat_command
 from src.utils.config_manager import ConfigManager
 from src.utils.feature_support import (
@@ -248,6 +248,7 @@ class _PoetoreModeTitleBar(QWidget):
         self.update_button = ToolbarButton(border_width=0)
         self.update_button.setObjectName("poetoreAppUpdateAction")
         self.update_button.setIconSize(QSize(20, 20))
+        self.update_button.setAutoDefault(True)
         layout.addWidget(self.update_button)
 
         glyph_style = f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;"
@@ -336,7 +337,9 @@ class PoetoreModeWindow(QMainWindow):
         self._rate_value_cache = ExchangeRateValueCache()
         self._resolved_rate_league = self._initial_currency_rate_league()
         self._league_request_running = False
-        self._update_check_pending = False
+        self._update_controller = shared_update_controller()
+        self._toolbar_update_action = None
+        self._deferred_toolbar_update_message = None
         self._update_gate_open = False
         self._league_signals = _LeagueSignals(self)
         self._league_signals.ready.connect(self._queue_rate_sync)
@@ -355,12 +358,10 @@ class PoetoreModeWindow(QMainWindow):
         self.setMinimumWidth(500)
         self.resize(558, 300)
         self._build_ui()
-        self._background_update_controller = UpdateController(self)
-        self._background_update_controller.check_finished.connect(
-            self._handle_background_update_result
-        )
-        self._background_update_controller.check_failed.connect(
-            self._handle_background_update_failure
+        self._update_connections = (
+            self._update_controller.check_started.connect(self._sync_update_button_from_config),
+            self._update_controller.check_finished.connect(self._handle_update_check_result),
+            self._update_controller.check_failed.connect(self._handle_update_check_failure),
         )
         self._update_check_timer = QTimer(self)
         self._update_check_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
@@ -1583,17 +1584,21 @@ class PoetoreModeWindow(QMainWindow):
         self.refresh_currency_rate()
 
     def _check_for_updates(self, parent=None):
-        """アプリ情報タブとダウンロードボタンで既存の更新画面を開く。"""
+        """アプリ情報タブから更新確認を行い、結果に応じた画面を開く。"""
         from src.update.startup_gate import run_manual_update_check
 
+        self._run_update_flow(lambda: run_manual_update_check(
+            self.config, parent or self, controller=self._update_controller,
+        ))
+
+    def _run_update_flow(self, run_update):
         if self._update_gate_open:
             return
         self._update_check_timer.stop()
         self._update_gate_open = True
         self._sync_update_button_from_config()
-        self.config = ConfigManager.load_config()
         try:
-            continue_running = run_manual_update_check(self.config, parent or self)
+            continue_running = run_update()
         finally:
             self._update_gate_open = False
             self._sync_update_button_from_config()
@@ -1601,6 +1606,10 @@ class PoetoreModeWindow(QMainWindow):
             QApplication.instance().quit()
             return
         self._update_check_timer.start()
+        if self._deferred_toolbar_update_message is not None:
+            icon, message = self._deferred_toolbar_update_message
+            self._deferred_toolbar_update_message = None
+            self._show_toolbar_update_message(icon, message)
 
     def _available_update_version(self):
         version = str(self.config.get("notified_update_version", "")).strip()
@@ -1614,7 +1623,7 @@ class PoetoreModeWindow(QMainWindow):
     def _sync_update_button_from_config(self):
         theme = resolve_app_theme(POETORE_THEME)
         version = self._available_update_version()
-        checking = self._update_check_pending or self._update_gate_open
+        checking = self._update_controller.checking or self._update_gate_open
         if checking:
             tooltip = "アプリの更新を確認中…"
             icon = checking_icon(theme.muted_text)
@@ -1630,48 +1639,55 @@ class PoetoreModeWindow(QMainWindow):
         self.update_button.setEnabled(not checking)
 
     def _run_toolbar_update_action(self):
-        if self._available_update_version():
-            self._check_for_updates()
-        else:
-            self._start_update_check(manual=True)
+        self._start_update_check(manual=True)
 
     def _start_update_check(self, *, manual):
-        if self._update_check_pending or self._update_gate_open:
+        if self._update_controller.checking or self._update_gate_open:
             return
-        self._update_check_pending = True
-        self._sync_update_button_from_config()
-        self._background_update_controller.check(manual)
+        if manual:
+            self._toolbar_update_action = (
+                "download" if self._available_update_version() else "check"
+            )
+        self._update_controller.check(manual)
 
     def _check_for_updates_in_background(self):
         """常駐中はダイアログを出さずに最新版だけ確認する。"""
         self._start_update_check(manual=False)
 
-    def _handle_background_update_result(self, release, manual):
-        self._update_check_pending = False
-        if self._update_gate_open:
-            return
+    def _handle_update_check_result(self, release, _manual):
+        record_update_check_result(self.config, release)
+        self._sync_update_button_from_config()
         if release is None:
-            if self._available_update_version():
-                self.config.pop("notified_update_version", None)
-                ConfigManager.save_config(self.config)
-        elif self.config.get("notified_update_version") != release.version:
-            self.config["notified_update_version"] = release.version
-            ConfigManager.save_config(self.config)
+            self._notify_toolbar_update_check(QMessageBox.Information, "最新バージョンです。")
+            return
+
+        action = self._toolbar_update_action
+        self._toolbar_update_action = None
+        if action == "download" and not self._update_gate_open:
+            from src.update.startup_gate import offer_update
+
+            self._run_update_flow(lambda: offer_update(release, self, self._update_controller))
+
+    def _handle_update_check_failure(self, message, _manual):
         self._sync_update_button_from_config()
-        if manual and release is None:
-            from src.ui.update_dialogs import show_update_message
+        self._notify_toolbar_update_check(
+            QMessageBox.Warning, f"更新を確認できませんでした。\n{message}",
+        )
 
-            show_update_message(self, QMessageBox.Information, "アップデート", "最新バージョンです。")
+    def _notify_toolbar_update_check(self, icon, message):
+        if self._toolbar_update_action is None:
+            return
+        self._toolbar_update_action = None
+        if self._update_gate_open:
+            # アプリ情報の確認結果を閉じた後にツールバーの結果を表示する。
+            self._deferred_toolbar_update_message = icon, message
+        else:
+            self._show_toolbar_update_message(icon, message)
 
-    def _handle_background_update_failure(self, message, manual):
-        self._update_check_pending = False
-        self._sync_update_button_from_config()
-        if manual and not self._update_gate_open:
-            from src.ui.update_dialogs import show_update_message
+    def _show_toolbar_update_message(self, icon, message):
+        from src.ui.update_dialogs import show_update_message
 
-            show_update_message(
-                self, QMessageBox.Warning, "アップデート", f"更新を確認できませんでした。\n{message}",
-            )
+        show_update_message(self, icon, "アップデート", message)
 
     def _ensure_cheat_sheet_overlay(self):
         from src.ui.cheat_sheets import CheatSheetOverlay
@@ -1716,6 +1732,9 @@ class PoetoreModeWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._update_check_timer.stop()
+        for connection in self._update_connections:
+            QObject.disconnect(connection)
+        self._update_connections = ()
         self.tray_icon.hide()
         if self._hideout_notification is not None:
             self._hideout_notification.close()

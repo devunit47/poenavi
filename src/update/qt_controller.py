@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 
-from PySide6.QtCore import QCoreApplication, QObject, Signal
+from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot
 
 from src.update.artifacts import (
     DownloadCancelled,
@@ -20,8 +20,10 @@ from src.version import APP_VERSION
 
 
 class UpdateController(QObject):
+    check_started = Signal()
     check_finished = Signal(object, bool)
     check_failed = Signal(str, bool)
+    _check_result = Signal(object, object, bool)
     download_progress = Signal(int, int)
     download_ready = Signal(object, object)
     download_failed = Signal(str)
@@ -33,6 +35,7 @@ class UpdateController(QObject):
             lambda target: threading.Thread(target=target, daemon=True)
         )
         self._checking = False
+        self._check_result.connect(self._finish_check)
         self._downloading = False
         self._cancel = threading.Event()
         self._work_dir: Path | None = None
@@ -53,22 +56,34 @@ class UpdateController(QObject):
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
 
+    @property
+    def checking(self) -> bool:
+        return self._checking
+
     def check(self, manual: bool) -> None:
         if self._checking:
             return
         self._checking = True
+        self.check_started.emit()
 
         def work():
             try:
                 release = fetch_latest_release(APP_VERSION)
             except Exception as exc:
-                self._checking = False
-                self.check_failed.emit(str(exc), manual)
+                self._check_result.emit(None, str(exc), manual)
             else:
-                self._checking = False
-                self.check_finished.emit(release, manual)
+                self._check_result.emit(release, None, manual)
 
         self._thread_factory(work).start()
+
+    @Slot(object, object, bool)
+    def _finish_check(self, release, error, manual):
+        # The result and the transition out of checking belong to the Qt thread.
+        self._checking = False
+        if error is None:
+            self.check_finished.emit(release, manual)
+        else:
+            self.check_failed.emit(error, manual)
 
     def download(self, release: ReleaseInfo) -> None:
         if self._downloading:

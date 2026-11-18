@@ -21,6 +21,7 @@ class ImmediateThread:
 
 def test_common_startup_gate_continues_without_update():
     QApplication.instance() or QApplication([])
+    config = {"notified_update_version": "9.9.9"}
 
     def controller_factory(parent=None):
         return UpdateController(parent, thread_factory=lambda target: ImmediateThread(target))
@@ -31,8 +32,13 @@ def test_common_startup_gate_continues_without_update():
     ), patch(
         "src.update.qt_controller.fetch_latest_release",
         return_value=None,
-    ):
-        assert run_startup_update_gate({}) is True
+    ), patch(
+        "src.update.startup_gate.ConfigManager.save_config",
+    ) as save_config:
+        assert run_startup_update_gate(config) is True
+
+    assert config["notified_update_version"] == ""
+    save_config.assert_called_once_with(config)
 
 
 def test_manual_check_reports_latest_version():

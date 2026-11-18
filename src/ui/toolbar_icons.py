@@ -102,7 +102,10 @@ def checking_icon(color) -> QIcon:
     painter.drawPolyline(QPolygonF([
         QPointF(12, 7), QPointF(12, 12), QPointF(15.5, 14),
     ]))
-    return finish_line_icon(pixmap, painter)
+    icon = _finish(pixmap, painter)
+    # The clock communicates progress while the button is disabled.
+    icon.addPixmap(pixmap, QIcon.Disabled)
+    return icon
 
 
 def hideout_notification_icon(color, active) -> QIcon:

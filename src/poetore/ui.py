@@ -1154,6 +1154,7 @@ class PoetoreWindow(QWidget):
         self._auto_league: str | None = None
         self._has_searched_current_item = False
         self._search_dirty = False
+        self._price_status_in_progress = False
         self._search_generation = 0
         self._search_cancel = TradeSearchCancellation()
         self._pending_trade_conditions = None
@@ -2229,13 +2230,17 @@ class PoetoreWindow(QWidget):
             other_layout.removeWidget(self.trade_url_button)
             target_layout.addWidget(self.trade_url_button)
 
-    def _set_price_status(self, text: str, *, compact: bool = False):
+    def _set_price_status(
+        self, text: str, *, compact: bool = False, in_progress: bool = False,
+    ):
         """Show status text; new call sites safely default to full-width guidance."""
+        self._price_status_in_progress = in_progress
         self.price_status.setText(text)
         self._set_price_status_layout(compact=compact)
 
     def _clear_price_status(self):
         """An empty row cannot collide, so retain access to the memory toggle."""
+        self._price_status_in_progress = False
         self.price_status.clear()
         self._set_price_status_layout(compact=True)
 
@@ -2279,9 +2284,12 @@ class PoetoreWindow(QWidget):
         if self._auto_search_queued:
             return
         self._auto_search_queued = True
+        self._price_status_in_progress = True
         QTimer.singleShot(0, self._run_queued_auto_search)
 
     def _run_queued_auto_search(self):
+        if not self._auto_search_queued:
+            return
         self._auto_search_queued = False
         self.search_current_item()
 
@@ -5024,6 +5032,11 @@ class PoetoreWindow(QWidget):
         trace = performance_trace or start_search_trace("alt_d_direct")
         self._pending_performance_trace = trace
         trace.mark("capture_started")
+        # A finished worker must not send or display the old item while
+        # the new capture is still waiting for key release or clipboard data.
+        self._auto_search_queued = False
+        self._advance_search_generation()
+        self._clipboard_wait_generation = getattr(self, "_clipboard_wait_generation", 0) + 1
 
         # この時点ではPoEが前面。コピー後にぽえとれがフォーカスを取る前に保存する。
         self._placement_context = capture_placement_context()
@@ -5216,18 +5229,11 @@ class PoetoreWindow(QWidget):
 
     def _capture_item_copy(self):
         trace = self._pending_performance_trace
-        self._clear_pending_trade_conditions()
-        self._pending_capture_identity_text = None
         copied_text = read_item_clipboard(QApplication.clipboard())
         if trace is not None:
             trace.mark("clipboard_read", characters=len(copied_text))
-        # Invalidate an older asynchronous search before parsing the new copy.
-        # Otherwise an old result can arrive during a slower PoE2 parse and be
-        # painted briefly for the newly captured item.
+        # A manual search may have started while the clipboard was pending.
         self._advance_search_generation()
-        self._parsed_item = None
-        self._parsed_item_source_text = None
-        self._parsed_item_poe_version = None
         try:
             item = self._parse_item_text(copied_text)
         except (ItemParseError, ValueError) as error:
@@ -5235,10 +5241,23 @@ class PoetoreWindow(QWidget):
                 trace.mark("clipboard_parse_failed")
             self._last_capture_parse_error = str(error)
             self._pending_performance_trace = None
+            if self._price_status_in_progress:
+                self._set_price_status("検索条件を確認して「検索」を押してください。")
+                self.price_button.setEnabled(True)
+            if (
+                not self.additional_results_button.isHidden()
+                and not self.additional_results_button.isEnabled()
+            ):
+                self.additional_results_button.setText("次の10件を取得")
+                self.additional_results_button.setEnabled(True)
             if self._capture_error_notification_enabled():
                 self._build_capture_error_dialog().exec()
             return
         self._last_capture_parse_error = ""
+        self._pending_capture_identity_text = None
+        self._parsed_item = None
+        self._parsed_item_source_text = None
+        self._parsed_item_poe_version = None
         if trace is not None:
             trace.mark(
                 "clipboard_parsed", category=item.category, modifiers=len(item.modifiers),
@@ -5608,7 +5627,7 @@ class PoetoreWindow(QWidget):
                         self._hide_related_items()
                     self._update_item_header(item)
                     self.disenchant_dust_panel.hide()
-                    self._set_price_status("検索条件を準備中…")
+                    self._set_price_status("検索条件を準備中…", in_progress=True)
 
                     def run():
                         try:
@@ -5877,7 +5896,8 @@ class PoetoreWindow(QWidget):
         league_label = league or "現行SC（自動）"
         self._set_price_status(
             f"{league_label}で「{preset_label} / {trade_status_label} / "
-            f"{trade_currency_label} / {listed_within_label}」を検索中…"
+            f"{trade_currency_label} / {listed_within_label}」を検索中…",
+            in_progress=True,
         )
         filters = self._selected_stat_filters()
         needs_initial_filters = initial_filters is not None or (
@@ -7384,7 +7404,8 @@ class PoetoreWindow(QWidget):
         if not result.listings:
             self._set_price_status(
                 f"{result.league}: 検索候補{result.total}件{cache_note}。"
-                "価格付き出品は取得できませんでした。"
+                "価格付き出品は取得できませんでした。",
+                in_progress=partial,
             )
             return
         progress_note = "取得中 / " if partial else ""
@@ -7393,6 +7414,7 @@ class PoetoreWindow(QWidget):
             f"{result.league}: {progress_note}候補{result.total}件 / "
             f"取得{fetched_count}件{cache_note}",
             compact=not partial,
+            in_progress=partial,
         )
         item = getattr(self, "_parsed_item", None)
         show_stock = any(row.stack_size is not None for row in result.listings)

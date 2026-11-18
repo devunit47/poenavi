@@ -21,6 +21,7 @@ from src.ui.dialog_theme import UI_METRICS
 from src.update.release_client import ReleaseInfo
 from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
 from tests.test_theme_geometry_audit import geometry_failures
+from tests.test_theme_painter_audit import inspect_paint
 
 
 @pytest.fixture(autouse=True)
@@ -141,8 +142,10 @@ def test_main_rates_reflow_when_current_screen_metrics_change(
     settle(qapp, window)
     width = window.width()
 
-    screen.geometry = QRect(0, 0, 1920, 600)
+    position = QPoint(-60, 40)
+    window.move(position)
     if notification == "available":
+        screen.geometry = QRect(0, 0, 1920, 600)
         screen.availableGeometryChanged.emit(screen.geometry)
     elif notification == "logical_dpi":
         screen.logical_dpi = 144
@@ -151,6 +154,8 @@ def test_main_rates_reflow_when_current_screen_metrics_change(
         screen.physical_dpi = 144
         screen.physicalDotsPerInchChanged.emit(144)
     else:
+        new_ratio = window.devicePixelRatioF() * 1.25
+        monkeypatch.setattr(window, "devicePixelRatioF", lambda: new_ratio)
         qapp.sendEvent(window, QEvent(QEvent.DevicePixelRatioChange))
     QTest.qWait(200)
     assert screen.geometry.contains(window.frameGeometry())
@@ -229,6 +234,67 @@ def test_main_same_screen_relayout_preserves_left_overlap(qapp, tmp_path, monkey
     assert_geometry_converges(qapp, window)
 
     assert window.isVisible()
+    assert window.pos() == position
+
+
+@pytest.mark.parametrize("locked", [False, True])
+@pytest.mark.parametrize("action", ["tray", "rows"])
+def test_main_same_screen_relayout_recovers_offscreen_controls(qapp, tmp_path, monkeypatch, locked, action):
+    available = QRect(0, 0, 800, 600)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.config["window_locked"] = locked
+    window._sync_update_button_from_config()
+    settle(qapp, window)
+    position = QPoint(0, 560)
+    window.move(position)
+    controls = (
+        window.title_bar.close_button, window.title_bar.minimize_button,
+        window.rate_panel.manage_button, window.update_button,
+    )
+    assert all(button.isVisible() for button in controls)
+    for button in (window.rate_panel.manage_button, window.update_button):
+        assert not available.intersects(QRect(button.mapToGlobal(QPoint()), button.size()))
+
+    if action == "tray":
+        window._build_tray_icon()
+        window._tray_notification_shown = True
+        monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+        window.minimize_to_tray()
+        assert not window.isVisible()
+        window.restore_from_tray()
+    else:
+        window.rate_panel.render_rows()
+    assert_geometry_converges(qapp, window)
+
+    assert window.isVisible()
+    assert window.x() == position.x()
+    assert window.y() < position.y()
+    assert window.frameGeometry().bottom() == available.bottom()
+    assert window._rate_scroll.viewport().height() > 0
+    for button in controls:
+        assert available.contains(QRect(button.mapToGlobal(QPoint()), button.size()))
+
+
+def test_main_same_screen_relayout_preserves_partially_visible_management(qapp, tmp_path, monkeypatch):
+    available = QRect(0, 0, 800, 600)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    settle(qapp, window)
+    assert window.update_button.isHidden()
+    manage = window.rate_panel.manage_button
+    position = QPoint(0, available.bottom() - manage.mapTo(window, manage.rect().center()).y())
+    window.move(position)
+
+    window.rate_panel.render_rows()
+    assert_geometry_converges(qapp, window)
+
+    rect = QRect(manage.mapToGlobal(QPoint()), manage.size())
+    assert available.intersects(rect) and not available.contains(rect)
     assert window.pos() == position
 
 
@@ -401,6 +467,75 @@ def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp
     QTest.keyClick(delete, Qt.Key_Space)
     assert window._rate_pair_store.pairs(window.poe_version) == pairs[:-1]
     assert len(window.rate_panel.row_widgets) == MAX_RATE_PAIRS - 1
+
+
+@pytest.mark.parametrize("width,height", [(800, 600), (640, 480)])
+@pytest.mark.parametrize("locked", [False, True])
+def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, monkeypatch, locked, width, height):
+    available = QRect(0, 0, width, height)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.config["window_locked"] = locked
+    store = window._rate_pair_store
+    store.remove(window.poe_version, 0)
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert not window.rate_panel.row_widgets
+    window.move(width - window.width(), 0)
+    position = window.pos()
+    assert window.frameGeometry().right() == available.right()
+
+    ids = list(window.rate_panel.catalog)
+    for index in range(MAX_RATE_PAIRS):
+        store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
+    window.rate_panel.service = Mock(
+        direct_pair=lambda _version, _league, left, right: DirectPairPrice(
+            "available", left, right, 197.2, 720,
+        ),
+    )
+    window._rate_pairs_changed()
+    assert_geometry_converges(qapp, window)
+
+    assert window.pos() == position
+    assert available.contains(window.frameGeometry())
+    scroll = window._rate_scroll
+    bar = scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum())
+    last_row = window.rate_panel.row_widgets[-1]
+    delete = last_row.findChild(QPushButton, f"customRateDelete{MAX_RATE_PAIRS - 1}")
+    viewport = scroll.viewport()
+    assert scroll.widget().width() == viewport.width()
+    assert viewport.rect().contains(QRect(delete.mapTo(viewport, QPoint()), delete.size()))
+    assert delete.visibleRegion().contains(delete.rect())
+    assert scroll.horizontalScrollBar().maximum() == 0
+
+    target = delete.mapTo(window, delete.rect().center())
+    native_handle = QWidget.windowHandle(window)
+    QTest.mouseMove(native_handle, window.title_bar.rect().center())
+    QTest.mouseMove(native_handle, target)
+    QTest.mouseClick(native_handle, Qt.LeftButton, pos=target)
+    assert len(store.pairs(window.poe_version)) == MAX_RATE_PAIRS - 1
+
+
+def test_main_large_rate_elides_at_a_thousands_boundary(qapp, tmp_path, monkeypatch):
+    handle = _WindowHandle(_Screen(QRect(0, 0, 800, 600)))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.rate_panel.service = Mock(
+        direct_pair=lambda _version, _league, left, right: DirectPairPrice(
+            "available", left, right, 100_000_000.1, 720,
+        ),
+    )
+    window._rate_pairs_changed()
+    settle(qapp, window)
+
+    value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
+    assert value.toolTip() == "1 ＝ 100,000,000.1"
+    assert not inspect_paint(value, ("1", "＝", "100,…"))
 
 
 @pytest.mark.parametrize("preset", PRESETS)

@@ -63,7 +63,8 @@ class ElidedLabel(QLabel):
     """Keep the full accessible text while painting an elided single line."""
 
     def set_rate_column_width(self, column_width: int) -> None:
-        self.setMinimumWidth(column_width)
+        # Let the scroll area's actual viewport width drive the elision.
+        self.setMinimumWidth(theme_font_size(13))
         # Keep the compact default and give common six-character currency
         # names more space when the whole panel can fit at a larger font size.
         self._preferred_width = max(column_width, 6 * theme_font_size(13))
@@ -129,12 +130,30 @@ class DecimalAlignedRateLabel(QLabel):
         unit = QRect(equals.left() - gap - unit_width, top, unit_width, height)
         integer_left = equals.right() + 1 + gap
         available = max(0, rect.right() + 1 - integer_left - self.HORIZONTAL_MARGIN)
-        integer_reserve = min(self._integer_width, metrics.horizontalAdvance("0…"))
-        fraction_width = min(metrics.horizontalAdvance(self._fraction), max(0, available - integer_reserve))
-        integer_width = min(self._integer_width, available - fraction_width)
+        integer_text_width = metrics.horizontalAdvance(self._integer)
+        fraction_width = metrics.horizontalAdvance(self._fraction)
+        if integer_text_width + fraction_width <= available:
+            # Use the shared decimal anchor wherever both parts have room.
+            reserve = min(self._fraction_width, available - integer_text_width)
+            integer_width = min(self._integer_width, available - reserve)
+        else:
+            fraction_width = 0
+            integer_width = min(self._integer_width, available)
         integer = QRect(integer_left, top, integer_width, height)
         fraction = QRect(integer.right() + 1, top, fraction_width, height)
         return unit, equals, integer, fraction
+
+    def _display_integer(self, width: int) -> str:
+        metrics = self.fontMetrics()
+        if metrics.horizontalAdvance(self._integer) <= width:
+            return self._integer
+        prefix = self._integer
+        while "," in prefix:
+            prefix = prefix.rsplit(",", 1)[0]
+            shortened = prefix + ",…"
+            if metrics.horizontalAdvance(shortened) <= width:
+                return shortened
+        return "…" if metrics.horizontalAdvance("…") <= width else ""
 
     def paintEvent(self, event) -> None:
         unit, equals, integer, fraction = self._column_rects()
@@ -142,13 +161,11 @@ class DecimalAlignedRateLabel(QLabel):
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.setFont(self.font())
         vertical = Qt.AlignVCenter
-        metrics = painter.fontMetrics()
         painter.drawText(unit, vertical | Qt.AlignRight, "1")
         painter.drawText(equals, vertical | Qt.AlignHCenter, "＝")
-        painter.drawText(integer, vertical | Qt.AlignRight,
-                         metrics.elidedText(self._integer, Qt.ElideRight, integer.width()))
-        painter.drawText(fraction, vertical | Qt.AlignLeft,
-                         metrics.elidedText(self._fraction, Qt.ElideRight, fraction.width()))
+        painter.drawText(integer, vertical | Qt.AlignRight, self._display_integer(integer.width()))
+        if fraction.width():
+            painter.drawText(fraction, vertical | Qt.AlignLeft, self._fraction)
         painter.end()
 
 
@@ -373,8 +390,7 @@ class CustomExchangeRatePanel(QWidget):
         if value_labels:
             # Give every row the same stretch budgets even when some values
             # are showing longer status messages instead of numbers.
-            value_width = max(max(label.minimumWidth(), label.minimumSizeHint().width())
-                              for label in value_labels)
+            value_width = max(label.minimumWidth() for label in value_labels)
             for label in value_labels:
                 label.setMinimumWidth(value_width)
             if rate_labels:
@@ -421,7 +437,9 @@ class CustomExchangeRatePanel(QWidget):
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(13)}px;"
         )
         layout.addWidget(left_name, 1)
-        value = DecimalAlignedRateLabel(display) if display_is_rate else QLabel(display)
+        value = DecimalAlignedRateLabel(display) if display_is_rate else ElidedLabel(display)
+        if not display_is_rate:
+            value.setMinimumWidth(theme_font_size(12))
         value.setObjectName(f"customRateValue{index}")
         value.setAlignment(Qt.AlignCenter)
         value.setToolTip(value.text())

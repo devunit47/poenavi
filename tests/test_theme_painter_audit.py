@@ -135,11 +135,11 @@ def inspect_rate_labels(qapp):
     failures.extend(inspect_paint(rate, ("1", "＝", "999,999", ".000001")))
     narrow_rate = DecimalAlignedRateLabel("100,000,000.1")
     narrow_rate.set_column_widths(*narrow_rate.measured_columns())
-    narrow_rate.resize(narrow_rate.minimumWidth(), narrow_rate.sizeHint().height())
-    integer = narrow_rate._column_rects()[2]
-    elided = narrow_rate.fontMetrics().elidedText("100,000,000", Qt.ElideRight, integer.width())
-    assert "," in elided and elided.endswith("…")
-    failures.extend(inspect_paint(narrow_rate, ("1", "＝", elided, ".1")))
+    for integer_text in ("100,000,…", "100,000,000"):
+        width = narrow_rate.fontMetrics().horizontalAdvance(integer_text)
+        narrow_rate.resize(narrow_rate._centered_width(width), narrow_rate.sizeHint().height())
+        assert narrow_rate._column_rects()[3].width() == 0
+        failures.extend(inspect_paint(narrow_rate, ("1", "＝", integer_text)))
     label = ElidedLabel("非常に長いカレンシーの名称を省略表示")
     label.resize(200, label.sizeHint().height())
     failures.extend(inspect_paint(label))

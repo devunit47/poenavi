@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -1151,17 +1151,44 @@ class PoetoreModeWindow(QMainWindow):
         chrome_height = root.totalHeightForWidth(width)
         if chrome_height < 0:
             chrome_height = root.totalSizeHint().height()
-        height = chrome_height + rate_height
+        natural_height = chrome_height + rate_height
+        height = natural_height
         if height > height_limit:
             scrollbar_width = self._rate_scroll.verticalScrollBar().sizeHint().width()
             width = max(width, min(width_limit, rate_minimum + scrollbar_width))
             height = max(chrome_height, height_limit)
         self.resize(width, height)
-        if keep_on_screen and available is not None and not available.contains(self.frameGeometry()):
+        if available is None or available.contains(self.frameGeometry()):
+            return
+        if keep_on_screen:
             self.move(
                 max(available.left(), min(self.x(), available.right() - self.width() + 1)),
                 max(available.top(), min(self.y(), available.bottom() - self.height() + 1)),
             )
+        elif self.isVisible():
+            root.activate()
+            self._recover_offscreen_controls(available, natural_height)
+
+    def _recover_offscreen_controls(self, available, natural_height):
+        controls = [
+            QRect(button.mapToGlobal(button.rect().topLeft()), button.size())
+            for button in (
+                self.title_bar.minimize_button, self.title_bar.close_button,
+                self.rate_panel.manage_button, self.update_button,
+            )
+            if button.isVisible()
+        ]
+        x, y = self.x(), self.y()
+        if any(rect.right() < available.left() or rect.left() > available.right() for rect in controls):
+            left = min(rect.left() for rect in controls)
+            right = max(rect.right() for rect in controls)
+            x += max(available.left() - left, min(0, available.right() - right))
+        if any(rect.bottom() < available.top() or rect.top() > available.bottom() for rect in controls):
+            # Restore room for the rates before bringing the title and footer back.
+            self.resize(self.width(), min(natural_height, available.height()))
+            y = max(available.top(), min(y, available.bottom() - self.height() + 1))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def handle_hotkey(self, command):
         if command.startswith("custom_command:"):

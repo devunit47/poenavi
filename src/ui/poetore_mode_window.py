@@ -3,20 +3,21 @@
 import sys
 import threading
 import time
+from math import cos, radians, sin
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (
-    QAction,
-    QColor,
-    QIcon,
-    QKeySequence,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QPolygonF,
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
 )
+from PySide6.QtGui import QAction, QIcon, QPainterPath, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -25,13 +26,15 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
-from src.ui.appearance import resolve_app_theme, theme_color, theme_font_size, theme_rgba
+from src.app_mode import POETORE_MODE
+from src.ui.appearance import resolve_app_theme, theme_color, theme_font_size
 from src.poetore.exchange_icon_cache import ExchangeIconCache
 from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import (
@@ -39,11 +42,13 @@ from src.poetore.exchange_rate_settings import (
     ensure_rate_pair_config,
 )
 from src.ui.app_theme import POETORE_THEME
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
 from src.ui.custom_command_settings import (
     custom_command_hotkeys,
     normalized_custom_commands,
 )
+from src.ui.toolbar_icons import finish_line_icon, line_icon_canvas
+from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.update.qt_controller import UpdateController
 from src.update.release_client import parse_version
 from src.utils.chat_command import send_chat_command
@@ -71,61 +76,43 @@ UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
 
 
 def _icon_canvas():
-    scale = 2
-    pixmap = QPixmap(24 * scale, 24 * scale)
-    pixmap.setDevicePixelRatio(scale)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    return pixmap, painter
-
-
-def _finish_icon(pixmap, painter) -> QIcon:
-    painter.end()
-    return QIcon(pixmap)
+    return line_icon_canvas(resolve_app_theme(POETORE_THEME).muted_text)
 
 
 def _memo_icon() -> QIcon:
-    """Return a compact note page with a folded corner."""
+    """A note page with a folded corner."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    dark = QColor("#15201D")
-    page = QPainterPath(QPointF(5.0, 2.8))
-    page.lineTo(15.8, 2.8)
-    page.lineTo(20.0, 7.0)
-    page.lineTo(20.0, 21.0)
-    page.lineTo(5.0, 21.0)
+    page = QPainterPath(QPointF(5.5, 3.5))
+    page.lineTo(14.5, 3.5)
+    page.lineTo(18.5, 7.5)
+    page.lineTo(18.5, 20.5)
+    page.lineTo(5.5, 20.5)
     page.closeSubpath()
-    painter.setPen(QPen(accent, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(32, 72, 62))
+    page.moveTo(14.5, 3.5)
+    page.lineTo(14.5, 7.5)
+    page.lineTo(18.5, 7.5)
     painter.drawPath(page)
-    painter.drawLine(QPointF(15.8, 3.1), QPointF(15.8, 7.0))
-    painter.drawLine(QPointF(15.8, 7.0), QPointF(19.7, 7.0))
-    painter.setPen(QPen(dark, 1.5, Qt.SolidLine, Qt.RoundCap))
-    painter.drawLine(QPointF(8.0, 10.0), QPointF(16.8, 10.0))
-    painter.drawLine(QPointF(8.0, 14.0), QPointF(16.8, 14.0))
-    painter.drawLine(QPointF(8.0, 18.0), QPointF(14.0, 18.0))
-    return _finish_icon(pixmap, painter)
+    painter.drawLine(QPointF(8.5, 12.0), QPointF(15.5, 12.0))
+    painter.drawLine(QPointF(8.5, 16.0), QPointF(13.5, 16.0))
+    return finish_line_icon(pixmap, painter)
 
 
 def _heist_curio_icon() -> QIcon:
-    """Return the approved mint Heist settings icon."""
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "assets"
-        / "icons"
-        / "heist_curio_settings.png"
-    )
-    return QIcon(str(path))
+    """The curio's circular dial and latch."""
+    pixmap, painter = _icon_canvas()
+    painter.drawArc(QRectF(4.0, 3.5, 16.0, 15.0), 230 * 16, 320 * 16)
+    painter.drawEllipse(QPointF(12.0, 11.0), 4.6, 4.6)
+    painter.drawEllipse(QPointF(12.0, 11.0), 1.3, 1.3)
+    painter.drawPolygon(QPolygonF([
+        QPointF(4.3, 13.9), QPointF(7.6, 16.1),
+        QPointF(5.7, 19.3), QPointF(2.4, 17.1),
+    ]))
+    return finish_line_icon(pixmap, painter)
 
 
 def _expedition_icon() -> QIcon:
-    """Return the three-armed Expedition spiral emblem."""
+    """The Expedition spiral with two upper curls and one lower curl."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    dark = QColor("#15201D")
-
-    # Match the in-game emblem: two curls above and one curl below.
     painter.translate(0.0, 24.0)
     painter.scale(1.0, -1.0)
 
@@ -143,162 +130,76 @@ def _expedition_icon() -> QIcon:
         painter.translate(12.0, 12.0)
         painter.rotate(angle)
         painter.translate(-12.0, -12.0)
-        painter.setPen(
-            QPen(dark, 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        )
-        painter.drawPath(arm)
-        painter.setPen(
-            QPen(accent, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        )
         painter.drawPath(arm)
         painter.restore()
 
-    painter.setPen(QPen(dark, 0.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(accent)
-    painter.drawEllipse(QPointF(12.0, 12.0), 1.5, 1.5)
-    return _finish_icon(pixmap, painter)
+    painter.drawEllipse(QPointF(12.0, 12.0), 1.0, 1.0)
+    return finish_line_icon(pixmap, painter)
 
 
 def _abyss_desecration_icon() -> QIcon:
-    """Return the approved green stone-and-concentric-eye Abyss emblem."""
+    """An eye engraved in the Abyss stone."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    stone = QColor("#34423F")
-    edge = QColor("#82918B")
-    dark = QColor("#121A18")
-    slab = QPolygonF([
-        QPointF(4.0, 2.3), QPointF(19.7, 2.8), QPointF(21.8, 5.2),
-        QPointF(21.2, 19.7), QPointF(18.8, 21.8), QPointF(4.5, 21.1),
-        QPointF(2.4, 18.5), QPointF(2.9, 5.0),
-    ])
-    painter.setPen(QPen(edge, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(stone)
-    painter.drawPolygon(slab)
-    painter.setPen(QPen(dark, 0.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    for points in (
-        ((4.1, 6.0), (6.1, 6.8), (5.0, 8.2)),
-        ((17.8, 4.5), (16.8, 6.2), (19.1, 7.0)),
-        ((4.0, 16.8), (6.0, 16.1), (5.5, 19.0)),
-        ((18.9, 15.7), (17.1, 17.0), (18.3, 19.3)),
-    ):
-        path = QPainterPath(QPointF(*points[0]))
-        path.lineTo(QPointF(*points[1]))
-        path.lineTo(QPointF(*points[2]))
-        painter.drawPath(path)
-    center = QPointF(12.0, 12.0)
-    painter.setPen(QPen(dark, 2.8, Qt.SolidLine, Qt.RoundCap))
-    for angle in range(0, 360, 45):
-        painter.save()
-        painter.translate(center)
-        painter.rotate(angle)
-        painter.drawLine(QPointF(0.0, -8.1), QPointF(0.0, -6.4))
-        painter.restore()
-    painter.setPen(QPen(accent.darker(155), 1.5))
-    painter.setBrush(QColor("#1B2523"))
-    painter.drawEllipse(center, 7.0, 7.0)
-    painter.setPen(QPen(edge, 1.1))
-    painter.setBrush(QColor("#26312F"))
-    painter.drawEllipse(center, 4.7, 4.7)
-    painter.setPen(QPen(QColor("#161817"), 1.1))
-    painter.setBrush(QColor("#0C100F"))
-    painter.drawEllipse(center, 2.7, 2.7)
-    painter.setPen(QPen(QColor("#A8F5E1"), 0.9))
-    painter.setBrush(accent)
-    painter.drawEllipse(center, 1.45, 1.45)
-    return _finish_icon(pixmap, painter)
+    painter.drawPolygon(QPolygonF([
+        QPointF(6.0, 3.5), QPointF(18.0, 3.5), QPointF(20.5, 6.0),
+        QPointF(20.5, 18.0), QPointF(18.0, 20.5), QPointF(6.0, 20.5),
+        QPointF(3.5, 18.0), QPointF(3.5, 6.0),
+    ]))
+    eye = QPainterPath(QPointF(5.5, 12.0))
+    eye.quadTo(12.0, 4.8, 18.5, 12.0)
+    eye.quadTo(12.0, 19.2, 5.5, 12.0)
+    painter.drawPath(eye)
+    painter.drawEllipse(QPointF(12.0, 12.0), 1.9, 1.9)
+    return finish_line_icon(pixmap, painter)
 
 
 def _image_manager_icon() -> QIcon:
-    """Return stacked picture cards to convey image management."""
+    """Stacked picture cards."""
     pixmap, painter = _icon_canvas()
-    accent = QColor(resolve_app_theme(POETORE_THEME).accent)
-    painter.setPen(QPen(QColor(61, 143, 123), 1.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(24, 49, 43))
-    painter.drawRoundedRect(2.8, 3.2, 15.5, 14.5, 2.0, 2.0)
-    painter.setPen(QPen(accent, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(32, 72, 62))
-    painter.drawRoundedRect(5.5, 6.0, 15.5, 14.5, 2.0, 2.0)
-    painter.setBrush(accent)
-    painter.setPen(Qt.NoPen)
-    painter.drawEllipse(QPointF(16.4, 10.4), 1.7, 1.7)
-    mountain = QPainterPath(QPointF(7.4, 18.4))
-    mountain.lineTo(11.5, 13.2)
-    mountain.lineTo(14.2, 16.1)
-    mountain.lineTo(16.1, 14.3)
-    mountain.lineTo(19.2, 18.4)
-    mountain.closeSubpath()
-    painter.setBrush(QColor(52, 166, 137))
+    back = QPainterPath(QPointF(3.5, 15.5))
+    back.lineTo(3.5, 5.5)
+    back.quadTo(3.5, 3.5, 5.5, 3.5)
+    back.lineTo(16.5, 3.5)
+    painter.drawPath(back)
+    painter.drawRoundedRect(QRectF(7.0, 7.0, 13.5, 13.5), 1.6, 1.6)
+    painter.drawEllipse(QPointF(16.5, 11.2), 1.0, 1.0)
+    mountain = QPainterPath(QPointF(7.4, 18.5))
+    mountain.lineTo(12.0, 13.8)
+    mountain.lineTo(17.1, 18.5)
     painter.drawPath(mountain)
-    return _finish_icon(pixmap, painter)
-
-
-def _draw_gear(
-    painter,
-    center: QPointF,
-    radius=3.5,
-    tooth_length=1.6,
-    stroke_color=None,
-    fill_color=None,
-):
-    dark = QColor("#15201D")
-    stroke = QColor(stroke_color) if stroke_color else dark
-    fill = QColor(fill_color) if fill_color else QColor(resolve_app_theme(POETORE_THEME).accent)
-    cx, cy = center.x(), center.y()
-    painter.setPen(QPen(stroke, 2.6, Qt.SolidLine, Qt.RoundCap))
-    diagonal = tooth_length * 0.72
-    for start, end in (
-        ((cx, cy - radius - tooth_length), (cx, cy - radius)),
-        ((cx, cy + radius), (cx, cy + radius + tooth_length)),
-        ((cx - radius - tooth_length, cy), (cx - radius, cy)),
-        ((cx + radius, cy), (cx + radius + tooth_length, cy)),
-        ((cx - radius - diagonal, cy - radius - diagonal), (cx - radius * 0.72, cy - radius * 0.72)),
-        ((cx + radius * 0.72, cy + radius * 0.72), (cx + radius + diagonal, cy + radius + diagonal)),
-        ((cx - radius - diagonal, cy + radius + diagonal), (cx - radius * 0.72, cy + radius * 0.72)),
-        ((cx + radius * 0.72, cy - radius * 0.72), (cx + radius + diagonal, cy - radius - diagonal)),
-    ):
-        painter.drawLine(QPointF(*start), QPointF(*end))
-    painter.setPen(QPen(stroke, 1.2))
-    painter.setBrush(fill)
-    painter.drawEllipse(center, radius, radius)
-    painter.setBrush(dark)
-    painter.drawEllipse(center, radius * 0.36, radius * 0.36)
+    return finish_line_icon(pixmap, painter)
 
 
 def _settings_icon() -> QIcon:
-    """Return a standalone gear matching the map-management overlay."""
+    """A six-tooth gear."""
     pixmap, painter = _icon_canvas()
-    _draw_gear(
-        painter,
-        QPointF(12.0, 12.0),
-        radius=5.5,
-        tooth_length=2.4,
-        stroke_color=resolve_app_theme(POETORE_THEME).accent,
-        fill_color="#20483E",
-    )
-    return _finish_icon(pixmap, painter)
+    tooth = ((-28, 6.6), (-13, 6.6), (-10, 8.8), (10, 8.8), (13, 6.6), (28, 6.6))
+    outline = QPolygonF()
+    for center_angle in range(-90, 270, 60):
+        for offset, radius in tooth:
+            angle = radians(center_angle + offset)
+            outline.append(QPointF(12.0 + radius * cos(angle), 12.0 + radius * sin(angle)))
+    painter.drawPolygon(outline)
+    painter.drawEllipse(QPointF(12.0, 12.0), 2.6, 2.6)
+    return finish_line_icon(pixmap, painter)
 
 
 def _map_mod_manager_icon() -> QIcon:
-    """Return a compact folded-map icon with a settings gear overlay."""
+    """A folded map with a marked location."""
     pixmap, painter = _icon_canvas()
-
-    map_path = QPainterPath(QPointF(2.5, 4.5))
-    map_path.lineTo(8.5, 2.5)
-    map_path.lineTo(14.5, 4.5)
-    map_path.lineTo(20.5, 2.5)
-    map_path.lineTo(20.5, 16.5)
-    map_path.lineTo(14.5, 18.5)
-    map_path.lineTo(8.5, 16.5)
-    map_path.lineTo(2.5, 18.5)
-    map_path.closeSubpath()
-    painter.setPen(QPen(QColor(resolve_app_theme(POETORE_THEME).accent), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(QColor(32, 72, 62))
-    painter.drawPath(map_path)
-    painter.drawLine(QPointF(8.5, 2.8), QPointF(8.5, 16.2))
-    painter.drawLine(QPointF(14.5, 4.8), QPointF(14.5, 18.0))
-
-    _draw_gear(painter, QPointF(17.5, 17.0))
-    return _finish_icon(pixmap, painter)
+    outline = QPainterPath(QPointF(13.0, 19.4))
+    outline.lineTo(8.5, 17.8)
+    outline.lineTo(3.5, 19.5)
+    outline.lineTo(3.5, 5.4)
+    outline.lineTo(8.5, 3.7)
+    outline.lineTo(14.0, 5.5)
+    outline.lineTo(20.5, 3.7)
+    outline.lineTo(20.5, 12.0)
+    painter.drawPath(outline)
+    painter.drawLine(QPointF(8.5, 3.7), QPointF(8.5, 17.8))
+    painter.drawLine(QPointF(14.0, 5.5), QPointF(14.0, 12.5))
+    painter.drawEllipse(QPointF(17.9, 17.4), 2.7, 2.7)
+    return finish_line_icon(pixmap, painter)
 
 
 class _LeagueSignals(QObject):
@@ -307,66 +208,55 @@ class _LeagueSignals(QObject):
 
 
 class _PoetoreModeTitleBar(QWidget):
-    """ぽえなび本体と同じ構成のドラッグ可能なタイトルバー。"""
+    """タイトルとウィンドウ操作を並べるドラッグ可能なタイトルバー。"""
 
-    def __init__(self, window):
+    def __init__(self, window, poe_version=POE1):
         super().__init__(window)
         self._window = window
         self._drag_offset = None
         self.setObjectName("poetoreModeTitleBar")
-        self.setFixedHeight(38)
+        self.setMinimumHeight(UI_METRICS.toolbar_size)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(UI_METRICS.control_gap, UI_METRICS.control_gap,
-                                  UI_METRICS.control_gap, 0)
+        layout.setContentsMargins(
+            UI_METRICS.page_margin, UI_METRICS.inline_gap,
+            UI_METRICS.control_gap, UI_METRICS.inline_gap,
+        )
         layout.setSpacing(UI_METRICS.inline_gap)
+        self.title_label = QLabel("ぽえとれ", self)
+        mode_name = "PoE2" if poe_version == POE2 else "PoE1"
+        self.mode_label = QLabel(f"（{mode_name}）", self)
+        accent = resolve_app_theme(POETORE_THEME).accent
+        for label, size in ((self.title_label, 18), (self.mode_label, 14)):
+            label.setStyleSheet(
+                f"color: {accent}; font-size: {theme_font_size(size)}px; font-weight: bold;"
+            )
+            label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            layout.addWidget(label)
         layout.addStretch()
 
-        button_style = f"""
-            QPushButton {{
-                background: transparent;
-                color: {resolve_app_theme(POETORE_THEME).text};
-                border: none;
-                font-size: {theme_font_size(14)}px;
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {theme_rgba('accent_soft', 101, 255, 202, 0.20)};
-                border-radius: 3px;
-            }}
-        """
-        close_style = f"""
-            QPushButton {{
-                background: transparent;
-                color: {resolve_app_theme(POETORE_THEME).text};
-                border: none;
-                font-size: {theme_font_size(14)}px;
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {theme_rgba('accent_soft', 255, 60, 60, 0.8)};
-                border-radius: 3px;
-                color: {theme_color('text', '#ffffff')};
-            }}
-        """
+        button_style = icon_button_stylesheet(
+            border_width=0, content=f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;",
+        )
 
         self.minimize_button = QPushButton("─")
         self.minimize_button.setObjectName("poetoreMinimizeButton")
-        self.minimize_button.setFocusPolicy(Qt.NoFocus)
+        self.minimize_button.setFocusPolicy(Qt.TabFocus)
         self.minimize_button.setFixedSize(32, 24)
         self.minimize_button.setStyleSheet(button_style)
         self.minimize_button.setToolTip("最小化")
+        self.minimize_button.setAccessibleName(self.minimize_button.toolTip())
         self.minimize_button.clicked.connect(window.minimize_to_tray)
         layout.addWidget(self.minimize_button)
 
         self.close_button = QPushButton("×")
         self.close_button.setObjectName("poetoreCloseButton")
-        self.close_button.setFocusPolicy(Qt.NoFocus)
+        self.close_button.setFocusPolicy(Qt.TabFocus)
         self.close_button.setFixedSize(32, 24)
-        self.close_button.setStyleSheet(close_style)
+        self.close_button.setStyleSheet(button_style)
         self.close_button.setToolTip("閉じる")
+        self.close_button.setAccessibleName(self.close_button.toolTip())
         self.close_button.clicked.connect(window.close)
         layout.addWidget(self.close_button)
         equalize_button_sizes((self.minimize_button, self.close_button), minimum_width=32)
@@ -392,7 +282,11 @@ class _PoetoreModeTitleBar(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._drag_offset = None
+        if event.button() == Qt.LeftButton and self._drag_offset is not None:
+            self._drag_offset = None
+            self._window._refresh_screen_geometry()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
 
@@ -437,12 +331,19 @@ class PoetoreModeWindow(QMainWindow):
         self._league_signals = _LeagueSignals(self)
         self._league_signals.ready.connect(self._queue_rate_sync)
         self._league_signals.failed.connect(self._show_rate_error)
+        self._screen_watcher = WindowScreenWatcher(self)
+        self._screen_watcher.changed.connect(self._queue_screen_geometry)
+        self._screen_metrics = None
+        self._screen_geometry_timer = QTimer(self)
+        self._screen_geometry_timer.setSingleShot(True)
+        self._screen_geometry_timer.setInterval(SCREEN_CHANGE_DEBOUNCE_MS)
+        self._screen_geometry_timer.timeout.connect(self._refresh_screen_geometry)
 
         self.setWindowTitle("ぽえとれ")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(500, 300)
-        self.resize(558, 360)
+        self.setMinimumWidth(500)
+        self.resize(558, 300)
         self._build_ui()
         self._background_update_controller = UpdateController(self)
         self._background_update_controller.check_finished.connect(
@@ -459,8 +360,6 @@ class PoetoreModeWindow(QMainWindow):
         self._sync_update_button_from_config()
         self._update_check_timer.start()
         self._hideout_notification = None
-        self.focus_button.setText("隠れ家滞在通知\nOFF")
-        self._apply_rate_panel_height()
         self._build_tray_icon()
         self._apply_window_settings()
         QTimer.singleShot(0, self._apply_startup_position)
@@ -565,6 +464,21 @@ class PoetoreModeWindow(QMainWindow):
                 border-radius: 10px;
             }}
             QWidget#poetoreModeTitleBar {{ border: none; background: transparent; }}
+            QScrollArea#poetoreRateScroll, QWidget#poetoreRatePanel {{
+                background: transparent;
+            }}
+            QScrollArea#poetoreRateScroll QScrollBar:vertical {{
+                background: {theme_color('surface', '#15191B')};
+                width: {UI_METRICS.overlay_margin}px;
+                margin: 0;
+            }}
+            QScrollArea#poetoreRateScroll QScrollBar::handle:vertical {{
+                background: {resolve_app_theme(POETORE_THEME).muted_text};
+                min-height: {UI_METRICS.overlay_control_height}px;
+                border-radius: {UI_METRICS.inline_gap}px;
+            }}
+            QScrollArea#poetoreRateScroll QScrollBar::add-line:vertical,
+            QScrollArea#poetoreRateScroll QScrollBar::sub-line:vertical {{ height: 0; }}
             QFrame#rateCard {{
                 background: {resolve_app_theme(POETORE_THEME).panel};
                 border: 1px solid {theme_color('border', '#343B3E')};
@@ -586,7 +500,7 @@ class PoetoreModeWindow(QMainWindow):
                 color: {resolve_app_theme(POETORE_THEME).text};
             }}
             QPushButton#poetoreFocusButton {{
-                padding: 0;
+                padding: 0 {UI_METRICS.inline_gap}px;
                 font-size: {theme_font_size(11)}px;
                 text-align: center;
             }}
@@ -611,53 +525,33 @@ class PoetoreModeWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.title_bar = _PoetoreModeTitleBar(self)
+        self.title_bar = _PoetoreModeTitleBar(self, self.poe_version)
+        self.title_label = self.title_bar.title_label
+        self.mode_label = self.title_bar.mode_label
         root.addWidget(self.title_bar)
 
         body = QWidget()
         body.setObjectName("poetoreModeBody")
         body.setStyleSheet("QWidget#poetoreModeBody { border: none; background: transparent; }")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(UI_METRICS.page_margin, UI_METRICS.control_gap,
+        body_layout.setContentsMargins(UI_METRICS.page_margin, UI_METRICS.inline_gap,
                                       UI_METRICS.page_margin, UI_METRICS.page_margin)
-        body_layout.setSpacing(UI_METRICS.section_gap)
+        body_layout.setSpacing(UI_METRICS.panel_padding)
 
+        toolbar = QVBoxLayout()
+        toolbar.setSpacing(UI_METRICS.inline_gap)
         header = QHBoxLayout()
         header.setSpacing(UI_METRICS.inline_gap)
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(6)
-        title_style = (
-            f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(26)}px; font-weight: bold;"
-        )
-        self.title_label = QLabel("ぽえとれ")
-        self.title_label.setStyleSheet(title_style)
-        mode_name = "PoE2" if self.poe_version == POE2 else "PoE1"
-        self.mode_label = QLabel(f"（{mode_name}）")
-        self.mode_label.setStyleSheet(
-            f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(22)}px; font-weight: bold;"
-        )
-        self.mode_label.setMinimumWidth(self.mode_label.sizeHint().width())
-        title_row.addWidget(self.title_label)
-        title_row.addWidget(self.mode_label)
-        subtitle = QLabel("価格チェック・トレード支援")
-        subtitle.setStyleSheet(
-            f"color: {resolve_app_theme(POETORE_THEME).muted_text}; font-size: {theme_font_size(12)}px;"
-        )
-        title_box.addLayout(title_row)
-        title_box.addWidget(subtitle)
-        header.addLayout(title_box)
-        header.addStretch()
 
         self.focus_button = QPushButton("隠れ家滞在通知\nOFF")
         self.focus_button.setObjectName("poetoreFocusButton")
         self.focus_button.setFocusPolicy(Qt.NoFocus)
         self.focus_button.setToolTip("隠れ家滞在通知の集中モードを切り替える")
-        self.focus_button.setFixedSize(108, UI_METRICS.toolbar_size)
+        self.focus_button.setMinimumWidth(108)
+        self.focus_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.focus_button.clicked.connect(self.toggle_focus_mode)
         header.addWidget(self.focus_button)
+        header.addStretch()
 
         self.memo_button = self._header_button("", "共通メモを開く")
         self.memo_button.setIcon(_memo_icon())
@@ -725,7 +619,7 @@ class PoetoreModeWindow(QMainWindow):
         )
         for button in self.header_action_buttons:
             header.addWidget(button)
-        body_layout.addLayout(header)
+        toolbar.addLayout(header)
 
         self.focus_message_label = QLabel("")
         self.focus_message_label.setObjectName("focusMessageLabel")
@@ -734,7 +628,8 @@ class PoetoreModeWindow(QMainWindow):
         )
         self.focus_message_label.setWordWrap(True)
         self.focus_message_label.hide()
-        body_layout.addWidget(self.focus_message_label)
+        toolbar.addWidget(self.focus_message_label)
+        body_layout.addLayout(toolbar)
 
         from src.poetore.official_exchange import (
             default_official_exchange_shadow_service,
@@ -750,23 +645,30 @@ class PoetoreModeWindow(QMainWindow):
             value_cache=self._rate_value_cache,
             icon_cache=self._rate_icon_cache,
             on_manage=self.open_exchange_rate_management,
-            on_rows_changed=self._apply_rate_panel_height,
+            on_rows_changed=self._queue_rate_panel_height,
             refresh_callback=self.refresh_currency_rate,
         )
-        body_layout.addWidget(self.rate_panel)
+        self.rate_panel.setObjectName("poetoreRatePanel")
+        self._rate_scroll = self.rate_panel.scroll_area
+        self._rate_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        body_layout.addWidget(self.rate_panel, 1)
+        # Let Qt lay out the wrapping and scrolling containers at their current width.
+        for widget in (self, central, body, self._rate_scroll,
+                       self._rate_scroll.viewport(), self.rate_panel, self.rate_panel.card):
+            widget.setProperty("themeLayoutManaged", True)
         self.rate_status = self.rate_panel.status_label
         self.rate_refresh_button = self.rate_panel.refresh_button
         self.divine_rate_value = self.rate_panel.findChild(QLabel, "customRateValue0")
-        body_layout.addStretch()
 
-        self.capture_hint = QLabel()
-        self.capture_hint.setObjectName("poetoreCaptureHint")
-        self.capture_hint.setAlignment(Qt.AlignCenter)
-        self.capture_hint.setWordWrap(True)
-        self.capture_hint.setStyleSheet(
+        footer = QVBoxLayout()
+        footer.setSpacing(UI_METRICS.control_gap)
+        self.capture_warning = QLabel("価格チェックのホットキーが設定されていません。")
+        self.capture_warning.setObjectName("poetoreCaptureWarning")
+        self.capture_warning.setWordWrap(True)
+        self.capture_warning.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).muted_text}; font-size: {theme_font_size(12)}px;"
         )
-        body_layout.addWidget(self.capture_hint)
+        footer.addWidget(self.capture_warning)
 
         self.update_button = QPushButton()
         self.update_button.setObjectName("poetoreUpdateButton")
@@ -777,7 +679,8 @@ class PoetoreModeWindow(QMainWindow):
         )
         self.update_button.clicked.connect(self._check_for_updates)
         self.update_button.hide()
-        body_layout.addWidget(self.update_button)
+        footer.addWidget(self.update_button)
+        body_layout.addLayout(footer)
         root.addWidget(body, 1)
         self.setCentralWidget(central)
         equalize_button_sizes(
@@ -785,9 +688,36 @@ class PoetoreModeWindow(QMainWindow):
             minimum_height=UI_METRICS.toolbar_size,
             equal_width=False,
         )
-        equalize_button_sizes((self.rate_panel.manage_button, self.rate_panel.refresh_button),
-                              minimum_width=UI_METRICS.action_width)
-        self._update_capture_hint()
+        for button in self.header_action_buttons:
+            button.setFixedWidth(button.height())
+        self._update_capture_hotkey_warning()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The appearance fitter can enlarge controls as their font is polished.
+        QTimer.singleShot(0, self, self._refresh_screen_geometry)
+
+    def event(self, event):
+        if event.type() == QEvent.DevicePixelRatioChange and hasattr(self, "_screen_geometry_timer"):
+            self._queue_screen_geometry()
+        return super().event(event)
+
+    def _queue_screen_geometry(self):
+        self._screen_geometry_timer.start()
+
+    def _refresh_screen_geometry(self):
+        if self.title_bar._drag_offset is not None:
+            return  # Apply pending screen changes on release.
+        self._screen_geometry_timer.stop()
+        self._screen_watcher.update()
+        screen = self._screen_watcher.screen
+        metrics = None if screen is None else (
+            screen, screen.availableGeometry(), screen.logicalDotsPerInch(),
+            screen.physicalDotsPerInch(), self.devicePixelRatioF(),
+        )
+        keep_on_screen = self._screen_metrics is not None and metrics != self._screen_metrics
+        self._screen_metrics = metrics
+        self._apply_rate_panel_height(keep_on_screen=keep_on_screen)
 
     def _apply_window_settings(self):
         self.setWindowOpacity(
@@ -819,11 +749,11 @@ class PoetoreModeWindow(QMainWindow):
 
     def _header_button(self, text, tooltip):
         button = QPushButton(text)
-        button.setFocusPolicy(Qt.NoFocus)
+        button.setFocusPolicy(Qt.TabFocus)
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
         button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
-        button.setStyleSheet("padding: 0;")
+        button.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         return button
 
     def toggle_focus_mode(self):
@@ -874,7 +804,12 @@ class PoetoreModeWindow(QMainWindow):
             return
         self.focus_message_label.setText(text)
         self.focus_message_label.show()
-        QTimer.singleShot(6000, self.focus_message_label.hide)
+        self._apply_rate_panel_height()
+        QTimer.singleShot(6000, self, self._hide_focus_message)
+
+    def _hide_focus_message(self):
+        self.focus_message_label.hide()
+        self._apply_rate_panel_height()
 
     def _start_hotkeys(self):
         configured = self.config.get("hotkeys", {})
@@ -969,33 +904,14 @@ class PoetoreModeWindow(QMainWindow):
         window = getattr(self, "_poetore_window", None)
         return getattr(window, "_poe_window_hwnd", None) if window is not None else None
 
-    @staticmethod
-    def _display_hotkey(hotkey):
-        value = str(hotkey or "").strip()
-        if not value or value.lower() == "none":
-            return ""
-        display = QKeySequence(value).toString(QKeySequence.PortableText) or value
-        return " + ".join(part.strip() for part in display.split("+"))
-
-    def _update_capture_hint(self):
+    def _update_capture_hotkey_warning(self):
         hotkeys = self.config.get("hotkeys", {})
-        interactive = self._display_hotkey(
-            hotkeys.get("poetore_capture", "alt+d")
+        assigned = any(
+            str(hotkeys.get(action, self.MODE_ACTION_DEFAULTS[action]) or "").strip().casefold()
+            not in {"", "none"}
+            for action in ("poetore_capture", "poetore_auto_hide")
         )
-        auto_hide = self._display_hotkey(
-            hotkeys.get("poetore_auto_hide", "ctrl+d")
-        )
-        modes = []
-        if interactive:
-            modes.append(f"{interactive} 操作モード")
-        if auto_hide:
-            modes.append(f"{auto_hide} AUTO-HIDE")
-        if modes:
-            self.capture_hint.setText(
-                "アイテムにマウスオーバーして " + " / ".join(modes)
-            )
-        else:
-            self.capture_hint.setText("価格チェックのホットキーが設定されていません。")
+        self.capture_warning.setVisible(not assigned)
 
     @property
     def active_service_names(self):
@@ -1076,27 +992,79 @@ class PoetoreModeWindow(QMainWindow):
         self.divine_rate_value = self.rate_panel.findChild(
             QLabel, "customRateValue0"
         )
-        self._apply_rate_panel_height()
 
-    def _apply_rate_panel_height(self):
-        if not hasattr(self, "rate_panel"):
+    def _queue_rate_panel_height(self):
+        # Qt invalidates the layout for new rows and footer visibility via posted events.
+        QTimer.singleShot(0, self, self._apply_rate_panel_height)
+
+    def _apply_rate_panel_height(self, *, keep_on_screen=False):
+        if not hasattr(self, "_rate_scroll") or self.title_bar._drag_offset is not None:
             return
-        row_count = len(self._rate_pair_store.pairs(self.poe_version))
-        target_height = 338 + max(0, row_count - 1) * 48
-        if row_count == 0:
-            target_height = 330
-        self.resize(self.width(), target_height)
-        screen = QApplication.screenAt(self.frameGeometry().center())
-        if screen is None:
-            screen = self.screen()
-        if screen is None:
+        root = self.centralWidget().layout()
+        rate_layout = self._rate_scroll.widget().layout()
+        self.rate_panel.ensurePolished()
+        body_insets = 2 * UI_METRICS.page_margin
+        rate_minimum = rate_layout.totalMinimumSize().width() + body_insets
+        chrome_minimum = max(self.minimumWidth(), root.minimumSize().width())
+        preferred = max(self.width(), rate_minimum, self.rate_panel.preferred_card_width() + body_insets)
+        screen = self._screen_watcher.screen or self.screen()
+        available = screen.availableGeometry() if screen is not None else None
+        width_limit = self.maximumWidth()
+        height_limit = self.maximumHeight()
+        if available is not None:
+            width_limit = available.width()
+            height_limit = available.height()
+            self.setMaximumHeight(height_limit)
+            if not keep_on_screen:
+                # Fit the rate content into the space below and to the right of the current position.
+                width_limit = min(width_limit, available.right() - self.x() + 1)
+                height_limit = min(height_limit, available.bottom() - self.y() + 1)
+        width = max(chrome_minimum, min(preferred, width_limit))
+        rate_height = rate_layout.totalHeightForWidth(width - body_insets)
+        if rate_height < 0:
+            rate_height = rate_layout.totalSizeHint().height()
+        # The fixed header and footer stay outside the scrollable rate content.
+        chrome_height = root.totalHeightForWidth(width)
+        if chrome_height < 0:
+            chrome_height = root.totalSizeHint().height()
+        natural_height = chrome_height + rate_height
+        height = natural_height
+        if height > height_limit:
+            scrollbar_width = self._rate_scroll.verticalScrollBar().sizeHint().width()
+            width = max(width, min(width_limit, rate_minimum + scrollbar_width))
+            height = max(chrome_height, height_limit)
+        self.resize(width, height)
+        if available is None or available.contains(self.frameGeometry()):
             return
-        available = screen.availableGeometry()
-        if self.frameGeometry().bottom() > available.bottom():
+        if keep_on_screen:
             self.move(
-                self.x(),
-                max(available.top(), available.bottom() - self.height() + 1),
+                max(available.left(), min(self.x(), available.right() - self.width() + 1)),
+                max(available.top(), min(self.y(), available.bottom() - self.height() + 1)),
             )
+        elif self.isVisible():
+            root.activate()
+            self._recover_offscreen_controls(available, natural_height)
+
+    def _recover_offscreen_controls(self, available, natural_height):
+        controls = [
+            QRect(button.mapToGlobal(button.rect().topLeft()), button.size())
+            for button in (
+                self.title_bar.minimize_button, self.title_bar.close_button,
+                self.rate_panel.manage_button, self.update_button,
+            )
+            if button.isVisible()
+        ]
+        x, y = self.x(), self.y()
+        if any(rect.right() < available.left() or rect.left() > available.right() for rect in controls):
+            left = min(rect.left() for rect in controls)
+            right = max(rect.right() for rect in controls)
+            x += max(available.left() - left, min(0, available.right() - right))
+        if any(rect.bottom() < available.top() or rect.top() > available.bottom() for rect in controls):
+            # Restore room for the rates before bringing the title and footer back.
+            self.resize(self.width(), min(natural_height, available.height()))
+            y = max(available.top(), min(y, available.bottom() - self.height() + 1))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def handle_hotkey(self, command):
         if command.startswith("custom_command:"):
@@ -1293,7 +1261,7 @@ class PoetoreModeWindow(QMainWindow):
         if self._map_check_window is None:
             map_config = dict(self.config.get("map_check", {}))
             map_config["_font_size"] = self.config.get("poetore", {}).get("result_font_size", "medium")
-            self._map_check_window = MapCheckWindow(map_config, self)
+            self._map_check_window = MapCheckWindow(map_config, self, app_mode=POETORE_MODE)
             self._map_check_window.config_changed.connect(
                 self._save_map_check_config
             )
@@ -1350,7 +1318,9 @@ class PoetoreModeWindow(QMainWindow):
         poe_version = self.poe_version
         filename = "notes_poe2.json" if poe_version == POE2 else "notes_poe1.json"
         notes_path = str(ConfigManager.get_user_data_path(filename))
-        self._memo_dialog = MemoDialog(self, notes_path=notes_path, theme=resolve_app_theme(POETORE_THEME))
+        self._memo_dialog = MemoDialog(
+            self, notes_path=notes_path, theme=resolve_app_theme(POETORE_THEME), app_mode=POETORE_MODE,
+        )
         self._memo_dialog.apply_opacity(
             self.config.get("window_opacity", 100),
             self.config.get("text_opacity", 100),
@@ -1612,7 +1582,8 @@ class PoetoreModeWindow(QMainWindow):
             self.config.get("stash_tab_scroll_enabled", True)
         )
         self._restart_hotkeys()
-        self._update_capture_hint()
+        self._update_capture_hotkey_warning()
+        self._apply_rate_panel_height()
         self.refresh_currency_rate()
 
     def _check_for_updates(self, parent=None):
@@ -1635,11 +1606,12 @@ class PoetoreModeWindow(QMainWindow):
             is_newer = False
         if not is_newer:
             self.update_button.hide()
-            return
-        self.update_button.setText(
-            f"↑ v{version} アップデートあり　更新する"
-        )
-        self.update_button.show()
+        else:
+            self.update_button.setText(
+                f"↑ v{version} アップデートあり　更新する"
+            )
+            self.update_button.show()
+        self._queue_rate_panel_height()
 
     def _check_for_updates_in_background(self):
         """常駐中はダイアログを出さずに最新版だけ確認する。"""
@@ -1662,7 +1634,8 @@ class PoetoreModeWindow(QMainWindow):
 
         if self._cheat_sheet_overlay is None:
             overlay = CheatSheetOverlay(
-                self.config.get("cheat_sheets", {}), self, theme=resolve_app_theme(POETORE_THEME)
+                self.config.get("cheat_sheets", {}), self,
+                theme=resolve_app_theme(POETORE_THEME), app_mode=POETORE_MODE,
             )
             overlay.config_changed.connect(self._save_cheat_sheet_config)
             overlay.manage_requested.connect(self.open_cheat_sheet_manager)

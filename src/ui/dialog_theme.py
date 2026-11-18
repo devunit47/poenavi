@@ -1,4 +1,4 @@
-"""設定・管理ダイアログだけに適用する共通テーマ基盤。"""
+"""設定・管理ダイアログと共通コントロールのテーマ基盤。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.ui.appearance import LEGACY_DIALOG_TOKENS, POENAVI_TOKENS, POETORE_TOKENS, resolve_dialog_theme
+from src.ui.appearance import (
+    LEGACY_DIALOG_TOKENS, POENAVI_TOKENS, POETORE_TOKENS,
+    current_appearance, resolve_dialog_theme, resolve_tokens,
+)
 from src.app_mode import POETORE_MODE, normalize_app_mode
 
 
@@ -133,6 +136,30 @@ POETORE_DIALOG_THEME = DialogTheme(
 )
 
 
+def icon_button_stylesheet(*, selector="QPushButton", border_width=1, content="", text=None, disabled=None) -> str:
+    """Paint icon-button states while keeping the existing box metrics."""
+    tokens = resolve_tokens(current_appearance(), POETORE_MODE)
+    gray = tokens.icon_button_gray
+    radius = POETORE_DIALOG_THEME.radius
+    return f"""
+        {selector} {{
+            background: transparent;
+            color: {text or tokens.text};
+            border: {border_width}px solid transparent;
+            border-radius: {radius}px;
+            {content}
+        }}
+        {selector}:checked:enabled {{ background: rgba({gray}, {gray}, {gray}, 24); }}
+        {selector}:hover:enabled {{ background: rgba({gray}, {gray}, {gray}, 30); }}
+        {selector}:pressed:enabled {{ background: rgba({gray}, {gray}, {gray}, 46); }}
+        {selector}:disabled {{ color: {disabled or tokens.disabled}; }}
+        {selector}:focus {{
+            outline: 1px solid {tokens.accent};
+            outline-radius: {radius}px;
+        }}
+    """
+
+
 def dialog_theme_for_mode(mode: str) -> DialogTheme:
     """起動モードに対応する対象ダイアログ用テーマを返す。"""
     return resolve_dialog_theme(
@@ -167,6 +194,8 @@ def build_dialog_stylesheet(theme: DialogTheme) -> str:
     if theme is POENAVI_DIALOG_THEME or theme is POETORE_DIALOG_THEME:
         theme = resolve_dialog_theme(theme)
     root = f'QDialog[dialogTheme="{theme.name}"]'
+    icon_buttons = (icon_button_stylesheet(selector=f'{root} QPushButton[buttonRole="icon"]')
+                    if theme.name == POETORE_MODE else "")
     checkbox_asset = _qss_url("ui-checkbox-checked.svg")
     radio_asset = _qss_url("ui-radio-checked.svg")
     return f"""
@@ -272,6 +301,7 @@ def build_dialog_stylesheet(theme: DialogTheme) -> str:
     color: {theme.danger};
     border-color: {theme.danger};
 }}
+{icon_buttons}
 
 {root} QLineEdit,
 {root} QComboBox,

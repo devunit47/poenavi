@@ -30,8 +30,9 @@ from src.ui.appearance import (
     theme_font_family, theme_font_size, theme_rgba,
 )
 from src.ui.styles import Styles
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
 from src.ui.custom_exchange_rate_panel import ElidedLabel
+from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.utils.window_focus import (
     focus_window, get_foreground_window, is_path_of_exile_window,
 )
@@ -1079,6 +1080,8 @@ class _PoetoreTitleBar(QWidget):
         window.league_popup_button = QPushButton("▼", self._expanded_controls)
         window.league_popup_button.setObjectName("leaguePopupButton")
         window.league_popup_button.setToolTip("リーグ一覧を開く")
+        window.league_popup_button.setAccessibleName(window.league_popup_button.toolTip())
+        window.league_popup_button.setStyleSheet(icon_button_stylesheet(border_width=0))
         window.league_popup_button.setFixedSize(28, 28)
         window.league_popup_button.clicked.connect(window.trade_league_combo.showPopup)
         controls_layout.addWidget(window.league_popup_button)
@@ -1094,6 +1097,8 @@ class _PoetoreTitleBar(QWidget):
         controls_layout.addSpacing(4)
         window.poetore_close_button = QPushButton("×", self._expanded_controls)
         window.poetore_close_button.setToolTip("閉じる")
+        window.poetore_close_button.setAccessibleName(window.poetore_close_button.toolTip())
+        window.poetore_close_button.setStyleSheet(icon_button_stylesheet(border_width=0))
         window.poetore_close_button.setFixedSize(28, 28)
         window.poetore_close_button.clicked.connect(window._close_and_return_to_poe)
         controls_layout.addWidget(window.poetore_close_button)
@@ -1208,14 +1213,14 @@ class PoetoreWindow(QWidget):
         self.trade_league_combo.currentIndexChanged.connect(self._persist_trade_league)
         self.trade_league_combo.lineEdit().editingFinished.connect(self._persist_trade_league)
         self._placement_context: PlacementContext | None = None
-        self._trade_window_handle = None
-        self._trade_screen = None
+        self._trade_screen_watcher = WindowScreenWatcher(self)
+        self._trade_screen_watcher.changed.connect(self._queue_trade_screen_geometry)
         self._trade_screen_geometry: QRect | None = None
         self._trade_screen_update_pending = False
         self._trade_placing_context = False
         self._trade_screen_timer = QTimer(self)
         self._trade_screen_timer.setSingleShot(True)
-        self._trade_screen_timer.setInterval(150)
+        self._trade_screen_timer.setInterval(SCREEN_CHANGE_DEBOUNCE_MS)
         self._trade_screen_timer.timeout.connect(self._refresh_trade_screen_geometry)
         self._poe_window_hwnd: int | None = None
         self._focus_signal_connected = False
@@ -2324,10 +2329,8 @@ class PoetoreWindow(QWidget):
             QMenu#divineRateMenu::item {{ padding: 4px 18px 4px 10px; }}
             QMenu#divineRateMenu::item:selected {{ background: {theme_rgba('accent_soft', 101, 255, 202, 45)}; }}
             QPushButton#leaguePopupButton {{
-                color: {theme_color('text', '#D8E3DF')};
                 padding: 0;
                 font-size: 11px;
-                border: none;
             }}
             QPushButton#leagueRefreshButton {{
                 color: {theme_color('text', '#D8E3DF')};
@@ -3154,50 +3157,18 @@ class PoetoreWindow(QWidget):
         return screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
 
     def _watch_trade_screen(self):
-        handle = self.windowHandle()
-        if handle is not self._trade_window_handle:
-            if self._trade_window_handle is not None:
-                try:
-                    self._trade_window_handle.screenChanged.disconnect(self._trade_screen_changed)
-                except RuntimeError:  # Qt can recreate the native window for OBS.
-                    pass
-            self._trade_window_handle = handle
-            if handle is not None:
-                handle.screenChanged.connect(self._trade_screen_changed)
-        screen = handle.screen() if handle is not None else self.screen()
-        if self._trade_screen is not None and screen is not self._trade_screen:
-            self._trade_screen_changed(screen)
-        else:
-            self._bind_trade_screen(screen)
-
-    def _bind_trade_screen(self, screen):
-        if screen is self._trade_screen:
-            return
-        if self._trade_screen is not None:
-            try:
-                for signal in (self._trade_screen.availableGeometryChanged,
-                               self._trade_screen.logicalDotsPerInchChanged,
-                               self._trade_screen.physicalDotsPerInchChanged):
-                    signal.disconnect(self._queue_trade_screen_geometry)
-            except RuntimeError:  # A disconnected monitor may already be gone.
-                pass
-        self._trade_screen = screen
-        if screen is not None:
-            for signal in (screen.availableGeometryChanged, screen.logicalDotsPerInchChanged,
-                           screen.physicalDotsPerInchChanged):
-                signal.connect(self._queue_trade_screen_geometry)
-
-    def _trade_screen_changed(self, screen):
-        self._bind_trade_screen(screen)
-        self._queue_trade_screen_geometry()
+        previous = self._trade_screen_watcher.screen
+        if self._trade_screen_watcher.update() and previous is not None:
+            self._queue_trade_screen_geometry()
 
     def _queue_trade_screen_geometry(self, *_args):
         if self._trade_placing_context:
             return
         # Stop consulting the search's original client rect immediately, even
         # if a width reflow runs before the debounced screen update.
-        if self._trade_screen is not None:
-            self._trade_screen_geometry = self._trade_screen.availableGeometry()
+        screen = self._trade_screen_watcher.screen
+        if screen is not None:
+            self._trade_screen_geometry = screen.availableGeometry()
         self._trade_screen_update_pending = True
         self._trade_screen_timer.start()
 
@@ -3206,8 +3177,9 @@ class PoetoreWindow(QWidget):
         if self._title_bar._drag_offset is not None:
             return  # mouseReleaseEvent applies the pending update before saving.
         self._watch_trade_screen()
-        if self._trade_screen is not None:
-            self._trade_screen_geometry = self._trade_screen.availableGeometry()
+        screen = self._trade_screen_watcher.screen
+        if screen is not None:
+            self._trade_screen_geometry = screen.availableGeometry()
         self._trade_screen_update_pending = False
         self._constrain_trade_geometry()
         # Always enqueue a pass, including when dimensions are unchanged or a
@@ -3215,9 +3187,8 @@ class PoetoreWindow(QWidget):
         self._queue_trade_layout()
 
     def _finish_trade_move(self):
-        screen = self.screen()
-        if screen is not self._trade_screen:
-            self._trade_screen_changed(screen)
+        if self._trade_screen_watcher.bind_screen(self.screen()):
+            self._queue_trade_screen_geometry()
         if self._trade_screen_update_pending:
             self._refresh_trade_screen_geometry()
             self._adjust_window_height_to_mod_rows()
@@ -4829,9 +4800,8 @@ class PoetoreWindow(QWidget):
         super().moveEvent(event)
         if not self.isVisible() or getattr(self, "_trade_placing_context", True):
             return
-        screen = self.screen()
-        if screen is not self._trade_screen:
-            self._trade_screen_changed(screen)
+        if self._trade_screen_watcher.bind_screen(self.screen()):
+            self._queue_trade_screen_geometry()
         elif self._trade_screen_update_pending:
             self._trade_screen_timer.start()
 

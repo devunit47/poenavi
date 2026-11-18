@@ -2,7 +2,8 @@ from concurrent.futures import Future
 from copy import deepcopy
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from src.poetore.exchange_catalog import (
@@ -96,6 +97,7 @@ def make_panel(
         icon_cache=icon_cache or FakeIconCache(icon),
         on_manage=lambda: None,
     )
+    panel.resize(800, 600)
     panel.show()
     qapp.processEvents()
     return panel, store, saved
@@ -123,7 +125,7 @@ def test_rates_use_one_decimal_at_or_above_one_and_significant_digits_below_one(
     assert format_display_rate(value) == expected
 
 
-def test_rate_rows_share_the_same_units_and_decimal_anchor(qapp, tmp_path):
+def test_rate_rows_center_equals_and_share_decimal_anchor(qapp, tmp_path):
     ids = list(exchange_catalog_by_id(POE1))[:4]
     pairs = [RatePair(ids[0], ids[2]), RatePair(ids[1], ids[3])]
     results = {
@@ -141,12 +143,16 @@ def test_rate_rows_share_the_same_units_and_decimal_anchor(qapp, tmp_path):
             for index in range(2)
         ]
         assert [value.text() for value in values] == ["1 ＝ 681", "1 ＝ 7.4"]
-        anchors = [value.mapTo(panel, value.decimal_anchor()).x() for value in values]
-        assert anchors[0] == anchors[1]
-        assert all(
-            value.integer_rect().right() + 1 == value.decimal_anchor().x()
-            for value in values
-        )
+        equals_centers = []
+        decimal_anchors = []
+        for value in values:
+            unit, equals, integer, fraction = value._column_rects()
+            assert abs(equals.center().x() - value.contentsRect().center().x()) <= 1
+            assert unit.right() < equals.left() < integer.left()
+            assert integer.right() + 1 == fraction.left()
+            equals_centers.append(value.mapTo(panel, equals.center()).x())
+            decimal_anchors.append(value.mapTo(panel, fraction.topLeft()).x())
+        assert len(set(equals_centers)) == len(set(decimal_anchors)) == 1
         cached = panel.value_cache.get(
             POE1,
             "League",
@@ -161,7 +167,7 @@ def test_rate_rows_share_the_same_units_and_decimal_anchor(qapp, tmp_path):
 
 
 @pytest.mark.parametrize("count", (0, 1, 9, 10))
-def test_zero_through_ten_rows_have_no_scroll_and_plus_until_limit(
+def test_zero_through_ten_rows_have_one_management_entry(
     qapp, tmp_path, count,
 ):
     ids = list(exchange_catalog_by_id(POE1))
@@ -169,8 +175,14 @@ def test_zero_through_ten_rows_have_no_scroll_and_plus_until_limit(
     panel, *_ = make_panel(qapp, tmp_path, pairs=pairs)
     try:
         assert len(panel.row_widgets) == count
-        assert panel.add_button is not None if count < 10 else panel.add_button is None
-        assert panel.findChildren(type(panel)) == []
+        actions = [button for button in panel.findChildren(QPushButton) if not button.property("rateDelete")]
+        assert set(actions) == {panel.manage_button, panel.refresh_button}
+        assert len(panel.findChildren(QPushButton)) == count + 2
+        assert panel.manage_button.isVisible()
+        assert panel.manage_button.text() == ""
+        assert not panel.manage_button.icon().isNull()
+        assert panel.manage_button.toolTip() and panel.manage_button.accessibleName()
+        assert panel.card.isVisible() == bool(count)
     finally:
         panel.stop()
         panel.close()
@@ -228,13 +240,52 @@ def test_base_currency_quote_keeps_fractional_direct_rate(qapp, tmp_path):
         panel.close()
 
 
-def test_delete_including_default_is_immediate_and_confirmation_free(qapp, tmp_path):
+def test_delete_reveals_on_row_hover_without_moving_columns(qapp, tmp_path):
     panel, store, saved = make_panel(qapp, tmp_path)
     try:
-        panel.findChild(QPushButton, "customRateDelete0").click()
+        row = panel.row_widgets[0]
+        delete = row.findChild(QPushButton, "customRateDelete0")
+        name = row.findChild(QLabel, "customRateLeftName0")
+        value = row.findChild(QLabel, "customRateValue0")
+        area = QRect(delete.mapTo(panel, QPoint()), delete.size())
+        handle = panel.windowHandle()
+
+        def move_to(widget):
+            QTest.mouseMove(handle, widget.mapTo(panel, widget.rect().center()))
+            qapp.processEvents()
+
+        def delete_pixels():
+            return panel.grab().toImage().copy(area)
+
+        assert delete.toolTip() and delete.accessibleName()
+        move_to(panel.title_label)
+        idle = delete_pixels()
+        blank = idle.copy()
+        blank.fill(idle.pixelColor(0, 0))
+        assert idle == blank
+        original_value_geometry = value.geometry()
+        move_to(name)
+        revealed = delete_pixels()
+        assert revealed != idle
+        move_to(value)
+        assert delete_pixels() == revealed
+        assert value.geometry() == original_value_geometry
+        move_to(panel.title_label)
+        assert delete_pixels() == idle
+
+        panel.manage_button.setFocus(Qt.TabFocusReason)
+        QTest.keyClick(panel.manage_button, Qt.Key_Tab)
+        assert delete.hasFocus()
+        assert delete_pixels() != idle
+        QTest.keyClick(delete, Qt.Key_Backtab)
+        assert not delete.hasFocus()
+        assert delete_pixels() == idle
+
+        move_to(delete)
+        QTest.mouseClick(handle, Qt.LeftButton, Qt.NoModifier, area.center())
         assert store.pairs(POE1) == ()
         assert len(saved) == 1
-        assert panel.add_button is not None
+        assert panel.manage_button.isVisible()
     finally:
         panel.stop()
         panel.close()

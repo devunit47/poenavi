@@ -4,16 +4,25 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QFontDatabase, QFontMetrics
+from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QIcon, QImage, QPainter, QRegion
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStyleOptionViewItem, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStyleOptionViewItem, QSystemTrayIcon, QWidget
 
 from src.app_font import bundled_font_path
+from src.poetore.exchange_rate_settings import (
+    CHAOS_ORB_ID, DEFAULT_RATE_PAIRS, DIVINE_ORB_ID, EXALTED_ORB_ID, MAX_RATE_PAIRS,
+)
+from src.poetore.official_exchange import DirectPairPrice
 from src.ui.appearance import (
     PRESETS, apply_application_appearance, configure_appearance,
-    current_appearance, requested_appearance,
+    current_appearance, requested_appearance, resolve_tokens,
 )
+from src.ui.dialog_theme import UI_METRICS, icon_button_stylesheet
+from src.update.release_client import ReleaseInfo
 from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
+from tests.test_theme_contrast_audit import contrast
+from tests.test_theme_geometry_audit import geometry_failures
+from tests.test_theme_painter_audit import inspect_paint
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +53,674 @@ def assert_peers(buttons, *, width=True):
     if width:
         # QBoxLayout distributes an odd spare pixel between expanding peers.
         assert max(b.width() for b in buttons) - min(b.width() for b in buttons) <= 1, [(b.text(), b.size()) for b in buttons]
+
+
+def _button_pixels(button):
+    image = QImage(button.size(), QImage.Format_ARGB32)
+    image.fill(Qt.transparent)
+    with QPainter(image) as painter:
+        button.render(painter, QPoint(), QRegion(), QWidget.DrawChildren)
+    return image
+
+
+def _composite(ink, background):
+    alpha = ink.alphaF()
+    return QColor(*(round(ink.getRgb()[i] * alpha + background.getRgb()[i] * (1 - alpha))
+                    for i in range(3)))
+
+
+@pytest.mark.parametrize("appearance", [{"preset": name} for name in PRESETS] + [
+    {"overrides": {"muted_text": "#BAA4D4"}},
+])
+def test_poetore_toolbar_icons_use_a_single_theme_ink(qapp, tmp_path, appearance):
+    apply_application_appearance(qapp, {"appearance": appearance})
+    window = build_scenario("main", tmp_path)
+    ink = QColor(resolve_tokens(appearance, "poetore").muted_text).getRgb()[:3]
+    for button in (*window.header_action_buttons, window.rate_panel.manage_button):
+        icon = button.icon()
+        normal = icon.pixmap(button.iconSize()).toImage()
+        pixels = [normal.pixelColor(x, y) for x in range(normal.width()) for y in range(normal.height())]
+        visible = [pixel for pixel in pixels if pixel.alpha() >= 128]
+        assert visible and all(
+            all(abs(actual - expected) <= 3 for actual, expected in zip(pixel.getRgb()[:3], ink))
+            for pixel in visible
+        ), button.toolTip()
+        assert sum(pixel.alphaF() for pixel in pixels) < len(pixels) * 0.28, button.toolTip()
+        disabled = icon.pixmap(button.iconSize(), QIcon.Disabled).toImage()
+        assert max(disabled.pixelColor(x, y).alpha() for x in range(disabled.width())
+                   for y in range(disabled.height())) < max(pixel.alpha() for pixel in visible)
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+@pytest.mark.parametrize("version", ["poe1", "poe2"])
+def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path, preset, version):
+    apply_application_appearance(qapp, {"appearance": {"preset": preset, "overrides": {"base_font_size": 13}}})
+    main = build_scenario("main", tmp_path, version)
+    trade = build_scenario("trade", tmp_path, version)
+    tokens = resolve_tokens({"preset": preset}, "poetore")
+    focus_color = QColor(tokens.accent)
+    rate_row = main.rate_panel.row_widgets[0]
+    rate_delete = rate_row.findChild(QPushButton, "customRateDelete0")
+    for window, buttons in (
+        (main, (
+            *((button, (36, 36)) for button in main.header_action_buttons if not button.isHidden()),
+            (main.title_bar.minimize_button, (32, 20)),
+            (main.title_bar.close_button, (32, 20)),
+            (main.rate_panel.manage_button, (36, 36)),
+            (rate_delete, (32, 32)),
+        )),
+        (trade, ((trade.league_popup_button, (36, 33)), (trade.poetore_close_button, (36, 33)))),
+    ):
+        settle(qapp, window)
+        handle = window.windowHandle()
+        for button, expected_size in buttons:
+            original = button.geometry()
+            assert (original.width(), original.height()) == expected_size
+
+            def move_to(position):
+                QTest.mouseMove(handle, position)
+                qapp.processEvents()
+
+            away = (rate_row.mapTo(main, QPoint(10, rate_row.height() // 2))
+                    if button is rate_delete else QPoint(5, 5))
+            button.clearFocus()
+            move_to(away)
+            idle = _button_pixels(button)
+            edge = QPoint(button.width() // 2, 0)
+            assert idle.pixelColor(edge).alpha() == 0, button.toolTip()
+            icon_ink = [idle.pixelColor(p) for p in (
+                button.rect().center() + QPoint(x, y) for x in range(-5, 6) for y in range(-5, 6)
+            )]
+            assert any(pixel.alpha() for pixel in icon_ink), button.toolTip()
+
+            move_to(button.mapTo(window, button.rect().center()))
+            assert button.underMouse()
+            hovered = _button_pixels(button)
+            hover_fill = hovered.pixelColor(edge)
+            assert hover_fill.alpha() > 0, button.toolTip()
+            assert hover_fill.red() == hover_fill.green() == hover_fill.blue()
+            assert hovered.pixelColor(0, 0).alpha() == 0
+            button.setDown(True)
+            assert _button_pixels(button).pixelColor(edge).alpha() > hover_fill.alpha()
+            button.setDown(False)
+
+            surface = QColor(tokens.control if button is rate_delete else tokens.background)
+            hover_background = _composite(hovered.pixelColor(edge + QPoint(0, 2)), surface)
+            for background in (surface, hover_background):
+                assert max(contrast(_composite(pixel, background), background) for pixel in icon_ink) >= 3
+                assert contrast(focus_color, background) >= 3
+
+            move_to(away)
+            assert button.focusPolicy() & Qt.TabFocus
+            button.setFocus(Qt.TabFocusReason)
+            assert button.hasFocus()
+            focused = _button_pixels(button)
+            assert any(
+                focused.pixelColor(edge + QPoint(0, y)) == focus_color
+                and idle.pixelColor(edge + QPoint(0, y)).alpha() == 0
+                for y in range(button.height() // 2)
+            ), button.toolTip()
+            assert button.geometry() == original
+        window.hide()
+
+
+def test_auxiliary_poetore_icon_buttons_render_transparently(qapp, tmp_path):
+    from src.app_mode import POETORE_MODE
+    from src.ui.app_theme import POETORE_THEME
+    from src.ui.cheat_sheets import CheatSheetOverlay
+    from src.ui.map_check import MapCheckWindow
+    from src.ui.memo_dialog import MemoDialog
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    exchange = build_scenario("exchange", tmp_path)
+    settings = build_scenario("settings", tmp_path)
+    map_check = MapCheckWindow({}, app_mode=POETORE_MODE)
+    memo = MemoDialog(notes_path=str(tmp_path / "memo.json"), theme=POETORE_THEME, app_mode=POETORE_MODE)
+    cheat_sheets = CheatSheetOverlay({}, theme=POETORE_THEME, app_mode=POETORE_MODE)
+    for window, buttons in (
+        (exchange, exchange.registered_widget._rows[0].findChildren(QPushButton)),
+        (settings, (settings.hideout_minutes_up_button, settings.hideout_minutes_down_button,
+                    settings.hideout_seconds_up_button, settings.hideout_seconds_down_button)),
+        (map_check, [button for button in map_check.findChildren(QPushButton) if button.text() == "×"]),
+        (memo, [button for button in memo.findChildren(QPushButton) if button.text() == "✕"]),
+        (cheat_sheets, [button for button in cheat_sheets.findChildren(QPushButton) if button.text() == "×"]),
+    ):
+        settle(qapp, window)
+        QTest.mouseMove(window.windowHandle(), QPoint(1, 1))
+        for button in buttons:
+            button.clearFocus()
+            idle = _button_pixels(button)
+            assert idle.pixelColor(button.width() // 2, 0).alpha() == 0
+            assert idle.pixelColor(0, button.height() // 2).alpha() == 0
+        window.hide()
+
+
+def test_icon_button_fill_uses_custom_appearance_and_preserves_checked_state(qapp):
+    appearance = {"overrides": {"text": "#08A8DD"}}
+    apply_application_appearance(qapp, {"appearance": appearance})
+    button = QPushButton("×")
+    button.setFixedSize(36, 36)
+    button.setCheckable(True)
+    button.setStyleSheet(icon_button_stylesheet())
+    settle(qapp, button)
+    point = QPoint(18, 2)
+    button.clearFocus()
+    assert _button_pixels(button).pixelColor(point).alpha() == 0
+    button.setChecked(True)
+    fill = _button_pixels(button).pixelColor(point)
+    gray = resolve_tokens(appearance).icon_button_gray
+    assert fill.alpha() > 0
+    assert all(abs(channel - gray) <= 5 for channel in fill.getRgb()[:3])
+    assert gray != resolve_tokens(None, "poetore").icon_button_gray
+    button.setEnabled(False)
+    disabled = _button_pixels(button)
+    assert disabled.pixelColor(point).alpha() == 0
+    ink = max(
+        (disabled.pixelColor(x, y) for x in range(button.width()) for y in range(button.height())),
+        key=QColor.alpha,
+    )
+    expected = QColor(resolve_tokens(appearance).disabled)
+    assert ink.alpha() > 0
+    assert all(abs(actual - target) <= 2 for actual, target in zip(ink.getRgb()[:3], expected.getRgb()[:3]))
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_main_title_text_drag_respects_window_lock(qapp, tmp_path, locked):
+    window = build_scenario("main", tmp_path)
+    window.config["window_locked"] = locked
+    settle(qapp, window)
+    window.move(32, 40)
+    handle = window.windowHandle()
+    delta = QPoint(28, 16)
+
+    for label in (window.title_label, window.mode_label):
+        start = label.mapTo(window, label.rect().center())
+        assert window.childAt(start) is window.title_bar
+        original_pos = window.pos()
+        QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(handle, start + delta)
+        assert window.pos() == original_pos + (QPoint() if locked else delta)
+        release = start + delta if locked else start
+        QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, release)
+        assert window.title_bar._drag_offset is None
+
+    QTest.mouseDClick(handle, Qt.LeftButton, Qt.NoModifier, start)
+    assert window.isVisible()
+    assert not window.isMaximized()
+
+
+@pytest.mark.parametrize("transition", ["drag", "drag_without_signal", "screen_changed"])
+@pytest.mark.parametrize("start_small", [False, True])
+def test_main_rates_reflow_after_screen_move(
+    qapp, qtbot, tmp_path, monkeypatch, transition, start_small,
+):
+    large = _Screen(QRect(0, 0, 1920, 1080))
+    small = _Screen(QRect(1920, 0, 800, 600))
+    origin, destination = (small, large) if start_small else (large, small)
+    handle = _WindowHandle(origin)
+    monkeypatch.setattr(QApplication, "screenAt", lambda _point: handle.screen())
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    monkeypatch.setattr(window, "screen", handle.screen)
+    window.move(origin.geometry.topLeft() + QPoint(24, 24))
+    window._sync_update_button_from_config()
+    ids = list(window.rate_panel.catalog)
+    for index in range(MAX_RATE_PAIRS - 1):
+        window._rate_pair_store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert len(window.rate_panel.row_widgets) == MAX_RATE_PAIRS
+    original_height = window.height()
+    scroll = window._rate_scroll
+    assert (scroll.verticalScrollBar().maximum() > 0) == start_small
+
+    dragging = transition != "screen_changed"
+    if dragging:
+        qtbot.mousePress(window.title_bar, Qt.LeftButton, pos=QPoint(8, 8))
+    handle.current_screen = destination
+    window.move(destination.geometry.topLeft() + QPoint(24, 24))
+    if transition != "drag_without_signal":
+        handle.screenChanged.emit(destination)
+    if dragging:
+        QTest.qWait(200)
+        assert window.height() == original_height
+        qtbot.mouseRelease(window.title_bar, Qt.LeftButton, pos=QPoint(8, 8))
+
+    QTest.qWait(200)
+    assert_geometry_converges(qapp, window)
+    assert destination.geometry.contains(window.frameGeometry()), window.frameGeometry()
+    assert (scroll.verticalScrollBar().maximum() > 0) == (not start_small)
+    assert scroll.horizontalScrollBar().maximum() == 0
+    assert window.maximumHeight() == destination.geometry.height()
+    assert (window.height() > original_height) == start_small
+    assert window.rect().contains(QRect(window.update_button.mapTo(window, QPoint()), window.update_button.size()))
+    scroll.ensureWidgetVisible(window.rate_refresh_button, 0, 0)
+    viewport = scroll.viewport()
+    assert viewport.rect().contains(QRect(window.rate_refresh_button.mapTo(viewport, QPoint()), window.rate_refresh_button.size()))
+
+
+@pytest.mark.parametrize("notification", ["available", "logical_dpi", "physical_dpi", "device_ratio"])
+def test_main_rates_reflow_when_current_screen_metrics_change(
+    qapp, tmp_path, monkeypatch, notification,
+):
+    screen = _Screen(QRect(0, 0, 1920, 1080))
+    handle = _WindowHandle(screen)
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    monkeypatch.setattr(window, "screen", handle.screen)
+    settle(qapp, window)
+    width = window.width()
+
+    position = QPoint(-60, 40)
+    window.move(position)
+    if notification == "available":
+        screen.geometry = QRect(0, 0, 1920, 600)
+        screen.availableGeometryChanged.emit(screen.geometry)
+    elif notification == "logical_dpi":
+        screen.logical_dpi = 144
+        screen.logicalDotsPerInchChanged.emit(144)
+    elif notification == "physical_dpi":
+        screen.physical_dpi = 144
+        screen.physicalDotsPerInchChanged.emit(144)
+    else:
+        new_ratio = window.devicePixelRatioF() * 1.25
+        monkeypatch.setattr(window, "devicePixelRatioF", lambda: new_ratio)
+        qapp.sendEvent(window, QEvent(QEvent.DevicePixelRatioChange))
+    QTest.qWait(200)
+    assert screen.geometry.contains(window.frameGeometry())
+    assert window.maximumHeight() == screen.geometry.height()
+    assert window.width() == width
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_main_periodic_update_preserves_offscreen_position(qapp, tmp_path, locked):
+    window = build_scenario("main", tmp_path)
+    window.config["window_locked"] = locked
+    settle(qapp, window)
+    assert window.update_button.isHidden()
+    position = QPoint(-60, 40)
+    window.move(position)
+    release = ReleaseInfo("99.99.99", "test", "https://example.com", "", "")
+
+    window._handle_background_update_result(release, False)
+    assert_geometry_converges(qapp, window)
+    assert window.update_button.isVisible()
+    assert window.pos() == position
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_main_update_fits_at_screen_bottom_without_moving(qapp, tmp_path, monkeypatch, locked):
+    screen = _Screen(QRect(0, 0, 800, 600))
+    handle = _WindowHandle(screen)
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.config["window_locked"] = locked
+    settle(qapp, window)
+    assert len(window.rate_panel.row_widgets) == 1
+    assert window.update_button.isHidden()
+    position = QPoint(0, screen.geometry.bottom() - window.height() + 1)
+    window.move(position)
+    assert window.frameGeometry().bottom() == screen.geometry.bottom()
+    release = ReleaseInfo("99.99.99", "test", "https://example.com", "", "")
+
+    window._handle_background_update_result(release, False)
+    assert_geometry_converges(qapp, window)
+
+    assert window.pos() == position
+    for button in (window.update_button, window.rate_panel.manage_button, window.title_bar.close_button):
+        assert button.isVisible()
+        assert screen.geometry.contains(QRect(button.mapToGlobal(QPoint()), button.size()))
+    assert window._rate_scroll.verticalScrollBar().maximum() > 0
+
+
+@pytest.mark.parametrize("locked", [False, True])
+@pytest.mark.parametrize("action", ["tray", "rows", "unchanged_screen_notification"])
+def test_main_same_screen_relayout_preserves_left_overlap(qapp, tmp_path, monkeypatch, locked, action):
+    screen = _Screen(QRect(0, 0, 800, 600))
+    handle = _WindowHandle(screen)
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.config["window_locked"] = locked
+    settle(qapp, window)
+    position = QPoint(-60, 40)
+    window.move(position)
+
+    if action == "tray":
+        window._build_tray_icon()
+        window._tray_notification_shown = True
+        monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+        window.minimize_to_tray()
+        assert not window.isVisible()
+        window.restore_from_tray()
+    elif action == "rows":
+        window.rate_panel.render_rows()
+    else:
+        handle.screenChanged.emit(screen)
+        screen.availableGeometryChanged.emit(screen.geometry)
+        qapp.sendEvent(window, QEvent(QEvent.DevicePixelRatioChange))
+        QTest.qWait(200)
+    assert_geometry_converges(qapp, window)
+
+    assert window.isVisible()
+    assert window.pos() == position
+
+
+@pytest.mark.parametrize("locked", [False, True])
+@pytest.mark.parametrize("action", ["tray", "rows"])
+def test_main_same_screen_relayout_recovers_offscreen_controls(qapp, tmp_path, monkeypatch, locked, action):
+    available = QRect(0, 0, 800, 600)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.config["window_locked"] = locked
+    window._sync_update_button_from_config()
+    settle(qapp, window)
+    position = QPoint(0, 560)
+    window.move(position)
+    controls = (
+        window.title_bar.close_button, window.title_bar.minimize_button,
+        window.rate_panel.manage_button, window.update_button,
+    )
+    assert all(button.isVisible() for button in controls)
+    for button in (window.rate_panel.manage_button, window.update_button):
+        assert not available.intersects(QRect(button.mapToGlobal(QPoint()), button.size()))
+
+    if action == "tray":
+        window._build_tray_icon()
+        window._tray_notification_shown = True
+        monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+        window.minimize_to_tray()
+        assert not window.isVisible()
+        window.restore_from_tray()
+    else:
+        window.rate_panel.render_rows()
+    assert_geometry_converges(qapp, window)
+
+    assert window.isVisible()
+    assert window.x() == position.x()
+    assert window.y() < position.y()
+    assert window.frameGeometry().bottom() == available.bottom()
+    assert window._rate_scroll.viewport().height() > 0
+    for button in controls:
+        assert available.contains(QRect(button.mapToGlobal(QPoint()), button.size()))
+
+
+def test_main_same_screen_relayout_preserves_partially_visible_management(qapp, tmp_path, monkeypatch):
+    available = QRect(0, 0, 800, 600)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    settle(qapp, window)
+    assert window.update_button.isHidden()
+    manage = window.rate_panel.manage_button
+    position = QPoint(0, available.bottom() - manage.mapTo(window, manage.rect().center()).y())
+    window.move(position)
+
+    window.rate_panel.render_rows()
+    assert_geometry_converges(qapp, window)
+
+    rect = QRect(manage.mapToGlobal(QPoint()), manage.size())
+    assert available.intersects(rect) and not available.contains(rect)
+    assert window.pos() == position
+
+
+def test_main_hiding_update_restores_compact_height(qapp, tmp_path):
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("main", tmp_path)
+    settle(qapp, window)
+    assert window.update_button.isHidden()
+    compact_height = window.height()
+    compact_viewport_height = window._rate_scroll.viewport().height()
+    window._sync_update_button_from_config()
+    assert_geometry_converges(qapp, window)
+    assert window.update_button.isVisible()
+    assert window.height() >= compact_height + window.update_button.height()
+
+    window.config["notified_update_version"] = ""
+    window._sync_update_button_from_config()
+    assert_geometry_converges(qapp, window)
+    assert window.update_button.isHidden()
+    assert window.height() == compact_height
+    assert window._rate_scroll.viewport().height() == compact_viewport_height
+
+
+@pytest.mark.parametrize("preset", [*PRESETS, "custom"])
+@pytest.mark.parametrize("version", ["poe1", "poe2"])
+def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request, preset, version):
+    available = QRect(0, 0, 800, 600)
+    handle = _WindowHandle(_Screen(available))
+    overrides = {"base_font_size": 24}
+    if preset == "custom":
+        font_id = QFontDatabase.addApplicationFont(
+            str(bundled_font_path().with_name("visitor1.ttf"))
+        )
+        request.addfinalizer(lambda: QFontDatabase.removeApplicationFont(font_id))
+        overrides.update({
+            "font_family": QFontDatabase.applicationFontFamilies(font_id)[0],
+            "accent": "#C68CFF",
+        })
+    apply_application_appearance(qapp, {
+        "appearance": {"preset": "default" if preset == "custom" else preset, "overrides": overrides},
+    })
+    window = build_scenario("main", tmp_path, version)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window._sync_update_button_from_config()
+    settle(qapp, window)
+
+    buttons = [button for button in window.header_action_buttons if button.isVisibleTo(window)]
+    assert all(button.width() == button.height() == window.focus_button.height() for button in buttons)
+    assert available.contains(window.frameGeometry())
+    assert window.title_bar.rect().contains(window.title_label.geometry())
+    assert window.title_bar.rect().contains(window.mode_label.geometry())
+    assert window._rate_scroll.verticalScrollBar().maximum() == 0
+    assert not geometry_failures(window)
+
+    store = window._rate_pair_store
+    ids = list(window.rate_panel.catalog)
+    for index in range(MAX_RATE_PAIRS - 1):
+        store.add(version, ids[index], ids[index + MAX_RATE_PAIRS])
+    window._rate_pairs_changed()
+    settle(qapp, window)
+
+    assert available.contains(window.frameGeometry())
+    scroll = window._rate_scroll
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert scroll.horizontalScrollBar().maximum() == 0
+    for control in (window.focus_button, *buttons, window.update_button):
+        assert window.rect().contains(QRect(control.mapTo(window, QPoint()), control.size()))
+    last_row = window.rate_panel.row_widgets[-1]
+    scroll.ensureWidgetVisible(last_row, 0, 0)
+    viewport = scroll.viewport()
+    assert viewport.rect().contains(QRect(last_row.mapTo(viewport, QPoint()), last_row.size()))
+
+    for _ in range(MAX_RATE_PAIRS - 1):
+        store.remove(version, 1)
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert window.height() < available.height()
+    assert scroll.verticalScrollBar().maximum() == 0
+
+    if preset == "custom":
+        assert window.title_label.palette().color(window.title_label.foregroundRole()).name() == "#c68cff"
+
+
+@pytest.mark.parametrize("size", [13, 24])
+@pytest.mark.parametrize("version", ["poe1", "poe2"])
+@pytest.mark.parametrize("long_quotes", [False, True])
+def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version, long_quotes):
+    available = QRect(0, 0, 800, 600)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": size}}})
+    window = build_scenario("main", tmp_path, version)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    right = DEFAULT_RATE_PAIRS[version].right_item_id
+    other = EXALTED_ORB_ID if right == CHAOS_ORB_ID else CHAOS_ORB_ID
+    prices = {
+        (DIVINE_ORB_ID, right): 54_000.2 if long_quotes else 197.2,
+        (other, right): 7.4,
+        (right, DIVINE_ORB_ID): 0.00001852 if long_quotes else 0.0057,
+    }
+    window.rate_panel.service = Mock(
+        direct_pair=lambda _version, _league, left, right: DirectPairPrice(
+            "available", left, right, prices[left, right], 720,
+        ),
+    )
+    for left, right in list(prices)[1:]:
+        window._rate_pair_store.add(version, left, right)
+    window._rate_pairs_changed()
+    settle(qapp, window)
+
+    assert available.contains(window.frameGeometry())
+    assert window._rate_scroll.horizontalScrollBar().maximum() == 0
+    assert window._rate_scroll.verticalScrollBar().maximum() == 0
+    assert not geometry_failures(window)
+    centers = set()
+    for index, row in enumerate(window.rate_panel.row_widgets):
+        for side in ("Left", "Right"):
+            label = row.findChild(QLabel, f"customRate{side}Name{index}")
+            assert label.toolTip() == label.text()
+            if not long_quotes:
+                assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
+        value = row.findChild(QLabel, f"customRateValue{index}")
+        unit, equals, integer, fraction = value._column_rects()
+        assert all(value.rect().contains(column) for column in (unit, equals, integer, fraction))
+        assert abs(equals.center().x() - value.contentsRect().center().x()) <= 1
+        centers.add(value.mapTo(window, equals.center()).x())
+    assert len(centers) == 1
+
+
+def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp_path, monkeypatch):
+    screen = _Screen(QRect(0, 0, 800, 600))
+    handle = _WindowHandle(screen)
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("main", tmp_path, "poe1")
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.move(screen.geometry.topLeft())
+    ids = list(window.rate_panel.catalog)
+    for index in range(MAX_RATE_PAIRS - 1):
+        window._rate_pair_store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
+    window.rate_panel.service = Mock(
+        direct_pair=lambda _version, _league, left, right: DirectPairPrice(
+            "available", left, right, 100_000_000.1, 720,
+        ),
+    )
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert_geometry_converges(qapp, window)
+
+    assert len(window.rate_panel.row_widgets) == MAX_RATE_PAIRS
+    value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
+    assert "100,000,000.1" in value.toolTip()
+    assert window.width() <= screen.geometry.width()
+    for button in (window.title_bar.close_button, window.title_bar.minimize_button, window.rate_panel.manage_button):
+        assert button.isVisible()
+        assert screen.geometry.contains(QRect(button.mapToGlobal(QPoint()), button.size()))
+    assert window._rate_scroll.horizontalScrollBar().maximum() == 0
+    scroll = window._rate_scroll.verticalScrollBar()
+    assert scroll.maximum() > 0
+    scroll.setValue(scroll.maximum())
+    manage = window.rate_panel.manage_button
+    assert manage.visibleRegion().contains(manage.rect())
+    assert screen.geometry.contains(QRect(manage.mapToGlobal(QPoint()), manage.size()))
+
+    rows = window.rate_panel.row_widgets
+    previous = rows[-2].findChild(QPushButton, f"customRateDelete{MAX_RATE_PAIRS - 2}")
+    delete = rows[-1].findChild(QPushButton, f"customRateDelete{MAX_RATE_PAIRS - 1}")
+    previous.setFocus(Qt.TabFocusReason)
+    QTest.keyClick(previous, Qt.Key_Tab)
+    assert delete.hasFocus() and delete.visibleRegion().contains(delete.rect())
+    pairs = window._rate_pair_store.pairs(window.poe_version)
+    QTest.keyClick(delete, Qt.Key_Space)
+    assert window._rate_pair_store.pairs(window.poe_version) == pairs[:-1]
+    assert len(window.rate_panel.row_widgets) == MAX_RATE_PAIRS - 1
+
+
+@pytest.mark.parametrize("width,height", [(800, 600), (640, 480)])
+@pytest.mark.parametrize("locked", [False, True])
+def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, monkeypatch, locked, width, height):
+    available = QRect(0, 0, width, height)
+    handle = _WindowHandle(_Screen(available))
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.config["window_locked"] = locked
+    store = window._rate_pair_store
+    store.remove(window.poe_version, 0)
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert not window.rate_panel.row_widgets
+    window.move(width - window.width(), 0)
+    position = window.pos()
+    assert window.frameGeometry().right() == available.right()
+
+    ids = list(window.rate_panel.catalog)
+    for index in range(MAX_RATE_PAIRS):
+        store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
+    window.rate_panel.service = Mock(
+        direct_pair=lambda _version, _league, left, right: DirectPairPrice(
+            "available", left, right, 197.2, 720,
+        ),
+    )
+    window._rate_pairs_changed()
+    assert_geometry_converges(qapp, window)
+
+    assert window.pos() == position
+    assert available.contains(window.frameGeometry())
+    scroll = window._rate_scroll
+    bar = scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum())
+    last_row = window.rate_panel.row_widgets[-1]
+    delete = last_row.findChild(QPushButton, f"customRateDelete{MAX_RATE_PAIRS - 1}")
+    viewport = scroll.viewport()
+    assert scroll.widget().width() == viewport.width()
+    assert viewport.rect().contains(QRect(delete.mapTo(viewport, QPoint()), delete.size()))
+    assert delete.visibleRegion().contains(delete.rect())
+    assert scroll.horizontalScrollBar().maximum() == 0
+
+    target = delete.mapTo(window, delete.rect().center())
+    native_handle = QWidget.windowHandle(window)
+    QTest.mouseMove(native_handle, window.title_bar.rect().center())
+    QTest.mouseMove(native_handle, target)
+    QTest.mouseClick(native_handle, Qt.LeftButton, pos=target)
+    assert len(store.pairs(window.poe_version)) == MAX_RATE_PAIRS - 1
+
+
+@pytest.mark.parametrize(
+    ("price", "wide_quote", "narrow_quote"),
+    [
+        pytest.param(0.00001234, ("0", ".00001234"), ("0", ".00001…"), id="tiny"),
+        pytest.param(0.0057, ("0", ".0057"), ("0", ".0057"), id="subunit"),
+        pytest.param(100_000_000.1, ("100,000,000", ".1"), ("100,…",), id="large"),
+        pytest.param(197.2, ("197", ".2"), ("197", ".2"), id="normal"),
+    ],
+)
+@pytest.mark.parametrize("narrow", [False, True])
+def test_main_rate_paints_full_or_explicitly_elided_quote(
+    qapp, tmp_path, monkeypatch, price, wide_quote, narrow_quote, narrow,
+):
+    available = QRect(0, 0, 800, 600) if narrow else QRect(0, 0, 1920, 1080)
+    handle = _WindowHandle(_Screen(available))
+    appearance = {"overrides": {"base_font_size": 24}} if narrow else {}
+    apply_application_appearance(qapp, {"appearance": appearance})
+    window = build_scenario("main", tmp_path)
+    monkeypatch.setattr(window, "windowHandle", lambda: handle)
+    window.rate_panel.service = Mock(
+        direct_pair=lambda _version, _league, left, right: DirectPairPrice(
+            "available", left, right, price, 720,
+        ),
+    )
+    window._rate_pairs_changed()
+    settle(qapp, window)
+
+    value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
+    assert value.toolTip() == "1 ＝ " + "".join(wide_quote)
+    quote = narrow_quote if narrow else wide_quote
+    assert not inspect_paint(value, ("1", "＝", *quote))
 
 
 @pytest.mark.parametrize("preset", PRESETS)
@@ -78,7 +755,9 @@ def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
         if size == 13:
             assert window.focus_button.height() == 36
         assert_peers([window.title_bar.minimize_button, window.title_bar.close_button])
-        assert_peers([window.rate_panel.manage_button, window.rate_panel.refresh_button])
+        manage = window.rate_panel.manage_button
+        assert manage.width() == manage.height() == UI_METRICS.toolbar_size
+        assert not manage.icon().isNull()
     elif key == "trade":
         assert_peers(window.trade_preset_combo._buttons)
         assert_peers([window.league_popup_button, window.poetore_close_button])
@@ -574,7 +1253,7 @@ def test_category_choices_converge_when_reopened_on_different_screens(qapp, monk
         assert window._button_area.horizontalScrollBar().maximum() == 0
 
 
-class _TradeScreen(QObject):
+class _Screen(QObject):
     availableGeometryChanged = Signal(QRect)
     logicalDotsPerInchChanged = Signal(float)
     physicalDotsPerInchChanged = Signal(float)
@@ -582,12 +1261,19 @@ class _TradeScreen(QObject):
     def __init__(self, geometry):
         super().__init__()
         self.geometry = geometry
+        self.logical_dpi = self.physical_dpi = 96
 
     def availableGeometry(self):
         return QRect(self.geometry)
 
+    def logicalDotsPerInch(self):
+        return self.logical_dpi
 
-class _TradeWindowHandle(QObject):
+    def physicalDotsPerInch(self):
+        return self.physical_dpi
+
+
+class _WindowHandle(QObject):
     screenChanged = Signal(object)
 
     def __init__(self, screen):
@@ -608,8 +1294,8 @@ def test_trade_drag_between_screens_updates_limits_and_keeps_destination(
 
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
     large = QRect(0, 0, 1920, 1080)
-    large_screen, small_screen = _TradeScreen(large), _TradeScreen(small)
-    handle = _TradeWindowHandle(large_screen)
+    large_screen, small_screen = _Screen(large), _Screen(small)
+    handle = _WindowHandle(large_screen)
     window = build_scenario("trade", tmp_path, "poe2")
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     monkeypatch.setattr(window, "screen", handle.screen)
@@ -656,8 +1342,8 @@ def test_trade_screen_metric_changes_reflow_without_a_width_change(
 ):
     from src.poetore.window_position import PlacementContext
 
-    screen = _TradeScreen(QRect(0, 0, 1920, 1080))
-    handle = _TradeWindowHandle(screen)
+    screen = _Screen(QRect(0, 0, 1920, 1080))
+    handle = _WindowHandle(screen)
     window = build_scenario("trade", tmp_path)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     monkeypatch.setattr(window, "screen", handle.screen)
@@ -682,8 +1368,8 @@ def test_trade_screen_metric_changes_reflow_without_a_width_change(
 def test_trade_screen_update_survives_active_layout_and_obs_collapse(qapp, qtbot, tmp_path, monkeypatch):
     from src.poetore.window_position import PlacementContext
 
-    screen = _TradeScreen(QRect(0, 0, 1920, 1080))
-    handle = _TradeWindowHandle(screen)
+    screen = _Screen(QRect(0, 0, 1920, 1080))
+    handle = _WindowHandle(screen)
     window = build_scenario("trade", tmp_path)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     monkeypatch.setattr(window, "screen", handle.screen)

@@ -46,7 +46,9 @@ from src.ui.dialog_theme import (
     UI_METRICS, equalize_button_sizes,
     POETORE_DIALOG_THEME,
     apply_dialog_theme,
+    icon_button_stylesheet,
 )
+from src.ui.toolbar_icons import trash_icon
 
 BASE_CURRENCY_IDS = (DIVINE_ORB_ID, CHAOS_ORB_ID, EXALTED_ORB_ID)
 RATE_PAIR_DRAG_MIME = "application/x-poenavi-rate-pair-index"
@@ -679,11 +681,16 @@ class ExchangeRateManagementDialog(QDialog):
             row_layout.addWidget(name, 1)
             up = self._move_button("↑", "上へ移動")
             down = self._move_button("↓", "下へ移動")
-            delete = self._icon_button(QStyle.SP_TrashIcon, "削除")
+            delete = QPushButton()
+            delete.setStyleSheet(icon_button_stylesheet())
+            delete.setIcon(trash_icon(resolve_dialog_theme(POETORE_DIALOG_THEME).muted_text))
+            delete.setIconSize(QSize(18, 18))
+            delete.setFixedSize(34, 34)
+            delete.setToolTip("削除")
+            delete.setAccessibleName(delete.toolTip())
             up.setObjectName(f"ratePairMoveUp{index}")
             down.setObjectName(f"ratePairMoveDown{index}")
             delete.setObjectName(f"ratePairDelete{index}")
-            delete.setProperty("buttonRole", "danger")
             up.setEnabled(index > 0)
             down.setEnabled(index < len(pairs) - 1)
             up.clicked.connect(lambda _checked=False, i=index: self._move_up(i))
@@ -706,29 +713,16 @@ class ExchangeRateManagementDialog(QDialog):
         if hasattr(self, "add_button"):
             self._selection_changed()
 
-    def _icon_button(self, icon_type, label: str) -> QPushButton:
-        button = QPushButton()
-        button.setIcon(self.style().standardIcon(icon_type))
-        button.setIconSize(QSize(18, 18))
-        button.setFixedSize(34, 34)
-        button.setToolTip(label)
-        button.setAccessibleName(label)
-        return button
-
     def _move_button(self, text: str, label: str) -> QPushButton:
         button = QPushButton(text)
         button.setFixedSize(34, 34)
         button.setToolTip(label)
         button.setAccessibleName(label)
-        button.setStyleSheet(f"""
-            QPushButton {{
-                color: {theme_color('text', '#FFFFFF')};
-                font-size: {theme_font_size(20)}px;
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:disabled {{ color: {theme_color('disabled', '#000000')}; }}
-        """)
+        button.setStyleSheet(icon_button_stylesheet(
+            content=f"font-size: {theme_font_size(20)}px; font-weight: bold; padding: 0;",
+            text=theme_color("text", "#FFFFFF"),
+            disabled=theme_color("disabled", "#000000"),
+        ))
         return button
 
     def _move_up(self, index: int) -> None:

@@ -97,7 +97,10 @@ class DecimalAlignedRateLabel(QLabel):
     def measured_columns(self) -> tuple[int, int]:
         self.ensurePolished()
         metrics = self.fontMetrics()
-        return metrics.horizontalAdvance(self._integer), metrics.horizontalAdvance(self._fraction)
+        return (
+            metrics.horizontalAdvance(self._integer),
+            metrics.size(Qt.TextSingleLine, self._fraction).width(),
+        )
 
     def set_column_widths(self, integer: int, fraction: int) -> None:
         self._integer_width, self._fraction_width = integer, fraction
@@ -131,11 +134,18 @@ class DecimalAlignedRateLabel(QLabel):
         integer_left = equals.right() + 1 + gap
         available = max(0, rect.right() + 1 - integer_left - self.HORIZONTAL_MARGIN)
         integer_text_width = metrics.horizontalAdvance(self._integer)
-        fraction_width = metrics.horizontalAdvance(self._fraction)
+        fraction_width = metrics.size(Qt.TextSingleLine, self._fraction).width()
         if integer_text_width + fraction_width <= available:
             # Use the shared decimal anchor wherever both parts have room.
             reserve = min(self._fraction_width, available - integer_text_width)
             integer_width = min(self._integer_width, available - reserve)
+        elif (
+            self._fraction
+            and integer_text_width + metrics.size(Qt.TextSingleLine, "…").width() <= available
+        ):
+            # Use all remaining space for the fractional prefix and ellipsis.
+            integer_width = integer_text_width
+            fraction_width = available - integer_width
         else:
             fraction_width = 0
             integer_width = min(self._integer_width, available)
@@ -143,10 +153,11 @@ class DecimalAlignedRateLabel(QLabel):
         fraction = QRect(integer.right() + 1, top, fraction_width, height)
         return unit, equals, integer, fraction
 
-    def _display_integer(self, width: int) -> str:
+    def _display_integer(self, width: int, *, fraction_omitted: bool) -> str:
         metrics = self.fontMetrics()
-        if metrics.horizontalAdvance(self._integer) <= width:
-            return self._integer
+        text = self._integer + ("…" if fraction_omitted else "")
+        if metrics.horizontalAdvance(text) <= width:
+            return text
         prefix = self._integer
         while "," in prefix:
             prefix = prefix.rsplit(",", 1)[0]
@@ -154,6 +165,19 @@ class DecimalAlignedRateLabel(QLabel):
             if metrics.horizontalAdvance(shortened) <= width:
                 return shortened
         return "…" if metrics.horizontalAdvance("…") <= width else ""
+
+    def _display_fraction(self, width: int) -> str:
+        metrics = self.fontMetrics()
+        if metrics.size(Qt.TextSingleLine, self._fraction).width() <= width:
+            return self._fraction
+        shortened = "…"
+        for end in range(2, len(self._fraction)):
+            # Include at least one digit when retaining the decimal point.
+            candidate = self._fraction[:end] + "…"
+            if metrics.size(Qt.TextSingleLine, candidate).width() > width:
+                break
+            shortened = candidate
+        return shortened
 
     def paintEvent(self, event) -> None:
         unit, equals, integer, fraction = self._column_rects()
@@ -163,9 +187,11 @@ class DecimalAlignedRateLabel(QLabel):
         vertical = Qt.AlignVCenter
         painter.drawText(unit, vertical | Qt.AlignRight, "1")
         painter.drawText(equals, vertical | Qt.AlignHCenter, "＝")
-        painter.drawText(integer, vertical | Qt.AlignRight, self._display_integer(integer.width()))
+        fraction_omitted = bool(self._fraction) and fraction.width() == 0
+        integer_text = self._display_integer(integer.width(), fraction_omitted=fraction_omitted)
+        painter.drawText(integer, vertical | Qt.AlignRight, integer_text)
         if fraction.width():
-            painter.drawText(fraction, vertical | Qt.AlignLeft, self._fraction)
+            painter.drawText(fraction, vertical | Qt.AlignLeft, self._display_fraction(fraction.width()))
         painter.end()
 
 

@@ -135,11 +135,12 @@ def inspect_rate_labels(qapp):
     failures.extend(inspect_paint(rate, ("1", "＝", "999,999", ".000001")))
     narrow_rate = DecimalAlignedRateLabel("100,000,000.1")
     narrow_rate.set_column_widths(*narrow_rate.measured_columns())
-    for integer_text in ("100,000,…", "100,000,000"):
-        width = narrow_rate.fontMetrics().horizontalAdvance(integer_text)
+    # An integer that fits on its own still needs room for a truncation marker.
+    for budget in ("100,000,…", "100,000,000"):
+        width = narrow_rate.fontMetrics().horizontalAdvance(budget)
         narrow_rate.resize(narrow_rate._centered_width(width), narrow_rate.sizeHint().height())
         assert narrow_rate._column_rects()[3].width() == 0
-        failures.extend(inspect_paint(narrow_rate, ("1", "＝", integer_text)))
+        failures.extend(inspect_paint(narrow_rate, ("1", "＝", "100,000,…")))
     label = ElidedLabel("非常に長いカレンシーの名称を省略表示")
     label.resize(200, label.sizeHint().height())
     failures.extend(inspect_paint(label))
@@ -148,6 +149,18 @@ def inspect_rate_labels(qapp):
 
 def test_rate_label_painted_text_fits(qapp):
     assert not (failures := inspect_rate_labels(qapp)), "\n".join(failures)
+
+
+def test_subunit_rate_marks_truncation_when_no_significant_digit_fits(qapp):
+    from src.ui.custom_exchange_rate_panel import DecimalAlignedRateLabel
+
+    rate = DecimalAlignedRateLabel("0.00001234")
+    integer_width, full_fraction_width = rate.measured_columns()
+    rate.set_column_widths(integer_width, full_fraction_width)
+    rate.setMinimumWidth(0)
+    fraction_width = rate.fontMetrics().size(Qt.TextSingleLine, ".0…").width()
+    rate.resize(rate._centered_width(integer_width + fraction_width), rate.sizeHint().height())
+    assert not inspect_paint(rate, ("1", "＝", "0", ".0…"))
 
 
 def inspect_expedition_price(qapp):

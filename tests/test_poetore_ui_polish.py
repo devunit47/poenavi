@@ -690,22 +690,37 @@ def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, mon
     assert len(store.pairs(window.poe_version)) == MAX_RATE_PAIRS - 1
 
 
-def test_main_large_rate_elides_at_a_thousands_boundary(qapp, tmp_path, monkeypatch):
-    handle = _WindowHandle(_Screen(QRect(0, 0, 800, 600)))
-    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+@pytest.mark.parametrize(
+    ("price", "wide_quote", "narrow_quote"),
+    [
+        pytest.param(0.00001234, ("0", ".00001234"), ("0", ".00001…"), id="tiny"),
+        pytest.param(0.0057, ("0", ".0057"), ("0", ".0057"), id="subunit"),
+        pytest.param(100_000_000.1, ("100,000,000", ".1"), ("100,…",), id="large"),
+        pytest.param(197.2, ("197", ".2"), ("197", ".2"), id="normal"),
+    ],
+)
+@pytest.mark.parametrize("narrow", [False, True])
+def test_main_rate_paints_full_or_explicitly_elided_quote(
+    qapp, tmp_path, monkeypatch, price, wide_quote, narrow_quote, narrow,
+):
+    available = QRect(0, 0, 800, 600) if narrow else QRect(0, 0, 1920, 1080)
+    handle = _WindowHandle(_Screen(available))
+    appearance = {"overrides": {"base_font_size": 24}} if narrow else {}
+    apply_application_appearance(qapp, {"appearance": appearance})
     window = build_scenario("main", tmp_path)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     window.rate_panel.service = Mock(
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
-            "available", left, right, 100_000_000.1, 720,
+            "available", left, right, price, 720,
         ),
     )
     window._rate_pairs_changed()
     settle(qapp, window)
 
     value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
-    assert value.toolTip() == "1 ＝ 100,000,000.1"
-    assert not inspect_paint(value, ("1", "＝", "100,…"))
+    assert value.toolTip() == "1 ＝ " + "".join(wide_quote)
+    quote = narrow_quote if narrow else wide_quote
+    assert not inspect_paint(value, ("1", "＝", *quote))
 
 
 @pytest.mark.parametrize("preset", PRESETS)

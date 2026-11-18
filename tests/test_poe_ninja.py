@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -328,6 +329,41 @@ def test_exchange_cache_coalesces_background_and_foreground_fetches():
 
     assert len(calls) == 1
     assert len(results) == 2
+
+
+def test_overview_fetches_coalesce_per_endpoint_league_and_category():
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def stash(league, category):
+        calls.append((league, category))
+        if (league, category) == ("League A", "UniqueArmour"):
+            started.set()
+            assert release.wait(timeout=3)
+        return {"league": league, "category": category}
+
+    service = PoeNinjaPriceService(
+        fetcher=lambda league: {"dense": league},
+        stash_fetcher=stash,
+        poe2_fetcher=lambda league, category: {"poe2": category},
+    )
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        first = pool.submit(service._stash_payload, "League A", "UniqueArmour")
+        try:
+            assert started.wait(timeout=1)
+            same = pool.submit(service._stash_payload, "League A", "UniqueArmour")
+            other_category = pool.submit(service._stash_payload, "League A", "UniqueWeapon")
+            other_league = pool.submit(service._stash_payload, "League B", "UniqueArmour")
+            other_endpoint = pool.submit(service._poe2_payload, "League A", "UniqueArmour")
+            assert other_category.result(timeout=1)["category"] == "UniqueWeapon"
+            assert other_league.result(timeout=1)["league"] == "League B"
+            assert other_endpoint.result(timeout=1) == {"poe2": "UniqueArmour"}
+            assert service._payload("League A") == {"dense": "League A"}
+        finally:
+            release.set()
+        assert same.result(timeout=1) is first.result(timeout=1)
+    assert calls.count(("League A", "UniqueArmour")) == 1
 
 
 def test_trend_summary_uses_signed_total_change_instead_of_graph_deviation():

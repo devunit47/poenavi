@@ -1,9 +1,11 @@
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
+import pytest
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSystemTrayIcon,
 )
@@ -60,7 +62,7 @@ def test_main_title_bar_shows_title_and_short_poe_version_without_eyebrow():
         app.processEvents()
 
 
-def test_poetore_update_banner_uses_notified_version_and_hourly_check():
+def test_poetore_download_action_uses_notified_version_and_hourly_check():
     app = QApplication.instance() or QApplication([])
     config = {
         "poe_version": POE1,
@@ -79,9 +81,12 @@ def test_poetore_update_banner_uses_notified_version_and_hourly_check():
     window.show()
     app.processEvents()
     assert window.update_button.isVisible()
-    assert window.update_button.text() == "↑ v9.9.9 アップデートあり　更新する"
-    assert window.update_button.objectName() == "poetoreUpdateButton"
-    assert window.update_button.minimumHeight() == 40
+    assert not window.update_button.text()
+    assert not window.update_button.icon().isNull()
+    assert window.update_button.toolTip() == "v9.9.9 に更新"
+    assert window.update_button.parentWidget() is window.title_bar
+    assert window.update_button.geometry().right() < window.title_bar.minimize_button.x()
+    assert window.findChild(QPushButton, "poetoreUpdateButton") is None
     assert not window.capture_warning.isVisible()
     assert window._update_check_timer.interval() == 60 * 60 * 1000
     assert window._update_check_timer.isActive()
@@ -89,6 +94,10 @@ def test_poetore_update_banner_uses_notified_version_and_hourly_check():
     with patch.object(window._background_update_controller, "check") as check:
         window._update_check_timer.timeout.emit()
     check.assert_called_once_with(False)
+    assert not window.update_button.isEnabled()
+    window._background_update_controller.check_failed.emit("offline", False)
+    assert window.update_button.isEnabled()
+    assert window.update_button.toolTip() == "v9.9.9 に更新"
 
     with patch(
         "src.update.startup_gate.run_manual_update_check",
@@ -102,7 +111,8 @@ def test_poetore_update_banner_uses_notified_version_and_hourly_check():
     app.processEvents()
 
 
-def test_poetore_update_banner_appears_when_periodic_check_finds_release():
+@pytest.mark.parametrize("manual", [False, True])
+def test_poetore_update_action_changes_when_check_finds_release(manual):
     app = QApplication.instance() or QApplication([])
     config = {
         "poe_version": POE1,
@@ -118,7 +128,9 @@ def test_poetore_update_banner_appears_when_periodic_check_finds_release():
     ), patch.object(PoetoreModeWindow, "refresh_currency_rate"):
         window = PoetoreModeWindow()
 
-    assert window.update_button.isHidden()
+    button = window.update_button
+    assert button.toolTip() == "アプリの更新をチェック"
+    idle_icon = button.icon().pixmap(button.iconSize()).toImage()
     release = ReleaseInfo(
         version="9.9.9",
         notes="test",
@@ -126,17 +138,119 @@ def test_poetore_update_banner_appears_when_periodic_check_finds_release():
         zip_url="https://example.com/PoENavi.zip",
         checksum_url="https://example.com/PoENavi.zip.sha256",
     )
-    with patch(
-        "src.ui.poetore_mode_window.ConfigManager.save_config"
-    ) as save_config:
-        window._handle_background_update_result(release, False)
+    controller = window._background_update_controller
+    with patch.object(controller, "check") as check:
+        if manual:
+            button.click()
+        else:
+            window._update_check_timer.timeout.emit()
+        window._update_check_timer.timeout.emit()
+    check.assert_called_once_with(manual)
+    assert not button.isEnabled()
+    assert button.toolTip() == "アプリの更新を確認中…"
+    assert button.icon().pixmap(button.iconSize()).toImage() != idle_icon
+    with patch("src.ui.poetore_mode_window.ConfigManager.save_config") as save_config:
+        controller.check_finished.emit(release, manual)
 
     assert config["notified_update_version"] == "9.9.9"
     save_config.assert_called_once_with(config)
-    assert not window.update_button.isHidden()
-    assert "v9.9.9" in window.update_button.text()
-    window._handle_background_update_failure("offline", False)
-    assert not window.update_button.isHidden()
+    assert button.isEnabled()
+    assert button.toolTip() == "v9.9.9 に更新"
+    assert button.icon().pixmap(button.iconSize()).toImage() != idle_icon
+
+    window.close()
+    app.processEvents()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_manual_app_update_check_reports_result_and_allows_retry(failed):
+    app = QApplication.instance() or QApplication([])
+    with patch(
+        "src.ui.poetore_mode_window.ConfigManager.load_config",
+        return_value={"poe_version": POE1, "hotkeys": {}},
+    ), patch("src.ui.poetore_mode_window.GlobalHotkeyService"), patch.object(
+        PoetoreModeWindow, "refresh_currency_rate",
+    ):
+        window = PoetoreModeWindow()
+    controller = window._background_update_controller
+    with patch.object(controller, "check") as check, patch(
+        "src.ui.update_dialogs.show_update_message",
+    ) as message:
+        window.update_button.click()
+        if failed:
+            controller.check_failed.emit("offline", True)
+            message.assert_called_once_with(
+                window, QMessageBox.Warning, "アップデート", "更新を確認できませんでした。\noffline",
+            )
+        else:
+            controller.check_finished.emit(None, True)
+            message.assert_called_once_with(
+                window, QMessageBox.Information, "アップデート", "最新バージョンです。",
+            )
+        assert window.update_button.isEnabled()
+        assert window.update_button.toolTip() == "アプリの更新をチェック"
+        window.update_button.click()
+        assert check.call_args_list == [call(True), call(True)]
+
+    window.close()
+    app.processEvents()
+
+
+def test_hideout_notification_action_tracks_controller_and_keeps_elapsed_time(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    log = tmp_path / "Client.txt"
+    log.touch()
+    with patch(
+        "src.ui.poetore_mode_window.ConfigManager.load_config",
+        return_value={"poe_version": POE1, "client_log_paths": {POE1: str(log)}},
+    ), patch("src.ui.poetore_mode_window.GlobalHotkeyService"), patch.object(
+        PoetoreModeWindow, "refresh_currency_rate",
+    ):
+        window = PoetoreModeWindow()
+    window.show()
+    app.processEvents()
+    button = window.focus_button
+    off_icon = button.icon().pixmap(button.iconSize()).toImage()
+    assert button.isCheckable() and not button.isChecked()
+    assert button.toolTip() == "隠れ家滞在通知：OFF（クリックで切替）"
+    assert window.focus_status.isHidden()
+
+    controller = window._ensure_hideout_notification()
+    with patch.object(controller, "_process_finder", return_value=None), patch(
+        "src.ui.poetore_mode_window.QMessageBox.information",
+    ) as message:
+        button.click()
+    message.assert_called_once()
+    assert not button.isChecked()
+
+    process = Mock()
+    watcher = Mock()
+    with patch.object(controller, "_process_finder", return_value=process), patch.object(
+        controller, "_watcher_factory", return_value=watcher,
+    ), patch.object(controller, "_monotonic", return_value=10.0) as clock, patch(
+        "src.poetore.hideout_notification_controller.latest_zone_since_process_start",
+        return_value="Coastal Hideout",
+    ):
+        button.click()
+        assert controller.active and button.isChecked()
+        assert button.toolTip() == "隠れ家滞在通知：ON（クリックで切替）"
+        assert button.accessibleName() == "隠れ家滞在通知：ON"
+        assert button.icon().pixmap(button.iconSize()).toImage() != off_icon
+        clock.return_value = 13.0
+        controller._tick()
+        assert window.focus_status.isVisible()
+        assert window.focus_status.text() == "0:03"
+
+        controller.flash_requested.emit()
+        assert button.property("notificationFlash")
+        window._focus_flash_timer.timeout.emit()
+        assert not button.property("notificationFlash")
+        assert button.isChecked()
+
+        button.click()
+        assert not controller.active and not button.isChecked()
+        assert window.focus_status.isHidden()
+        assert button.icon().pixmap(button.iconSize()).toImage() == off_icon
 
     window.close()
     app.processEvents()
@@ -211,10 +325,9 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     assert window.header_action_buttons == header_buttons
     window.show()
     app.processEvents()
-    assert window.focus_button.text() == "隠れ家滞在通知\nOFF"
-    assert window.focus_button.size().width() == 108
-    assert window.focus_button.size().height() == 36
-    assert "text-align: center" in window.centralWidget().styleSheet()
+    assert not window.focus_button.text()
+    assert not window.focus_button.icon().isNull()
+    assert window.focus_button.size() == QSize(36, 36)
     assert window._hideout_notification is None
     assert all(button.text() == "" for button in header_buttons)
     assert all(not button.icon().isNull() for button in header_buttons)
@@ -242,8 +355,9 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     assert close_button.text() == "×"
     assert minimize_button.focusPolicy() == Qt.TabFocus
     assert close_button.focusPolicy() == Qt.TabFocus
-    assert window.rate_refresh_button.text() == "最新データ確認"
-    assert window.rate_refresh_button.focusPolicy() == Qt.NoFocus
+    assert not window.rate_refresh_button.text()
+    assert not window.rate_refresh_button.icon().isNull()
+    assert window.rate_refresh_button.focusPolicy() == Qt.TabFocus
     assert window.tray_icon.toolTip() == "ぽえとれ"
     assert [
         action.text() for action in window.tray_icon.contextMenu().actions()

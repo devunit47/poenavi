@@ -60,14 +60,13 @@ class UpdateController(QObject):
 
         def work():
             try:
-                self.check_finished.emit(
-                    fetch_latest_release(APP_VERSION),
-                    manual,
-                )
+                release = fetch_latest_release(APP_VERSION)
             except Exception as exc:
-                self.check_failed.emit(str(exc), manual)
-            finally:
                 self._checking = False
+                self.check_failed.emit(str(exc), manual)
+            else:
+                self._checking = False
+                self.check_finished.emit(release, manual)
 
         self._thread_factory(work).start()
 

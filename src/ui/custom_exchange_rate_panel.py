@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -26,8 +25,9 @@ from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import ExchangeRatePairStore
 from src.poetore.official_exchange import OfficialExchangeShadowService
 from src.ui.app_theme import POETORE_THEME
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
-from src.ui.toolbar_icons import list_add_icon, trash_icon
+from src.ui.dialog_theme import UI_METRICS
+from src.ui.toolbar_button import ToolbarButton
+from src.ui.toolbar_icons import list_add_icon, reload_icon, trash_icon
 
 RATE_CHECK_INTERVAL_MSEC = 10 * 60 * 1000
 OFFICIAL_DATA_TOOLTIP = (
@@ -195,12 +195,11 @@ class DecimalAlignedRateLabel(QLabel):
         painter.end()
 
 
-class _RateDeleteButton(QPushButton):
+class _RateDeleteButton(ToolbarButton):
     """Keep the button in the layout and tab order while its row is idle."""
 
     def __init__(self, row: QWidget):
-        super().__init__(row)
-        self.setFocusPolicy(Qt.TabFocus)
+        super().__init__(parent=row)
         row.installEventFilter(self)
 
     def eventFilter(self, watched, event):
@@ -283,9 +282,8 @@ class CustomExchangeRatePanel(QWidget):
         self.title_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
         title_row.addWidget(self.title_label)
         title_row.addStretch()
-        self.manage_button = QPushButton()
+        self.manage_button = ToolbarButton()
         self.manage_button.setObjectName("customRateManageButton")
-        self.manage_button.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         self.manage_button.setIcon(list_add_icon(theme.muted_text))
         self.manage_button.setIconSize(QSize(22, 22))
         self.manage_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
@@ -330,18 +328,17 @@ class CustomExchangeRatePanel(QWidget):
         self.status_label.setWordWrap(True)
         self.status_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
         footer.addWidget(self.status_label, 1)
-        self.refresh_button = QPushButton("最新データ確認")
-        self.refresh_button.setStyleSheet(
-            f"padding: {UI_METRICS.inline_gap}px {UI_METRICS.button_padding}px;"
-        )
-        self.refresh_button.setFocusPolicy(Qt.NoFocus)
-        self.refresh_button.setToolTip(OFFICIAL_DATA_TOOLTIP)
+        self.refresh_button = ToolbarButton()
+        self.refresh_button.setIcon(reload_icon(theme.muted_text))
+        self.refresh_button.setIconSize(QSize(24, 24))
+        self.refresh_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
+        self.refresh_button.setAccessibleName("公式取引データを再取得")
+        self.refresh_button.setToolTip(f"公式取引データを再取得\n\n{OFFICIAL_DATA_TOOLTIP}")
         self.refresh_button.clicked.connect(
             lambda: self.refresh_callback(manual=True)
         )
         footer.addWidget(self.refresh_button)
         content_layout.addLayout(footer)
-        equalize_button_sizes((self.refresh_button,), minimum_width=UI_METRICS.action_width)
 
     def render_rows(self) -> None:
         while self.rows_layout.count():
@@ -354,6 +351,7 @@ class CustomExchangeRatePanel(QWidget):
         pairs = self.store.pairs(self.poe_version)
         value_labels = []
         latest_cached_at = None
+        previous_button = self.manage_button
         for index, pair in enumerate(pairs):
             display_is_rate = False
             result = self.service.direct_pair(
@@ -388,7 +386,7 @@ class CustomExchangeRatePanel(QWidget):
                         if self._sync_in_progress
                         else "最新データを取得できません"
                     )
-            row, value = self._make_row(
+            row, value, delete = self._make_row(
                 index,
                 pair.left_item_id,
                 pair.right_item_id,
@@ -396,8 +394,11 @@ class CustomExchangeRatePanel(QWidget):
                 display_is_rate=display_is_rate,
             )
             self.rows_layout.addWidget(row)
+            QWidget.setTabOrder(previous_button, delete)
+            previous_button = delete
             self.row_widgets.append(row)
             value_labels.append(value)
+        QWidget.setTabOrder(previous_button, self.refresh_button)
 
         rate_labels = [value for value in value_labels if isinstance(value, DecimalAlignedRateLabel)]
         if rate_labels:
@@ -440,7 +441,7 @@ class CustomExchangeRatePanel(QWidget):
         display: str,
         *,
         display_is_rate: bool,
-    ) -> tuple[QWidget, QLabel]:
+    ) -> tuple[QWidget, QLabel, _RateDeleteButton]:
         row = QWidget()
         row.setObjectName(f"customRateRow{index}")
         layout = QHBoxLayout(row)
@@ -482,7 +483,6 @@ class CustomExchangeRatePanel(QWidget):
         delete = _RateDeleteButton(row)
         delete.setObjectName(f"customRateDelete{index}")
         delete.setProperty("rateDelete", True)
-        delete.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         delete.setIcon(trash_icon(resolve_app_theme(POETORE_THEME).muted_text))
         delete.setIconSize(QSize(20, 20))
         delete.setFixedSize(32, 32)
@@ -490,7 +490,7 @@ class CustomExchangeRatePanel(QWidget):
         delete.setAccessibleName("このレートを削除")
         delete.clicked.connect(lambda _checked=False, i=index: self._remove(i))
         layout.addWidget(delete)
-        return row, value
+        return row, value, delete
 
     def _icon_label(self, item_id: str, side: str) -> QLabel:
         label = QLabel()

@@ -1,7 +1,7 @@
 """Small theme-aware vector icons used by compact toolbar buttons."""
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
 
 def _canvas():
@@ -61,6 +61,68 @@ def trash_icon(color) -> QIcon:
     bin_body.lineTo(18, 6.5)
     painter.drawPath(bin_body)
     painter.drawLine(QPointF(12, 10.5), QPointF(12, 16.5))
+    return finish_line_icon(pixmap, painter)
+
+
+def reload_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawArc(QRectF(4.5, 4.5, 15, 15), 30 * 16, 300 * 16)
+    painter.drawPolyline(QPolygonF([
+        QPointF(18.5, 4), QPointF(18.5, 8.25), QPointF(14.25, 8.25),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def update_check_icon(color) -> QIcon:
+    """A magnifier with a check mark for checking the app version."""
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawEllipse(QPointF(10, 10), 6.5, 6.5)
+    painter.drawLine(QPointF(14.6, 14.6), QPointF(20, 20))
+    painter.drawPolyline(QPolygonF([
+        QPointF(7.2, 10), QPointF(9.1, 11.9), QPointF(12.8, 8.2),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def download_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawLine(QPointF(12, 3.5), QPointF(12, 14.5))
+    painter.drawPolyline(QPolygonF([
+        QPointF(7.5, 10), QPointF(12, 14.5), QPointF(16.5, 10),
+    ]))
+    painter.drawPolyline(QPolygonF([
+        QPointF(4.5, 15), QPointF(4.5, 19.5), QPointF(19.5, 19.5), QPointF(19.5, 15),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def checking_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawEllipse(QPointF(12, 12), 8, 8)
+    painter.drawPolyline(QPolygonF([
+        QPointF(12, 7), QPointF(12, 12), QPointF(15.5, 14),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def hideout_notification_icon(color, active) -> QIcon:
+    """A house with a bell that is struck through when muted."""
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawPolyline(QPolygonF([
+        QPointF(2.5, 10), QPointF(10.5, 3), QPointF(17, 8.7),
+    ]))
+    painter.drawPolyline(QPolygonF([
+        QPointF(4.5, 8.4), QPointF(4.5, 20.5), QPointF(10, 20.5),
+    ]))
+    bell = QPainterPath(QPointF(11.5, 17.5))
+    bell.quadTo(13, 16.2, 13, 13.5)
+    bell.cubicTo(13, 9.4, 19, 9.4, 19, 13.5)
+    bell.quadTo(19, 16.2, 20.5, 17.5)
+    bell.closeSubpath()
+    painter.drawPath(bell)
+    painter.drawLine(QPointF(15.3, 20), QPointF(16.7, 20))
+    if not active:
+        painter.drawLine(QPointF(11.5, 10), QPointF(21, 19.5))
     return finish_line_icon(pixmap, painter)
 
 

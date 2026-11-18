@@ -388,7 +388,8 @@ def test_window_inventory_is_complete():
         "ElidedLabel", "DecimalAlignedRateLabel", "CustomExchangeRatePanel", "_RateDeleteButton",
         "_RegisteredPairRow", "_RegisteredPairsWidget", "RegionPreview", "ClickableImageLabel",
         "GemTrackerWidget", "HighAccuracyOcrPackGroup", "ClickableThumb", "MapThumbnailWidget",
-        "MiniNaviLockButtonWindow", "_PoetoreModeTitleBar", "HotkeyButton", "TriggerKeyButton", "AutoHideHotkeyWidget", "RichTextEdit",
+        "MiniNaviLockButtonWindow", "_PoetoreModeTitleBar", "ToolbarButton", "_HideoutNotificationButton",
+        "HotkeyButton", "TriggerKeyButton", "AutoHideHotkeyWidget", "RichTextEdit",
     }
     painter_windows = {"ExpeditionPriceOverlay", "CurioRegionSelector", "DesecrationTierOverlay", "CategoryChoiceOverlay", "OutlinedLabel", "HighAccuracyOcrStatusOverlay", "PoetoreWindow"}
     from PySide6 import QtWidgets

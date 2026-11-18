@@ -310,12 +310,14 @@ def test_removed_scarab_pair_is_not_rendered_or_queried(qapp, tmp_path):
         panel.close()
 
 
-def test_refresh_is_nonblocking_and_manual_result_text_is_specific(qapp, tmp_path):
+def test_refresh_icon_queues_official_data_and_manual_result_text_is_specific(qapp, tmp_path):
     service = FakeService()
     panel, *_ = make_panel(qapp, tmp_path, service=service)
     try:
         previous_row = panel.row_widgets[0]
-        panel.refresh(manual=True)
+        QTest.mouseClick(panel.refresh_button, Qt.LeftButton)
+        assert len(service.queued) == 1
+        assert service.queued[0][:2] == (POE1, "League")
         assert not previous_row.isVisible()
         assert panel.status_label.text() == "最新データを確認中…"
         loading_value = panel.row_widgets[0].findChild(QLabel, "customRateValue0")
@@ -342,7 +344,10 @@ def test_official_hourly_explanation_is_exact(qapp, tmp_path):
     panel, *_ = make_panel(qapp, tmp_path)
     try:
         assert panel.title_label.toolTip() == OFFICIAL_DATA_TOOLTIP
-        assert panel.refresh_button.text() == "最新データ確認"
+        assert not panel.refresh_button.text()
+        assert not panel.refresh_button.icon().isNull()
+        assert panel.refresh_button.accessibleName() == "公式取引データを再取得"
+        assert panel.refresh_button.toolTip() == f"公式取引データを再取得\n\n{OFFICIAL_DATA_TOOLTIP}"
     finally:
         panel.stop()
         panel.close()

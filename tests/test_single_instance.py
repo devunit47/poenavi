@@ -13,6 +13,7 @@ from src.single_instance import (
     ACTIVATE_MESSAGE,
     RESTART_PID_PREFIX,
     SingleInstanceGuard,
+    _WindowsNamedMutex,
     consume_restart_pid,
     wait_for_previous_instance,
 )
@@ -310,15 +311,20 @@ def test_activation_is_deferred_until_window_is_available():
 
 
 def test_stale_endpoint_is_removed_and_listen_is_retried():
-    guard = SingleInstanceGuard(f"PoENavi-test-{uuid4().hex}")
+    server_name = f"PoENavi-test-{uuid4().hex}"
+    mutex = _WindowsNamedMutex(rf"Local\{server_name}") if sys.platform == "win32" else None
+    guard = SingleInstanceGuard(server_name, mutex=mutex)
     guard.server = MagicMock()
     guard.server.listen.side_effect = [False, True]
 
-    with (
-        patch.object(guard, "_notify_running_instance", return_value=False),
-        patch("src.single_instance.QLocalServer.removeServer") as remove,
-    ):
-        assert guard.start() is True
+    try:
+        with (
+            patch.object(guard, "_notify_running_instance", return_value=False),
+            patch("src.single_instance.QLocalServer.removeServer") as remove,
+        ):
+            assert guard.start() is True
 
-    remove.assert_called_once_with(guard.server_name)
-    assert guard.server.listen.call_count == 2
+        remove.assert_called_once_with(guard.server_name)
+        assert guard.server.listen.call_count == 2
+    finally:
+        guard.close()

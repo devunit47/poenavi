@@ -102,7 +102,7 @@ def test_update_checking_status_has_contrast_while_disabled(qapp, tmp_path, monk
     apply_application_appearance(qapp, {"appearance": appearance})
     window = build_scenario("main", tmp_path)
     settle(qapp, window)
-    monkeypatch.setattr(window._update_controller, "_checking", True)
+    monkeypatch.setattr(type(window._update_controller), "checking", True)
     window._sync_update_button_from_config()
     button = window.update_button
     assert not button.isEnabled()
@@ -551,7 +551,7 @@ def test_main_update_action_states_keep_compact_height(qapp, tmp_path, monkeypat
         ("99.99.99", False, "v99.99.99 に更新"),
     ):
         window.config["notified_update_version"] = version
-        monkeypatch.setattr(window._update_controller, "_checking", checking)
+        monkeypatch.setattr(type(window._update_controller), "checking", checking)
         window._sync_update_button_from_config()
         assert_geometry_converges(qapp, window)
         assert button.isVisible() and button.toolTip() == title

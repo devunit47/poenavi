@@ -1,5 +1,6 @@
 """両起動モードで共通利用する起動時アップデート確認。"""
 
+import logging
 import sys
 
 from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer, QUrl
@@ -16,6 +17,9 @@ from src.update.release_client import ReleaseInfo
 from src.utils.config_manager import ConfigManager
 
 
+logger = logging.getLogger(__name__)
+
+
 def shared_update_controller() -> UpdateController:
     """起動時ゲートとぽえとれで使うアプリ内共通の更新コントローラー。"""
     app = QCoreApplication.instance()
@@ -30,9 +34,14 @@ def shared_update_controller() -> UpdateController:
 def record_update_check_result(config: dict, release: ReleaseInfo | None) -> None:
     """確認に成功した時点の更新情報を保存する。"""
     version = release.version if release is not None else ""
-    if config.get("notified_update_version", "") != version:
-        config["notified_update_version"] = version
-        ConfigManager.save_config(config)
+    if config.get("notified_update_version", "") == version:
+        return
+    try:
+        ConfigManager.save_config({**config, "notified_update_version": version})
+    except Exception:
+        logger.warning("更新通知のバージョンを保存できませんでした。", exc_info=True)
+        return
+    config["notified_update_version"] = version
 
 
 def _run_update_gate(
@@ -140,13 +149,15 @@ def offer_update(release: ReleaseInfo, parent, controller: UpdateController) -> 
 
     if download_result["cancelled"]:
         return True
-    if download_result["error"]:
+    if download_result["error"] is not None:
         show_update_message(
             parent,
             QMessageBox.Warning,
             "アップデート",
             f"更新をダウンロードできませんでした。\n{download_result['error']}",
         )
+        return True
+    if download_result["archive"] is None:
         return True
 
     answer = show_update_message(

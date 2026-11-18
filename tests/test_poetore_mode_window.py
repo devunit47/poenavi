@@ -233,11 +233,12 @@ def test_manual_app_update_check_reports_result_and_allows_retry(failed, hold_up
 @pytest.mark.parametrize("source, result", [
     ("toolbar", "latest"),
     ("toolbar", "failed"),
+    ("toolbar", "timeout"),
     ("hourly", "failed"),
     ("download", "failed"),
     ("download", "available"),
 ])
-def test_app_information_joins_toolbar_or_hourly_update_check(source, result):
+def test_app_information_joins_toolbar_or_hourly_update_check(source, result, monkeypatch):
     app = QApplication.instance() or QApplication([])
     config = {"poe_version": POE1, "hotkeys": {}}
     if source == "download":
@@ -253,9 +254,13 @@ def test_app_information_joins_toolbar_or_hourly_update_check(source, result):
     original_check = UpdateController.check
 
     def check_on_event_loop(controller, manual):
+        def make_thread(target):
+            if result == "timeout":
+                return Mock()
+            return Mock(start=lambda: QTimer.singleShot(0, target))
+
         with patch.object(
-            controller, "_thread_factory",
-            lambda target: Mock(start=lambda: QTimer.singleShot(0, target)),
+            controller, "_thread_factory", make_thread,
         ):
             original_check(controller, manual)
 
@@ -265,6 +270,13 @@ def test_app_information_joins_toolbar_or_hourly_update_check(source, result):
         settings.append(dialog)
         dialog.app_info_widget.update_button.click()
         return QDialog.Rejected
+
+    watchdog = QTimer(window)
+    watchdog.setSingleShot(True)
+    watchdog.timeout.connect(lambda: window._update_controller.check_failed.emit("watchdog", False))
+    if result == "timeout":
+        monkeypatch.setattr("src.update.qt_controller.CHECK_TIMEOUT_MS", 25, raising=False)
+        watchdog.start(1000)
 
     try:
         with patch.object(UpdateController, "check", check_on_event_loop), patch.object(
@@ -289,17 +301,21 @@ def test_app_information_joins_toolbar_or_hourly_update_check(source, result):
             window.settings_button.click()
             app.processEvents()
 
-        fetch.assert_called_once_with(APP_VERSION)
+        if result == "timeout":
+            fetch.assert_not_called()
+        else:
+            fetch.assert_called_once_with(APP_VERSION)
         if result == "available":
             available.assert_called_once_with(release, False, settings[0])
             toolbar_message.assert_not_called()
             settings_message.assert_not_called()
         else:
             available.assert_not_called()
-            icon, message = (
-                (QMessageBox.Warning, "更新を確認できませんでした。\noffline")
-                if result == "failed" else (QMessageBox.Information, "最新バージョンです。")
-            )
+            if result == "latest":
+                icon, message = QMessageBox.Information, "最新バージョンです。"
+            else:
+                error = "offline" if result == "failed" else "更新確認がタイムアウトしました。"
+                icon, message = QMessageBox.Warning, f"更新を確認できませんでした。\n{error}"
             settings_message.assert_called_once_with(settings[0], icon, "アップデート", message)
             if source == "hourly":
                 toolbar_message.assert_not_called()
@@ -311,6 +327,7 @@ def test_app_information_joins_toolbar_or_hourly_update_check(source, result):
             f"v{version} に更新" if version else "アプリの更新をチェック"
         )
     finally:
+        watchdog.stop()
         window.close()
         app.processEvents()
 

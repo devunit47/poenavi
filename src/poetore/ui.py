@@ -117,6 +117,11 @@ class _TradeSignals(QObject):
     global_mouse_moved = Signal(int, int)
 
 
+_CLIPBOARD_POLL_MS = 10
+_CLIPBOARD_TIMEOUT_MS = 300
+_WINDOWS_CLIPBOARD_GRACE_MS = 30
+
+
 _INFLUENCE_CHIPS = {
     "shaper": ("Shaper", "pseudo.pseudo_has_shaper_influence", "influence:shaper"),
     "elder": ("Elder", "pseudo.pseudo_has_elder_influence", "influence:elder"),
@@ -1227,6 +1232,7 @@ class PoetoreWindow(QWidget):
         self._outside_click_listener = None
         self._passive_hotkey_display = False
         self._capture_auto_hide = False
+        self._capture_error_dialog: QMessageBox | None = None
         self._heist_unique_mod_item_key: str | None = None
         self._heist_unique_mod_stable_id: str | None = None
         self._heist_trinket_mod_item_key: str | None = None
@@ -4839,6 +4845,7 @@ class PoetoreWindow(QWidget):
         return super().event(event)
 
     def closeEvent(self, event):
+        self._dismiss_capture_error_dialog()
         self._passive_hotkey_display = False
         self._auto_hide_interactive = False
         self._stop_outside_click_listener()
@@ -5083,7 +5090,10 @@ class PoetoreWindow(QWidget):
                 self._capture_keyboard.release(key)
         if trace is not None:
             trace.mark(
-                "copy_keys_sent", clipboard_poll_ms=10, callback_timeout_ms=300,
+                "copy_keys_sent",
+                clipboard_poll_ms=_CLIPBOARD_POLL_MS,
+                callback_timeout_ms=_CLIPBOARD_TIMEOUT_MS,
+                windows_clipboard_grace_ms=_WINDOWS_CLIPBOARD_GRACE_MS,
             )
         generation = getattr(self, "_clipboard_wait_generation", 0) + 1
         self._clipboard_wait_generation = generation
@@ -5100,16 +5110,20 @@ class PoetoreWindow(QWidget):
                 trace.mark("clipboard_change_detected", wait_ms=elapsed_ms)
             callback()
             return
-        if elapsed_ms >= 300:
+        has_windows_sequence = previous_token[0] == "windows"
+        timeout_ms = _CLIPBOARD_TIMEOUT_MS
+        if has_windows_sequence:
+            timeout_ms += _WINDOWS_CLIPBOARD_GRACE_MS
+        if elapsed_ms >= timeout_ms:
             if trace is not None:
                 trace.mark("clipboard_change_timeout", wait_ms=elapsed_ms)
-            if previous_token[0] == "windows":
+            if has_windows_sequence:
                 self._handle_capture_failure()
             else:
                 # The Qt text token cannot detect copies of identical text.
                 callback()
             return
-        delay_ms = min(10, 300 - elapsed_ms)
+        delay_ms = min(_CLIPBOARD_POLL_MS, timeout_ms - elapsed_ms)
         QTimer.singleShot(
             delay_ms,
             lambda: self._wait_for_clipboard_update(
@@ -5124,6 +5138,7 @@ class PoetoreWindow(QWidget):
         ) or self._capture_hotkey
         hotkey = " + ".join(part.strip() for part in hotkey.split("+"))
         message = QMessageBox(self)
+        message.setOption(QMessageBox.Option.DontUseNativeDialog)
         message.setObjectName("poetoreCaptureError")
         message.setIcon(QMessageBox.Icon.Warning)
         message.setText(
@@ -5166,6 +5181,12 @@ class PoetoreWindow(QWidget):
                 background-color: {theme_color('control', '#000000')};
             }}
         """)
+        message.setWindowModality(Qt.NonModal)
+        # Set the focus flags after QMessageBox has configured the dialog.
+        message.setWindowFlags(
+            message.windowFlags() | Qt.WindowDoesNotAcceptFocus | Qt.WindowStaysOnTopHint
+        )
+        message.setAttribute(Qt.WA_ShowWithoutActivating)
         return message
 
     def _capture_error_notification_enabled(self) -> bool:
@@ -5174,24 +5195,26 @@ class PoetoreWindow(QWidget):
         poetore = poetore if isinstance(poetore, dict) else {}
         return bool(poetore.get("capture_error_notification_enabled", False))
 
+    def _dismiss_capture_error_dialog(self):
+        dialog = self._capture_error_dialog
+        if dialog is not None:
+            self._capture_error_dialog = None
+            dialog.close()
+            dialog.deleteLater()
+
     def _handle_capture_failure(self, parse_error: str = ""):
         self._last_capture_parse_error = parse_error
         self._pending_performance_trace = None
+        self._dismiss_capture_error_dialog()
         if self._capture_error_notification_enabled():
-            self._build_capture_error_dialog().exec()
+            self._capture_error_dialog = self._build_capture_error_dialog()
+            self._capture_error_dialog.show()
 
     def _capture_item_copy(self):
         trace = self._pending_performance_trace
         copied_text = read_item_clipboard(QApplication.clipboard())
         if trace is not None:
             trace.mark("clipboard_read", characters=len(copied_text))
-        # Invalidate an older asynchronous search before parsing the new copy.
-        # Otherwise an old result can arrive during a slower PoE2 parse and be
-        # painted briefly for the newly captured item.
-        self._search_generation += 1
-        self._parsed_item = None
-        self._parsed_item_source_text = None
-        self._parsed_item_poe_version = None
         try:
             item = self._parse_item_text(copied_text)
         except (ItemParseError, ValueError) as error:
@@ -5199,7 +5222,13 @@ class PoetoreWindow(QWidget):
                 trace.mark("clipboard_parse_failed")
             self._handle_capture_failure(str(error))
             return
+        # A successfully parsed copy starts a new search cycle.
+        self._search_generation += 1
+        self._parsed_item = None
+        self._parsed_item_source_text = None
+        self._parsed_item_poe_version = None
         self._last_capture_parse_error = ""
+        self._dismiss_capture_error_dialog()
         if trace is not None:
             trace.mark(
                 "clipboard_parsed", category=item.category, modifiers=len(item.modifiers),

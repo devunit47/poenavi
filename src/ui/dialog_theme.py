@@ -136,7 +136,8 @@ POETORE_DIALOG_THEME = DialogTheme(
 )
 
 
-def icon_button_stylesheet(*, selector="QPushButton", border_width=1, content="", text=None, disabled=None) -> str:
+def icon_button_stylesheet(*, selector="QPushButton", border_width=1, content="", text=None,
+                           disabled=None, focus_selector=":focus") -> str:
     """Paint icon-button states while keeping the existing box metrics."""
     tokens = resolve_tokens(current_appearance(), POETORE_MODE)
     gray = tokens.icon_button_gray
@@ -147,13 +148,14 @@ def icon_button_stylesheet(*, selector="QPushButton", border_width=1, content=""
             color: {text or tokens.text};
             border: {border_width}px solid transparent;
             border-radius: {radius}px;
+            outline: none;
             {content}
         }}
         {selector}:checked:enabled {{ background: rgba({gray}, {gray}, {gray}, 24); }}
         {selector}:hover:enabled {{ background: rgba({gray}, {gray}, {gray}, 30); }}
         {selector}:pressed:enabled {{ background: rgba({gray}, {gray}, {gray}, 46); }}
         {selector}:disabled {{ color: {disabled or tokens.disabled}; }}
-        {selector}:focus {{
+        {selector}{focus_selector} {{
             outline: 1px solid {tokens.accent};
             outline-radius: {radius}px;
         }}

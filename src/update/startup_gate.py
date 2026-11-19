@@ -1,8 +1,9 @@
 """両起動モードで共通利用する起動時アップデート確認。"""
 
+import logging
 import sys
 
-from PySide6.QtCore import QEventLoop, QTimer, QUrl
+from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
 
@@ -12,39 +13,80 @@ from src.ui.update_dialogs import (
     show_update_message,
 )
 from src.update.qt_controller import UpdateController
+from src.update.release_client import ReleaseInfo
 from src.utils.config_manager import ConfigManager
 
 
-def _run_update_gate(config: dict, parent=None, manual: bool = False) -> bool:
+logger = logging.getLogger(__name__)
+
+
+def shared_update_controller() -> UpdateController:
+    """起動時ゲートとぽえとれで使うアプリ内共通の更新コントローラー。"""
+    app = QCoreApplication.instance()
+    controller = getattr(app, "_shared_update_controller", None)
+    if controller is None:
+        controller = UpdateController(app)
+        if app is not None:
+            app._shared_update_controller = controller
+    return controller
+
+
+def record_update_check_result(config: dict, release: ReleaseInfo | None) -> None:
+    """確認に成功した時点の更新情報を保存する。"""
+    version = release.version if release is not None else ""
+    if config.get("notified_update_version", "") == version:
+        return
+    try:
+        ConfigManager.save_config({**config, "notified_update_version": version})
+    except Exception:
+        logger.warning("更新通知のバージョンを保存できませんでした。", exc_info=True)
+        return
+    config["notified_update_version"] = version
+
+
+def _run_update_gate(
+    config: dict, parent=None, manual: bool = False, *, controller=None,
+) -> bool:
     """更新確認を完了し、通常起動を続ける場合はTrueを返す。"""
-    controller = UpdateController(parent)
+    if controller is None:
+        controller = UpdateController(parent)
+    notified_version = config.get("notified_update_version")
     check_loop = QEventLoop()
-    result = {"release": None, "error": None}
+    result = None
 
     def on_finished(release, _manual):
-        result["release"] = release
+        nonlocal result
+        result = release, None
         check_loop.quit()
 
     def on_failed(message, _manual):
-        result["error"] = message
+        nonlocal result
+        result = None, message
         check_loop.quit()
 
     controller.check_finished.connect(on_finished)
     controller.check_failed.connect(on_failed)
-    QTimer.singleShot(0, lambda: controller.check(manual))
-    check_loop.exec()
-    controller.check_finished.disconnect(on_finished)
-    controller.check_failed.disconnect(on_failed)
+    try:
+        controller.check(manual)
+        if result is None:
+            check_loop.exec()
+    finally:
+        controller.check_finished.disconnect(on_finished)
+        controller.check_failed.disconnect(on_failed)
 
-    release = result["release"]
+    if result is None:
+        return True
+    release, error = result
+    if error is None:
+        record_update_check_result(config, release)
     if release is None:
         if manual:
-            if result["error"]:
+            if error is not None:
                 show_update_message(
                     parent,
                     QMessageBox.Warning,
                     "アップデート",
-                    f"更新を確認できませんでした。\n{result['error']}",
+                    f"更新を確認できませんでした。\n{error}",
                 )
             else:
                 show_update_message(
@@ -54,14 +96,14 @@ def _run_update_gate(config: dict, parent=None, manual: bool = False) -> bool:
                     "最新バージョンです。",
                 )
         return True
-    if (
-        not manual
-        and config.get("notified_update_version") == release.version
-    ):
+    if not manual and notified_version == release.version:
         return True
 
-    config["notified_update_version"] = release.version
-    ConfigManager.save_config(config)
+    return offer_update(release, parent, controller)
+
+
+def offer_update(release: ReleaseInfo, parent, controller: UpdateController) -> bool:
+    """確認済みリリースの更新画面を開き、通常起動を続ける場合はTrueを返す。"""
     supported = getattr(sys, "frozen", False) and sys.platform == "win32"
     dialog = UpdateAvailableDialog(release, supported, parent)
     if not dialog.exec():
@@ -94,20 +136,28 @@ def _run_update_gate(config: dict, parent=None, manual: bool = False) -> bool:
     controller.download_ready.connect(on_ready)
     controller.download_failed.connect(on_download_failed)
     controller.download_cancelled.connect(on_cancelled)
-    progress.show()
-    QTimer.singleShot(0, lambda: controller.download(release))
-    download_loop.exec()
-    progress.close()
+    try:
+        progress.show()
+        QTimer.singleShot(0, lambda: controller.download(release))
+        download_loop.exec()
+    finally:
+        controller.download_progress.disconnect(on_progress)
+        controller.download_ready.disconnect(on_ready)
+        controller.download_failed.disconnect(on_download_failed)
+        controller.download_cancelled.disconnect(on_cancelled)
+        progress.close()
 
     if download_result["cancelled"]:
         return True
-    if download_result["error"]:
+    if download_result["error"] is not None:
         show_update_message(
             parent,
             QMessageBox.Warning,
             "アップデート",
             f"更新をダウンロードできませんでした。\n{download_result['error']}",
         )
+        return True
+    if download_result["archive"] is None:
         return True
 
     answer = show_update_message(
@@ -136,9 +186,11 @@ def _run_update_gate(config: dict, parent=None, manual: bool = False) -> bool:
 
 def run_startup_update_gate(config: dict, parent=None) -> bool:
     """起動時の自動更新確認を行う。"""
-    return _run_update_gate(config, parent, manual=False)
+    return _run_update_gate(config, parent, controller=shared_update_controller())
 
 
-def run_manual_update_check(config: dict, parent=None) -> bool:
+def run_manual_update_check(
+    config: dict, parent=None, *, controller: UpdateController | None = None,
+) -> bool:
     """ユーザー操作による更新確認を行い、同じ版の再通知も許可する。"""
-    return _run_update_gate(config, parent, manual=True)
+    return _run_update_gate(config, parent, manual=True, controller=controller)

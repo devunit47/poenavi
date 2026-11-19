@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPushButton,
     QSizePolicy,
     QStyle,
     QSystemTrayIcon,
@@ -42,15 +41,19 @@ from src.poetore.exchange_rate_settings import (
     ensure_rate_pair_config,
 )
 from src.ui.app_theme import POETORE_THEME
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 from src.ui.custom_command_settings import (
     custom_command_hotkeys,
     normalized_custom_commands,
 )
-from src.ui.toolbar_icons import finish_line_icon, line_icon_canvas
+from src.ui.toolbar_button import ToolbarButton
+from src.ui.toolbar_icons import (
+    checking_icon, download_icon, finish_line_icon, hideout_notification_icon,
+    line_icon_canvas, update_check_icon,
+)
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
-from src.update.qt_controller import UpdateController
 from src.update.release_client import parse_version
+from src.update.startup_gate import record_update_check_result, shared_update_controller
 from src.utils.chat_command import send_chat_command
 from src.utils.config_manager import ConfigManager
 from src.utils.feature_support import (
@@ -207,6 +210,12 @@ class _LeagueSignals(QObject):
     failed = Signal(str)
 
 
+class _HideoutNotificationButton(ToolbarButton):
+    def nextCheckState(self):
+        # Only the controller can confirm that monitoring actually started.
+        pass
+
+
 class _PoetoreModeTitleBar(QWidget):
     """タイトルとウィンドウ操作を並べるドラッグ可能なタイトルバー。"""
 
@@ -236,30 +245,30 @@ class _PoetoreModeTitleBar(QWidget):
             layout.addWidget(label)
         layout.addStretch()
 
-        button_style = icon_button_stylesheet(
-            border_width=0, content=f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;",
-        )
+        self.update_button = ToolbarButton(border_width=0)
+        self.update_button.setObjectName("poetoreAppUpdateAction")
+        self.update_button.setIconSize(QSize(20, 20))
+        self.update_button.setAutoDefault(True)
+        layout.addWidget(self.update_button)
 
-        self.minimize_button = QPushButton("─")
+        glyph_style = f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;"
+        self.minimize_button = ToolbarButton("─", border_width=0, content=glyph_style)
         self.minimize_button.setObjectName("poetoreMinimizeButton")
-        self.minimize_button.setFocusPolicy(Qt.TabFocus)
         self.minimize_button.setFixedSize(32, 24)
-        self.minimize_button.setStyleSheet(button_style)
         self.minimize_button.setToolTip("最小化")
         self.minimize_button.setAccessibleName(self.minimize_button.toolTip())
         self.minimize_button.clicked.connect(window.minimize_to_tray)
         layout.addWidget(self.minimize_button)
 
-        self.close_button = QPushButton("×")
+        self.close_button = ToolbarButton("×", border_width=0, content=glyph_style)
         self.close_button.setObjectName("poetoreCloseButton")
-        self.close_button.setFocusPolicy(Qt.TabFocus)
         self.close_button.setFixedSize(32, 24)
-        self.close_button.setStyleSheet(button_style)
         self.close_button.setToolTip("閉じる")
         self.close_button.setAccessibleName(self.close_button.toolTip())
         self.close_button.clicked.connect(window.close)
         layout.addWidget(self.close_button)
         equalize_button_sizes((self.minimize_button, self.close_button), minimum_width=32)
+        self.update_button.setFixedSize(self.minimize_button.size())
 
     def mousePressEvent(self, event):
         if (
@@ -328,6 +337,10 @@ class PoetoreModeWindow(QMainWindow):
         self._rate_value_cache = ExchangeRateValueCache()
         self._resolved_rate_league = self._initial_currency_rate_league()
         self._league_request_running = False
+        self._update_controller = shared_update_controller()
+        self._toolbar_update_action = None
+        self._deferred_toolbar_update_message = None
+        self._update_gate_open = False
         self._league_signals = _LeagueSignals(self)
         self._league_signals.ready.connect(self._queue_rate_sync)
         self._league_signals.failed.connect(self._show_rate_error)
@@ -345,19 +358,16 @@ class PoetoreModeWindow(QMainWindow):
         self.setMinimumWidth(500)
         self.resize(558, 300)
         self._build_ui()
-        self._background_update_controller = UpdateController(self)
-        self._background_update_controller.check_finished.connect(
-            self._handle_background_update_result
-        )
-        self._background_update_controller.check_failed.connect(
-            self._handle_background_update_failure
+        self._update_connections = (
+            self._update_controller.check_started.connect(self._sync_update_button_from_config),
+            self._update_controller.check_finished.connect(self._handle_update_check_result),
+            self._update_controller.check_failed.connect(self._handle_update_check_failure),
         )
         self._update_check_timer = QTimer(self)
         self._update_check_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
         self._update_check_timer.timeout.connect(
             self._check_for_updates_in_background
         )
-        self._sync_update_button_from_config()
         self._update_check_timer.start()
         self._hideout_notification = None
         self._build_tray_icon()
@@ -494,33 +504,6 @@ class PoetoreModeWindow(QMainWindow):
             }}
             QPushButton:hover {{ background: {theme_color('control', '#25332F')}; border-color: {resolve_app_theme(POETORE_THEME).accent}; }}
             QPushButton:pressed {{ background: {theme_color('accent_soft', '#276B5A')}; }}
-            QPushButton#poetoreFocusButton[focusActive="true"] {{
-                background: {theme_color('accent_soft', '#204C40')};
-                border-color: {resolve_app_theme(POETORE_THEME).accent};
-                color: {resolve_app_theme(POETORE_THEME).text};
-            }}
-            QPushButton#poetoreFocusButton {{
-                padding: 0 {UI_METRICS.inline_gap}px;
-                font-size: {theme_font_size(11)}px;
-                text-align: center;
-            }}
-            QPushButton#poetoreUpdateButton {{
-                background: {theme_color('accent_soft', '#5B4018')};
-                color: {theme_color('warning', '#FFE7B3')};
-                border: 1px solid {theme_color('border', '#D99A35')};
-                border-radius: 7px;
-                padding: 7px 12px;
-                font-size: {theme_font_size(13)}px;
-                font-weight: bold;
-            }}
-            QPushButton#poetoreUpdateButton:hover {{
-                background: {theme_color('accent_soft', '#72521F')};
-                border-color: {theme_color('border', '#F2B84B')};
-                color: {theme_color('text', '#FFF4D8')};
-            }}
-            QPushButton#poetoreUpdateButton:pressed {{
-                background: {theme_color('accent_soft', '#473111')};
-            }}
         """)
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
@@ -528,6 +511,9 @@ class PoetoreModeWindow(QMainWindow):
         self.title_bar = _PoetoreModeTitleBar(self, self.poe_version)
         self.title_label = self.title_bar.title_label
         self.mode_label = self.title_bar.mode_label
+        self.update_button = self.title_bar.update_button
+        self.update_button.clicked.connect(self._run_toolbar_update_action)
+        self._sync_update_button_from_config()
         root.addWidget(self.title_bar)
 
         body = QWidget()
@@ -543,15 +529,28 @@ class PoetoreModeWindow(QMainWindow):
         header = QHBoxLayout()
         header.setSpacing(UI_METRICS.inline_gap)
 
-        self.focus_button = QPushButton("隠れ家滞在通知\nOFF")
+        self.focus_button = _HideoutNotificationButton()
         self.focus_button.setObjectName("poetoreFocusButton")
-        self.focus_button.setFocusPolicy(Qt.NoFocus)
-        self.focus_button.setToolTip("隠れ家滞在通知の集中モードを切り替える")
-        self.focus_button.setMinimumWidth(108)
-        self.focus_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.focus_button.setCheckable(True)
+        self.focus_button.setIconSize(QSize(24, 24))
+        self.focus_button.setStyleSheet(self.focus_button.styleSheet() + f"""
+            QPushButton[notificationFlash="true"]:enabled {{
+                background: {resolve_app_theme(POETORE_THEME).accent};
+            }}
+        """)
+        self._update_focus_button_state(False)
         self.focus_button.clicked.connect(self.toggle_focus_mode)
         header.addWidget(self.focus_button)
-        header.addStretch()
+        self.focus_status = QLabel()
+        self.focus_status.setStyleSheet(
+            f"color: {resolve_app_theme(POETORE_THEME).muted_text}; font-size: {theme_font_size(11)}px;"
+        )
+        self.focus_status.hide()
+        header.addWidget(self.focus_status)
+        self._focus_flash_timer = QTimer(self)
+        self._focus_flash_timer.setSingleShot(True)
+        self._focus_flash_timer.setInterval(1800)
+        self._focus_flash_timer.timeout.connect(lambda: self._set_focus_button_flash(False))
 
         self.memo_button = self._header_button("", "共通メモを開く")
         self.memo_button.setIcon(_memo_icon())
@@ -619,16 +618,21 @@ class PoetoreModeWindow(QMainWindow):
         )
         for button in self.header_action_buttons:
             header.addWidget(button)
+        header.addStretch()
         toolbar.addLayout(header)
 
-        self.focus_message_label = QLabel("")
-        self.focus_message_label.setObjectName("focusMessageLabel")
-        self.focus_message_label.setStyleSheet(
+        self.toolbar_message_label = QLabel("")
+        self.toolbar_message_label.setObjectName("toolbarMessageLabel")
+        self.toolbar_message_label.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(12)}px;"
         )
-        self.focus_message_label.setWordWrap(True)
-        self.focus_message_label.hide()
-        toolbar.addWidget(self.focus_message_label)
+        self.toolbar_message_label.setWordWrap(True)
+        self.toolbar_message_label.hide()
+        toolbar.addWidget(self.toolbar_message_label)
+        self._toolbar_message_timer = QTimer(self)
+        self._toolbar_message_timer.setSingleShot(True)
+        self._toolbar_message_timer.setInterval(6000)
+        self._toolbar_message_timer.timeout.connect(self._hide_toolbar_message)
         body_layout.addLayout(toolbar)
 
         from src.poetore.official_exchange import (
@@ -647,6 +651,7 @@ class PoetoreModeWindow(QMainWindow):
             on_manage=self.open_exchange_rate_management,
             on_rows_changed=self._queue_rate_panel_height,
             refresh_callback=self.refresh_currency_rate,
+            actions_layout=header,
         )
         self.rate_panel.setObjectName("poetoreRatePanel")
         self._rate_scroll = self.rate_panel.scroll_area
@@ -656,31 +661,16 @@ class PoetoreModeWindow(QMainWindow):
         for widget in (self, central, body, self._rate_scroll,
                        self._rate_scroll.viewport(), self.rate_panel, self.rate_panel.card):
             widget.setProperty("themeLayoutManaged", True)
-        self.rate_status = self.rate_panel.status_label
         self.rate_refresh_button = self.rate_panel.refresh_button
         self.divine_rate_value = self.rate_panel.findChild(QLabel, "customRateValue0")
 
-        footer = QVBoxLayout()
-        footer.setSpacing(UI_METRICS.control_gap)
         self.capture_warning = QLabel("価格チェックのホットキーが設定されていません。")
         self.capture_warning.setObjectName("poetoreCaptureWarning")
         self.capture_warning.setWordWrap(True)
         self.capture_warning.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).muted_text}; font-size: {theme_font_size(12)}px;"
         )
-        footer.addWidget(self.capture_warning)
-
-        self.update_button = QPushButton()
-        self.update_button.setObjectName("poetoreUpdateButton")
-        self.update_button.setFocusPolicy(Qt.NoFocus)
-        self.update_button.setMinimumHeight(40)
-        self.update_button.setToolTip(
-            "新しいバージョンの内容を確認してアップデートする"
-        )
-        self.update_button.clicked.connect(self._check_for_updates)
-        self.update_button.hide()
-        footer.addWidget(self.update_button)
-        body_layout.addLayout(footer)
+        body_layout.addWidget(self.capture_warning)
         root.addWidget(body, 1)
         self.setCentralWidget(central)
         equalize_button_sizes(
@@ -688,8 +678,14 @@ class PoetoreModeWindow(QMainWindow):
             minimum_height=UI_METRICS.toolbar_size,
             equal_width=False,
         )
-        for button in self.header_action_buttons:
+        for button in (self.focus_button, *self.header_action_buttons):
             button.setFixedWidth(button.height())
+        toolbar_tab_order = (
+            self.title_bar.close_button, self.focus_button,
+            *self.header_action_buttons, self.rate_panel.manage_button,
+        )
+        for first, second in zip(toolbar_tab_order, toolbar_tab_order[1:]):
+            QWidget.setTabOrder(first, second)
         self._update_capture_hotkey_warning()
 
     def showEvent(self, event):
@@ -748,12 +744,10 @@ class PoetoreModeWindow(QMainWindow):
         self.move(available.right() - self.width() + 1, available.top())
 
     def _header_button(self, text, tooltip):
-        button = QPushButton(text)
-        button.setFocusPolicy(Qt.TabFocus)
+        button = ToolbarButton(text)
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
         button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
-        button.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         return button
 
     def toggle_focus_mode(self):
@@ -769,7 +763,7 @@ class PoetoreModeWindow(QMainWindow):
         controller = HideoutNotificationController(
             self.config, self.poe_version, ConfigManager.save_config, self
         )
-        controller.display_changed.connect(self.focus_button.setText)
+        controller.display_changed.connect(self._update_focus_status)
         controller.focus_changed.connect(self._update_focus_button_state)
         controller.flash_requested.connect(self._flash_focus_button)
         controller.message_requested.connect(self._handle_focus_message)
@@ -777,15 +771,26 @@ class PoetoreModeWindow(QMainWindow):
         return controller
 
     def _update_focus_button_state(self, active):
-        self.focus_button.setProperty("focusActive", bool(active))
-        self.focus_button.style().unpolish(self.focus_button)
-        self.focus_button.style().polish(self.focus_button)
+        self.focus_button.setChecked(active)
+        name = f"隠れ家滞在通知：{'ON' if active else 'OFF'}"
+        self.focus_button.setAccessibleName(name)
+        self.focus_button.setToolTip(f"{name}（クリックで切替）")
+        self._set_focus_button_flash(bool(self.focus_button.property("notificationFlash")))
+
+    def _update_focus_status(self, text):
+        _, _, status = text.partition("\n")
+        self.focus_status.setText(status)
+        self.focus_status.setVisible(status not in ("", "ON", "OFF"))
+
+    def _set_focus_button_flash(self, flashing):
+        theme = resolve_app_theme(POETORE_THEME)
+        self.focus_button.set_style_property("notificationFlash", flashing)
+        ink = theme.background if flashing else theme.muted_text
+        self.focus_button.setIcon(hideout_notification_icon(ink, self.focus_button.isChecked()))
 
     def _flash_focus_button(self):
-        self.focus_button.setStyleSheet(
-            f"background: {resolve_app_theme(POETORE_THEME).accent}; color: {theme_color('background', '#101614')};"
-        )
-        QTimer.singleShot(1800, lambda: self.focus_button.setStyleSheet(""))
+        self._set_focus_button_flash(True)
+        self._focus_flash_timer.start()
 
     def _handle_focus_message(self, kind, text):
         if kind == "log_missing":
@@ -802,13 +807,16 @@ class PoetoreModeWindow(QMainWindow):
         if kind == "poe_not_running":
             QMessageBox.information(self, "隠れ家滞在通知", text)
             return
-        self.focus_message_label.setText(text)
-        self.focus_message_label.show()
-        self._apply_rate_panel_height()
-        QTimer.singleShot(6000, self, self._hide_focus_message)
+        self._show_toolbar_message(text)
 
-    def _hide_focus_message(self):
-        self.focus_message_label.hide()
+    def _show_toolbar_message(self, text):
+        self.toolbar_message_label.setText(text)
+        self.toolbar_message_label.show()
+        self._apply_rate_panel_height()
+        self._toolbar_message_timer.start()
+
+    def _hide_toolbar_message(self):
+        self.toolbar_message_label.hide()
         self._apply_rate_panel_height()
 
     def _start_hotkeys(self):
@@ -947,8 +955,7 @@ class PoetoreModeWindow(QMainWindow):
         if self._league_request_running:
             return
         self._league_request_running = True
-        if hasattr(self, "rate_status"):
-            self.rate_status.setText("最新データを確認中…")
+        self.rate_panel.begin_refresh()
 
         def run():
             try:
@@ -963,13 +970,11 @@ class PoetoreModeWindow(QMainWindow):
     def _queue_rate_sync(self, league, manual):
         self._league_request_running = False
         self._resolved_rate_league = league
-        self.rate_panel.league_changed()
         self.rate_panel.refresh(manual=manual)
 
-    def _show_rate_error(self, message):
+    def _show_rate_error(self, _message):
         self._league_request_running = False
-        self.rate_panel.render_rows()
-        self.rate_status.setText("公式データを取得できませんでした")
+        self.rate_panel.refresh_failed()
 
     def open_exchange_rate_management(self):
         from src.ui.exchange_rate_management_dialog import (
@@ -994,7 +999,7 @@ class PoetoreModeWindow(QMainWindow):
         )
 
     def _queue_rate_panel_height(self):
-        # Qt invalidates the layout for new rows and footer visibility via posted events.
+        # Qt invalidates the layout for new rows via posted events.
         QTimer.singleShot(0, self, self._apply_rate_panel_height)
 
     def _apply_rate_panel_height(self, *, keep_on_screen=False):
@@ -1006,7 +1011,7 @@ class PoetoreModeWindow(QMainWindow):
         body_insets = 2 * UI_METRICS.page_margin
         rate_minimum = rate_layout.totalMinimumSize().width() + body_insets
         chrome_minimum = max(self.minimumWidth(), root.minimumSize().width())
-        preferred = max(self.width(), rate_minimum, self.rate_panel.preferred_card_width() + body_insets)
+        preferred = max(self.width(), rate_minimum, rate_layout.totalSizeHint().width() + body_insets)
         screen = self._screen_watcher.screen or self.screen()
         available = screen.availableGeometry() if screen is not None else None
         width_limit = self.maximumWidth()
@@ -1049,8 +1054,8 @@ class PoetoreModeWindow(QMainWindow):
         controls = [
             QRect(button.mapToGlobal(button.rect().topLeft()), button.size())
             for button in (
-                self.title_bar.minimize_button, self.title_bar.close_button,
-                self.rate_panel.manage_button, self.update_button,
+                self.update_button, self.title_bar.minimize_button, self.title_bar.close_button,
+                self.rate_panel.manage_button, self.rate_refresh_button,
             )
             if button.isVisible()
         ]
@@ -1187,10 +1192,10 @@ class PoetoreModeWindow(QMainWindow):
         return self._ensure_heist_curio_controller().request_scan()
 
     def _show_heist_curio_status(self, message):
-        self.rate_status.setText(message)
+        self._show_toolbar_message(message)
 
     def _show_heist_curio_error(self, message):
-        self.rate_status.setText(f"ハイスト報酬読取失敗：{message}")
+        self._show_toolbar_message(f"ハイスト報酬読取失敗：{message}")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.showMessage(
                 "ハイスト報酬価格チェック", message, QSystemTrayIcon.Warning, 5000,
@@ -1201,7 +1206,7 @@ class PoetoreModeWindow(QMainWindow):
 
         window = show_poetore_window(self, activate=False)
         window.show_heist_curio_match(match, placement)
-        self.rate_status.setText(f"ハイスト報酬：{match.item.name_ja}")
+        self._show_toolbar_message(f"ハイスト報酬：{match.item.name_ja}")
 
     def _ensure_desecration_tier_controller(self):
         if self._desecration_tier_controller is None:
@@ -1233,18 +1238,18 @@ class PoetoreModeWindow(QMainWindow):
         return self._ensure_desecration_tier_controller().request_scan()
 
     def _show_desecration_status(self, message):
-        self.rate_status.setText(message)
+        self._show_toolbar_message(message)
 
     def _show_desecration_error(self, message):
-        self.rate_status.setText(f"冒涜Mod読取失敗：{message}")
+        self._show_toolbar_message(f"冒涜Mod読取失敗：{message}")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.showMessage("アビス冒涜Modティア", message, QSystemTrayIcon.Warning, 5000)
 
     def _show_expedition_status(self, message):
-        self.rate_status.setText(message)
+        self._show_toolbar_message(message)
 
     def _show_expedition_error(self, message):
-        self.rate_status.setText(f"報酬読取失敗：{message}")
+        self._show_toolbar_message(f"報酬読取失敗：{message}")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.showMessage("エクスペディション報酬価格", message, QSystemTrayIcon.Warning, 5000)
 
@@ -1587,47 +1592,110 @@ class PoetoreModeWindow(QMainWindow):
         self.refresh_currency_rate()
 
     def _check_for_updates(self, parent=None):
-        """アプリ情報タブから、通知済みバージョンも含めて手動確認する。"""
+        """アプリ情報タブから更新確認を行い、結果に応じた画面を開く。"""
         from src.update.startup_gate import run_manual_update_check
 
+        self._run_update_flow(lambda: run_manual_update_check(
+            self.config, parent or self, controller=self._update_controller,
+        ))
+
+    def _run_update_flow(self, run_update):
+        if self._update_gate_open:
+            return
         self._update_check_timer.stop()
-        self.config = ConfigManager.load_config()
-        if not run_manual_update_check(self.config, parent or self):
+        self._update_gate_open = True
+        self._sync_update_button_from_config()
+        try:
+            continue_running = run_update()
+        finally:
+            self._update_gate_open = False
+            self._sync_update_button_from_config()
+        if not continue_running:
             QApplication.instance().quit()
             return
-        self._sync_update_button_from_config()
         self._update_check_timer.start()
+        if self._deferred_toolbar_update_message is not None:
+            icon, message = self._deferred_toolbar_update_message
+            self._deferred_toolbar_update_message = None
+            self._show_toolbar_update_message(icon, message)
 
-    def _sync_update_button_from_config(self):
+    def _available_update_version(self):
         version = str(self.config.get("notified_update_version", "")).strip()
         try:
-            is_newer = parse_version(version) > parse_version(APP_VERSION)
+            if parse_version(version) > parse_version(APP_VERSION):
+                return version.removeprefix("v")
         except ValueError:
-            is_newer = False
-        if not is_newer:
-            self.update_button.hide()
+            pass
+        return ""
+
+    def _sync_update_button_from_config(self):
+        theme = resolve_app_theme(POETORE_THEME)
+        version = self._available_update_version()
+        checking = self._update_controller.checking or self._update_gate_open
+        if checking:
+            tooltip = "アプリの更新を確認中…"
+            icon = checking_icon(theme.muted_text)
+        elif version:
+            tooltip = f"v{version} に更新"
+            icon = download_icon(theme.accent)
         else:
-            self.update_button.setText(
-                f"↑ v{version} アップデートあり　更新する"
+            tooltip = "アプリの更新をチェック"
+            icon = update_check_icon(theme.muted_text)
+        self.update_button.setIcon(icon)
+        self.update_button.setToolTip(tooltip)
+        self.update_button.setAccessibleName(tooltip)
+        self.update_button.setEnabled(not checking)
+
+    def _run_toolbar_update_action(self):
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual):
+        if self._update_controller.checking or self._update_gate_open:
+            return
+        if manual:
+            self._toolbar_update_action = (
+                "download" if self._available_update_version() else "check"
             )
-            self.update_button.show()
-        self._queue_rate_panel_height()
+        self._update_controller.check(manual)
 
     def _check_for_updates_in_background(self):
         """常駐中はダイアログを出さずに最新版だけ確認する。"""
-        self._background_update_controller.check(False)
+        self._start_update_check(manual=False)
 
-    def _handle_background_update_result(self, release, _manual):
-        if release is None:
-            return
-        if self.config.get("notified_update_version") != release.version:
-            self.config["notified_update_version"] = release.version
-            ConfigManager.save_config(self.config)
+    def _handle_update_check_result(self, release, _manual):
+        record_update_check_result(self.config, release)
         self._sync_update_button_from_config()
+        if release is None:
+            self._notify_toolbar_update_check(QMessageBox.Information, "最新バージョンです。")
+            return
 
-    def _handle_background_update_failure(self, _message, _manual):
-        """一時的な通信失敗は通知せず、次の定期確認へ委ねる。"""
-        return
+        action = self._toolbar_update_action
+        self._toolbar_update_action = None
+        if action == "download" and not self._update_gate_open:
+            from src.update.startup_gate import offer_update
+
+            self._run_update_flow(lambda: offer_update(release, self, self._update_controller))
+
+    def _handle_update_check_failure(self, message, _manual):
+        self._sync_update_button_from_config()
+        self._notify_toolbar_update_check(
+            QMessageBox.Warning, f"更新を確認できませんでした。\n{message}",
+        )
+
+    def _notify_toolbar_update_check(self, icon, message):
+        if self._toolbar_update_action is None:
+            return
+        self._toolbar_update_action = None
+        if self._update_gate_open:
+            # アプリ情報の確認結果を閉じた後にツールバーの結果を表示する。
+            self._deferred_toolbar_update_message = icon, message
+        else:
+            self._show_toolbar_update_message(icon, message)
+
+    def _show_toolbar_update_message(self, icon, message):
+        from src.ui.update_dialogs import show_update_message
+
+        show_update_message(self, icon, "アップデート", message)
 
     def _ensure_cheat_sheet_overlay(self):
         from src.ui.cheat_sheets import CheatSheetOverlay
@@ -1672,6 +1740,9 @@ class PoetoreModeWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._update_check_timer.stop()
+        for connection in self._update_connections:
+            QObject.disconnect(connection)
+        self._update_connections = ()
         self.tray_icon.hide()
         if self._hideout_notification is not None:
             self._hideout_notification.close()

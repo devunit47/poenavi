@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from http.client import IncompleteRead
 import json
 import os
 import re
+from time import monotonic
 from urllib.parse import quote
 import urllib.request
 
@@ -10,6 +12,9 @@ RELEASES_API = "https://api.github.com/repos/buri34/poenavi/releases/latest"
 RELEASE_BY_TAG_API = "https://api.github.com/repos/buri34/poenavi/releases/tags/{tag}"
 TEST_RELEASE_TAG_ENV = "POENAVI_UPDATE_TEST_TAG"
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+SOCKET_TIMEOUT_SECONDS = 10
+RELEASE_CHECK_TIMEOUT_SECONDS = 30
+CHECK_TIMEOUT_MESSAGE = "更新確認がタイムアウトしました。"
 
 
 @dataclass(frozen=True)
@@ -85,8 +90,21 @@ def fetch_latest_release(
         release_api,
         headers={"User-Agent": "PoENavi-Updater"},
     )
-    with opener(request, timeout=10) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    deadline = monotonic() + RELEASE_CHECK_TIMEOUT_SECONDS
+    body = bytearray()
+    with opener(request, timeout=SOCKET_TIMEOUT_SECONDS) as response:
+        while monotonic() < deadline:
+            # read1 lets us check the elapsed time between reads of a slow response.
+            chunk = response.read1(64 * 1024)
+            if not chunk:
+                break
+            body.extend(chunk)
+        if monotonic() >= deadline:
+            raise TimeoutError(CHECK_TIMEOUT_MESSAGE)
+        remaining = getattr(response, "length", None)
+        if remaining:
+            raise IncompleteRead(bytes(body), remaining)
+    payload = json.loads(body.decode("utf-8"))
     return parse_latest_release(
         payload,
         current_version,

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QLabel
 from tests.test_theme_geometry_audit import maximum_font, geometry_failures
 
 
-def inspect_paint(widget, expected_text=()):
+def inspect_paint(widget, expected_text=(), *, centered=False, text_bounds=None):
     """Record real paint commands on an image of the widget's actual size.
 
     This measures what is painted, independently of implementation helpers.
@@ -34,10 +34,18 @@ def inspect_paint(widget, expected_text=()):
             metrics = self.fontMetrics()
             bounds = metrics.boundingRect(rect.toRect(), int(flags), text)
             commands.append(text)
+            if text_bounds is not None:
+                text_bounds.append(bounds)
             if bounds.width() > rect.width() + .01 or bounds.height() > rect.height() + .01:
                 failures.append(f"{type(widget).__name__} {text!r}: text {bounds.size()}, drawing rect {rect.size()}")
             if not QRectF(widget.rect()).contains(rect):
                 failures.append(f"{type(widget).__name__} {text!r}: drawing rect outside canvas: {rect}")
+            if centered:
+                column = widget.contentsRect()
+                left = bounds.left() - column.left()
+                right = column.right() - bounds.right()
+                if abs(left - right) > 1:
+                    failures.append(f"{text!r}: unequal horizontal margins ({left}, {right})")
             return super().drawText(rect, flags, text)
 
         def _inspect_path(self, path):
@@ -61,7 +69,8 @@ def inspect_paint(widget, expected_text=()):
             widget.paintEvent(None)
         finally:
             for painter in painters:
-                painter.end()
+                if painter.isActive():
+                    painter.end()
     assert commands, type(widget).__name__
     assert set(expected_text) <= set(commands), (expected_text, commands)
     return failures
@@ -126,21 +135,21 @@ def test_region_selector_painted_text_fits(qapp):
 
 
 def inspect_rate_labels(qapp):
-    from src.ui.custom_exchange_rate_panel import DecimalAlignedRateLabel, ElidedLabel
+    from src.ui.custom_exchange_rate_panel import ElidedLabel, RateValueLabel
     failures = []
-    rate = DecimalAlignedRateLabel("999,999.000001")
-    integer, fraction = rate.measured_columns()
-    rate.set_column_widths(integer, fraction)
-    rate.resize(rate.centered_width(), rate.sizeHint().height())
-    failures.extend(inspect_paint(rate, ("1", "＝", "999,999", ".000001")))
-    narrow_rate = DecimalAlignedRateLabel("100,000,000.1")
-    narrow_rate.set_column_widths(*narrow_rate.measured_columns())
+    rate = RateValueLabel("999,999.000001")
+    rate.resize(rate.sizeHint())
+    failures.extend(inspect_paint(rate, (rate.text(),), centered=True))
+    narrow_rate = RateValueLabel("100,000,000.1")
     # An integer that fits on its own still needs room for a truncation marker.
-    for budget in ("100,000,…", "100,000,000"):
-        width = narrow_rate.fontMetrics().horizontalAdvance(budget)
-        narrow_rate.resize(narrow_rate._centered_width(width), narrow_rate.sizeHint().height())
-        assert narrow_rate._column_rects()[3].width() == 0
-        failures.extend(inspect_paint(narrow_rate, ("1", "＝", "100,000,…")))
+    for budget, expected in (
+        ("1 ＝ 100,…", "1 ＝ 100,…"),
+        ("1 ＝ 100,000,000", "1 ＝ 100,000,…"),
+        ("1 ＝ …", "1 ＝ …"),
+    ):
+        width = narrow_rate.fontMetrics().size(Qt.TextSingleLine, budget).width()
+        narrow_rate.resize(width, narrow_rate.sizeHint().height())
+        failures.extend(inspect_paint(narrow_rate, (expected,), centered=True))
     label = ElidedLabel("非常に長いカレンシーの名称を省略表示")
     label.resize(200, label.sizeHint().height())
     failures.extend(inspect_paint(label))
@@ -151,16 +160,15 @@ def test_rate_label_painted_text_fits(qapp):
     assert not (failures := inspect_rate_labels(qapp)), "\n".join(failures)
 
 
-def test_subunit_rate_marks_truncation_when_no_significant_digit_fits(qapp):
-    from src.ui.custom_exchange_rate_panel import DecimalAlignedRateLabel
+@pytest.mark.parametrize("shortened", ["0.00001…", "0.0…", "0…"])
+def test_subunit_rate_marks_fraction_truncation(qapp, shortened):
+    from src.ui.custom_exchange_rate_panel import RateValueLabel
 
-    rate = DecimalAlignedRateLabel("0.00001234")
-    integer_width, full_fraction_width = rate.measured_columns()
-    rate.set_column_widths(integer_width, full_fraction_width)
-    rate.setMinimumWidth(0)
-    fraction_width = rate.fontMetrics().size(Qt.TextSingleLine, ".0…").width()
-    rate.resize(rate._centered_width(integer_width + fraction_width), rate.sizeHint().height())
-    assert not inspect_paint(rate, ("1", "＝", "0", ".0…"))
+    rate = RateValueLabel("0.00001234")
+    expected = f"1 ＝ {shortened}"
+    width = rate.fontMetrics().size(Qt.TextSingleLine, expected).width()
+    rate.resize(width, rate.sizeHint().height())
+    assert not inspect_paint(rate, (expected,), centered=True)
 
 
 def inspect_expedition_price(qapp):
@@ -242,7 +250,6 @@ PAINTERS = {
     "ExpeditionRegionSelector": "inspect_region_selectors",
     "CurioRegionSelector": "inspect_region_selectors",
     "RegionPreview": "inspect_region_selectors",
-    "DecimalAlignedRateLabel": "inspect_rate_labels",
     "ElidedLabel": "inspect_rate_labels (intentional elision)",
     "_RateDeleteButton": "No painter text: delegates to QPushButton on hover or focus.",
     "ExpeditionPriceOverlay": "inspect_expedition_price",

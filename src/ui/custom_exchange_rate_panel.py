@@ -234,6 +234,7 @@ class CustomExchangeRatePanel(QWidget):
         on_manage: Callable[[], None],
         on_rows_changed: Callable[[], None] | None = None,
         refresh_callback: Callable[..., None] | None = None,
+        actions_layout: QHBoxLayout | None = None,
     ):
         super().__init__(parent)
         self.poe_version = poe_version
@@ -256,34 +257,40 @@ class CustomExchangeRatePanel(QWidget):
         self._manual_check = False
         self._active_check: object | None = None
         self._last_check: SyncCheckResult | None = None
-        self._build_ui()
+        self._build_ui(actions_layout)
         self.render_rows()
         self.check_timer = QTimer(self)
         self.check_timer.setInterval(RATE_CHECK_INTERVAL_MSEC)
         self.check_timer.timeout.connect(self.refresh_callback)
         self.check_timer.start()
 
-    def _build_ui(self) -> None:
+    def _build_ui(self, actions_layout: QHBoxLayout | None) -> None:
         theme = resolve_app_theme(POETORE_THEME)
-        self.setStyleSheet(f"""
+        tooltip_style = f"""
             QToolTip {{
                 color: {theme.text};
                 background-color: {theme.background};
                 border: 1px solid {theme_color('border', '#66706C')};
                 padding: 5px;
             }}
-        """)
+        """
+        self.setStyleSheet(tooltip_style)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(UI_METRICS.control_gap)
-        title_row = QHBoxLayout()
-        title_row.setSpacing(UI_METRICS.inline_gap)
         self.title_label = QLabel("カレンシー交換レート")
         self.title_label.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(15)}px; font-weight: bold;"
         )
-        title_row.addWidget(self.title_label)
-        title_row.addStretch()
+        if actions_layout is None:
+            root.setSpacing(UI_METRICS.control_gap)
+            actions_layout = QHBoxLayout()
+            actions_layout.setSpacing(UI_METRICS.inline_gap)
+            actions_layout.addWidget(self.title_label)
+            actions_layout.addStretch()
+            root.addLayout(actions_layout)
+        else:
+            root.setSpacing(UI_METRICS.inline_gap)
+            root.addWidget(self.title_label)
         self.manage_button = ToolbarButton()
         self.manage_button.setObjectName("customRateManageButton")
         self.manage_button.setIcon(list_add_icon(theme.muted_text))
@@ -292,7 +299,6 @@ class CustomExchangeRatePanel(QWidget):
         self.manage_button.setAccessibleName("交換レートの表示を管理")
         self.manage_button.setToolTip("交換レートの表示を管理（追加・削除・並べ替え）")
         self.manage_button.clicked.connect(self.on_manage)
-        title_row.addWidget(self.manage_button)
 
         self.refresh_button = ToolbarButton()
         self.refresh_button.setIcon(reload_icon(theme.muted_text))
@@ -302,8 +308,10 @@ class CustomExchangeRatePanel(QWidget):
         self.refresh_button.clicked.connect(
             lambda: self.refresh_callback(manual=True)
         )
-        title_row.addWidget(self.refresh_button)
-        root.addLayout(title_row)
+        for button in (self.manage_button, self.refresh_button):
+            # The toolbar may be outside the panel's tooltip stylesheet.
+            button.setStyleSheet(button.styleSheet() + tooltip_style)
+            actions_layout.addWidget(button)
 
         content = QWidget()
         content.setProperty("themeLayoutManaged", True)

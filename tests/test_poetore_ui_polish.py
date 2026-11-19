@@ -47,6 +47,70 @@ def isolated_ui(qapp):
     assert screens
 
 
+@pytest.mark.parametrize("version", ["poe1", "poe2"])
+@pytest.mark.parametrize("width", [500, 558])
+def test_main_toolbar_groups_and_tab_order(qapp, tmp_path, version, width):
+    apply_application_appearance(qapp, {})
+    window = build_scenario("main", tmp_path, version)
+    settle(qapp, window)
+    window.resize(width, window.height())
+    settle(qapp, window)
+
+    version_buttons = (
+        (window.heist_settings_button, window.map_mods_button)
+        if version == "poe1"
+        else (window.expedition_settings_button, window.desecration_settings_button)
+    )
+    left_buttons = (
+        window.focus_button, window.memo_button, *version_buttons,
+        window.cheat_sheets_button, window.settings_button,
+    )
+    panel = window.rate_panel
+    assert window.rate_refresh_button is panel.refresh_button
+    right_buttons = (panel.manage_button, panel.refresh_button)
+    buttons = (*left_buttons, *right_buttons)
+    assert tuple(button for button in window.header_action_buttons if button.isVisible()) == left_buttons[1:]
+    assert window.width() == width
+    assert all(button.isVisible() for button in buttons)
+
+    rects = [QRect(button.mapTo(window, QPoint()), button.size()) for button in buttons]
+    assert all(window.rect().contains(rect) for rect in rects)
+    assert len({rect.center().y() for rect in rects}) == 1
+    assert rects[0].left() == UI_METRICS.page_margin
+    assert window.width() - rects[-1].right() - 1 == UI_METRICS.page_margin
+    left_rects = rects[:-2]
+    manage_rect, refresh_rect = rects[-2:]
+    for first, second in zip(left_rects, left_rects[1:]):
+        assert second.left() - first.right() - 1 == UI_METRICS.inline_gap
+    assert refresh_rect.left() - manage_rect.right() - 1 == UI_METRICS.inline_gap
+    assert manage_rect.left() - left_rects[-1].right() - 1 > UI_METRICS.inline_gap
+
+    heading = QRect(panel.title_label.mapTo(window, QPoint()), panel.title_label.size())
+    card_top = panel.card.mapTo(window, QPoint()).y()
+    assert heading.top() - rects[0].bottom() - 1 == UI_METRICS.panel_padding
+    assert card_top - heading.bottom() - 1 == UI_METRICS.inline_gap
+
+    def assert_tab_order(row_count):
+        assert len(panel.row_widgets) == row_count
+        deletes = [
+            row.findChild(QPushButton, f"customRateDelete{index}")
+            for index, row in enumerate(panel.row_widgets)
+        ]
+        tab_order = (window.title_bar.close_button, *buttons, *deletes)
+        tab_order[0].setFocus(Qt.TabFocusReason)
+        for current, following in zip(tab_order, tab_order[1:]):
+            assert current.hasFocus()
+            QTest.keyClick(current, Qt.Key_Tab)
+            assert following.hasFocus(), following.accessibleName()
+
+    assert_tab_order(1)
+    ids = list(panel.catalog)
+    window._rate_pair_store.add(version, ids[-2], ids[-1])
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert_tab_order(2)
+
+
 def assert_peers(buttons, *, width=True):
     assert len(buttons) >= 2
     assert len({button.height() for button in buttons}) == 1, [(b.text(), b.size()) for b in buttons]
@@ -492,14 +556,16 @@ def test_main_same_screen_relayout_recovers_offscreen_controls(qapp, tmp_path, m
     window.config["window_locked"] = locked
     window._sync_update_button_from_config()
     settle(qapp, window)
-    position = QPoint(0, 560)
+    manage = window.rate_panel.manage_button
+    position = QPoint(0, available.bottom() + 1 - manage.mapTo(window, QPoint()).y())
     window.move(position)
     controls = (
         window.title_bar.close_button, window.title_bar.minimize_button,
         window.rate_panel.manage_button, window.rate_refresh_button, window.update_button,
     )
     assert all(button.isVisible() for button in controls)
-    manage = window.rate_panel.manage_button
+    close = window.title_bar.close_button
+    assert available.intersects(QRect(close.mapToGlobal(QPoint()), close.size()))
     assert not available.intersects(QRect(manage.mapToGlobal(QPoint()), manage.size()))
 
     if action == "tray":

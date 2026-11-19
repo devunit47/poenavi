@@ -547,7 +547,6 @@ class PoetoreModeWindow(QMainWindow):
         )
         self.focus_status.hide()
         header.addWidget(self.focus_status)
-        header.addStretch()
         self._focus_flash_timer = QTimer(self)
         self._focus_flash_timer.setSingleShot(True)
         self._focus_flash_timer.setInterval(1800)
@@ -619,6 +618,7 @@ class PoetoreModeWindow(QMainWindow):
         )
         for button in self.header_action_buttons:
             header.addWidget(button)
+        header.addStretch()
         toolbar.addLayout(header)
 
         self.toolbar_message_label = QLabel("")
@@ -651,6 +651,7 @@ class PoetoreModeWindow(QMainWindow):
             on_manage=self.open_exchange_rate_management,
             on_rows_changed=self._queue_rate_panel_height,
             refresh_callback=self.refresh_currency_rate,
+            actions_layout=header,
         )
         self.rate_panel.setObjectName("poetoreRatePanel")
         self._rate_scroll = self.rate_panel.scroll_area
@@ -679,6 +680,12 @@ class PoetoreModeWindow(QMainWindow):
         )
         for button in (self.focus_button, *self.header_action_buttons):
             button.setFixedWidth(button.height())
+        toolbar_tab_order = (
+            self.title_bar.close_button, self.focus_button,
+            *self.header_action_buttons, self.rate_panel.manage_button,
+        )
+        for first, second in zip(toolbar_tab_order, toolbar_tab_order[1:]):
+            QWidget.setTabOrder(first, second)
         self._update_capture_hotkey_warning()
 
     def showEvent(self, event):
@@ -1047,8 +1054,8 @@ class PoetoreModeWindow(QMainWindow):
         controls = [
             QRect(button.mapToGlobal(button.rect().topLeft()), button.size())
             for button in (
-                self.title_bar.minimize_button, self.title_bar.close_button,
-                self.rate_panel.manage_button, self.rate_refresh_button, self.update_button,
+                self.update_button, self.title_bar.minimize_button, self.title_bar.close_button,
+                self.rate_panel.manage_button, self.rate_refresh_button,
             )
             if button.isVisible()
         ]

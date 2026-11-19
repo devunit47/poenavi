@@ -101,8 +101,8 @@ class _TradeSignals(QObject):
     completed = Signal(object, object, int)
     partial_completed = Signal(object, int)
     additional_completed = Signal(object, int)
-    additional_failed = Signal(str, int)
-    failed = Signal(str, int)
+    additional_failed = Signal(object, int)
+    failed = Signal(object, int)
     unique_candidates_ready = Signal(object, int)
     unique_variants_ready = Signal(object, int)
     leagues_ready = Signal(object)
@@ -117,6 +117,11 @@ class _TradeSignals(QObject):
     augment_values_ready = Signal(object, int)
     global_mouse_pressed = Signal(int, int)
     global_mouse_moved = Signal(int, int)
+
+
+_CLIPBOARD_POLL_MS = 10
+_CLIPBOARD_TIMEOUT_MS = 300
+_WINDOWS_CLIPBOARD_GRACE_MS = 30
 
 
 _INFLUENCE_CHIPS = {
@@ -1159,7 +1164,6 @@ class PoetoreWindow(QWidget):
         self._auto_league: str | None = None
         self._has_searched_current_item = False
         self._search_dirty = False
-        self._price_status_in_progress = False
         self._search_generation = 0
         self._search_cancel = TradeSearchCancellation()
         self._pending_trade_conditions = None
@@ -1233,6 +1237,7 @@ class PoetoreWindow(QWidget):
         self._outside_click_listener = None
         self._passive_hotkey_display = False
         self._capture_auto_hide = False
+        self._capture_error_dialog: QMessageBox | None = None
         self._heist_unique_mod_item_key: str | None = None
         self._heist_unique_mod_stable_id: str | None = None
         self._heist_trinket_mod_item_key: str | None = None
@@ -2235,25 +2240,24 @@ class PoetoreWindow(QWidget):
             other_layout.removeWidget(self.trade_url_button)
             target_layout.addWidget(self.trade_url_button)
 
-    def _set_price_status(
-        self, text: str, *, compact: bool = False, in_progress: bool = False,
-    ):
+    def _set_price_status(self, text: str, *, compact: bool = False):
         """Show status text; new call sites safely default to full-width guidance."""
-        self._price_status_in_progress = in_progress
         self.price_status.setText(text)
         self._set_price_status_layout(compact=compact)
 
     def _clear_price_status(self):
         """An empty row cannot collide, so retain access to the memory toggle."""
-        self._price_status_in_progress = False
         self.price_status.clear()
         self._set_price_status_layout(compact=True)
 
-    def _advance_search_generation(self):
+    def _cancel_unsent_trade_requests(self):
         self._search_cancel.set()
         self._search_cancel = TradeSearchCancellation()
-        self._search_generation += 1
         self._clear_pending_trade_conditions()
+
+    def _advance_search_generation(self):
+        self._cancel_unsent_trade_requests()
+        self._search_generation += 1
 
     def _mark_search_dirty(self, *_args):
         if not self._has_searched_current_item or getattr(self, "_parsed_item", None) is None:
@@ -2289,7 +2293,6 @@ class PoetoreWindow(QWidget):
         if self._auto_search_queued:
             return
         self._auto_search_queued = True
-        self._price_status_in_progress = True
         QTimer.singleShot(0, self._run_queued_auto_search)
 
     def _run_queued_auto_search(self):
@@ -4859,6 +4862,7 @@ class PoetoreWindow(QWidget):
         return super().event(event)
 
     def closeEvent(self, event):
+        self._dismiss_capture_error_dialog()
         self._clear_pending_trade_conditions()
         self._passive_hotkey_display = False
         self._auto_hide_interactive = False
@@ -5002,10 +5006,13 @@ class PoetoreWindow(QWidget):
         trace = performance_trace or start_search_trace("alt_d_direct")
         self._pending_performance_trace = trace
         trace.mark("capture_started")
-        # A finished worker must not send or display the old item while
-        # the new capture is still waiting for key release or clipboard data.
+        # Keep accepting results for the current item until a copy parses.
+        # Cancel requests that still need to be sent as soon as capture begins.
+        if self._auto_search_queued or self._pending_trade_conditions is not None:
+            self._set_price_status("検索条件を確認して「検索」を押してください。")
+            self.price_button.setEnabled(True)
         self._auto_search_queued = False
-        self._advance_search_generation()
+        self._cancel_unsent_trade_requests()
         self._clipboard_wait_generation = getattr(self, "_clipboard_wait_generation", 0) + 1
 
         # この時点ではPoEが前面。コピー後にぽえとれがフォーカスを取る前に保存する。
@@ -5110,7 +5117,10 @@ class PoetoreWindow(QWidget):
                 self._capture_keyboard.release(key)
         if trace is not None:
             trace.mark(
-                "copy_keys_sent", clipboard_poll_ms=10, callback_timeout_ms=300,
+                "copy_keys_sent",
+                clipboard_poll_ms=_CLIPBOARD_POLL_MS,
+                callback_timeout_ms=_CLIPBOARD_TIMEOUT_MS,
+                windows_clipboard_grace_ms=_WINDOWS_CLIPBOARD_GRACE_MS,
             )
         generation = getattr(self, "_clipboard_wait_generation", 0) + 1
         self._clipboard_wait_generation = generation
@@ -5127,12 +5137,20 @@ class PoetoreWindow(QWidget):
                 trace.mark("clipboard_change_detected", wait_ms=elapsed_ms)
             callback()
             return
-        if elapsed_ms >= 300:
+        has_windows_sequence = previous_token[0] == "windows"
+        timeout_ms = _CLIPBOARD_TIMEOUT_MS
+        if has_windows_sequence:
+            timeout_ms += _WINDOWS_CLIPBOARD_GRACE_MS
+        if elapsed_ms >= timeout_ms:
             if trace is not None:
                 trace.mark("clipboard_change_timeout", wait_ms=elapsed_ms)
-            callback()
+            if has_windows_sequence:
+                self._handle_capture_failure()
+            else:
+                # The Qt text token cannot detect copies of identical text.
+                callback()
             return
-        delay_ms = min(10, 300 - elapsed_ms)
+        delay_ms = min(_CLIPBOARD_POLL_MS, timeout_ms - elapsed_ms)
         QTimer.singleShot(
             delay_ms,
             lambda: self._wait_for_clipboard_update(
@@ -5147,6 +5165,7 @@ class PoetoreWindow(QWidget):
         ) or self._capture_hotkey
         hotkey = " + ".join(part.strip() for part in hotkey.split("+"))
         message = QMessageBox(self)
+        message.setOption(QMessageBox.Option.DontUseNativeDialog)
         message.setObjectName("poetoreCaptureError")
         message.setIcon(QMessageBox.Icon.Warning)
         message.setText(
@@ -5189,6 +5208,12 @@ class PoetoreWindow(QWidget):
                 background-color: {theme_color('control', '#000000')};
             }}
         """)
+        message.setWindowModality(Qt.NonModal)
+        # Set the focus flags after QMessageBox has configured the dialog.
+        message.setWindowFlags(
+            message.windowFlags() | Qt.WindowDoesNotAcceptFocus | Qt.WindowStaysOnTopHint
+        )
+        message.setAttribute(Qt.WA_ShowWithoutActivating)
         return message
 
     def _capture_error_notification_enabled(self) -> bool:
@@ -5197,37 +5222,41 @@ class PoetoreWindow(QWidget):
         poetore = poetore if isinstance(poetore, dict) else {}
         return bool(poetore.get("capture_error_notification_enabled", False))
 
+    def _dismiss_capture_error_dialog(self):
+        dialog = self._capture_error_dialog
+        if dialog is not None:
+            self._capture_error_dialog = None
+            dialog.close()
+            dialog.deleteLater()
+
+    def _handle_capture_failure(self, parse_error: str = ""):
+        self._last_capture_parse_error = parse_error
+        self._pending_performance_trace = None
+        self._dismiss_capture_error_dialog()
+        if self._capture_error_notification_enabled():
+            self._capture_error_dialog = self._build_capture_error_dialog()
+            self._capture_error_dialog.show()
+
     def _capture_item_copy(self):
         trace = self._pending_performance_trace
         copied_text = read_item_clipboard(QApplication.clipboard())
         if trace is not None:
             trace.mark("clipboard_read", characters=len(copied_text))
-        # A manual search may have started while the clipboard was pending.
-        self._advance_search_generation()
         try:
             item = self._parse_item_text(copied_text)
         except (ItemParseError, ValueError) as error:
             if trace is not None:
                 trace.mark("clipboard_parse_failed")
-            self._last_capture_parse_error = str(error)
-            self._pending_performance_trace = None
-            if self._price_status_in_progress:
-                self._set_price_status("検索条件を確認して「検索」を押してください。")
-                self.price_button.setEnabled(True)
-            if (
-                not self.additional_results_button.isHidden()
-                and not self.additional_results_button.isEnabled()
-            ):
-                self.additional_results_button.setText("次の10件を取得")
-                self.additional_results_button.setEnabled(True)
-            if self._capture_error_notification_enabled():
-                self._build_capture_error_dialog().exec()
+            self._handle_capture_failure(str(error))
             return
-        self._last_capture_parse_error = ""
-        self._pending_capture_identity_text = None
+        # This also supersedes any manual search started during the copy.
+        self._advance_search_generation()
         self._parsed_item = None
         self._parsed_item_source_text = None
         self._parsed_item_poe_version = None
+        self._last_capture_parse_error = ""
+        self._dismiss_capture_error_dialog()
+        self._pending_capture_identity_text = None
         if trace is not None:
             trace.mark(
                 "clipboard_parsed", category=item.category, modifiers=len(item.modifiers),
@@ -5613,7 +5642,7 @@ class PoetoreWindow(QWidget):
                         self._hide_related_items()
                     self._update_item_header(item)
                     self.disenchant_dust_panel.hide()
-                    self._set_price_status("検索条件を準備中…", in_progress=True)
+                    self._set_price_status("検索条件を準備中…")
                     return
             self._trade_base_type, self._trade_item_name, rows = prepared_poe1_conditions
             if resolve_capture_identity:
@@ -5871,7 +5900,6 @@ class PoetoreWindow(QWidget):
         self._set_price_status(
             f"{league_label}で「{preset_label} / {trade_status_label} / "
             f"{trade_currency_label} / {listed_within_label}」を検索中…",
-            in_progress=True,
         )
         filters = self._selected_stat_filters()
         needs_initial_filters = initial_filters is not None or (
@@ -6037,7 +6065,7 @@ class PoetoreWindow(QWidget):
                 with trade_search_scope(search_cancel):
                     search()
             except TradeSearchCancelled:
-                self._trade_signals.failed.emit("", search_generation)
+                self._trade_signals.failed.emit(None, search_generation)
 
         threading.Thread(target=run, daemon=True).start()
         self._current_performance_trace = None
@@ -7335,7 +7363,7 @@ class PoetoreWindow(QWidget):
                 with trade_search_scope(search_cancel):
                     expanded = fetch_additional_prices(result)
             except TradeSearchCancelled:
-                return
+                self._trade_signals.additional_failed.emit(None, search_generation)
             except (TradeApiError, ValueError) as exc:
                 self._trade_signals.additional_failed.emit(
                     str(exc), search_generation,
@@ -7353,12 +7381,13 @@ class PoetoreWindow(QWidget):
         self._show_price_result(result)
         self._queue_augment_values(result, search_generation)
 
-    def _additional_results_failed(self, message: str, search_generation: int):
+    def _additional_results_failed(self, message: str | None, search_generation: int):
         if search_generation != self._search_generation:
             return
         self.additional_results_button.setText("次の10件を取得")
         self.additional_results_button.setEnabled(True)
-        self._set_price_status(_user_facing_trade_error(message))
+        if message is not None:
+            self._set_price_status(_user_facing_trade_error(message))
 
     def _show_price_result(self, result: PriceResult, partial: bool = False):
         if not partial:
@@ -7380,7 +7409,6 @@ class PoetoreWindow(QWidget):
             self._set_price_status(
                 f"{result.league}: 検索候補{result.total}件{cache_note}。"
                 "価格付き出品は取得できませんでした。",
-                in_progress=partial,
             )
             return
         progress_note = "取得中 / " if partial else ""
@@ -7389,7 +7417,6 @@ class PoetoreWindow(QWidget):
             f"{result.league}: {progress_note}候補{result.total}件 / "
             f"取得{fetched_count}件{cache_note}",
             compact=not partial,
-            in_progress=partial,
         )
         item = getattr(self, "_parsed_item", None)
         show_stock = any(row.stack_size is not None for row in result.listings)
@@ -7747,13 +7774,18 @@ class PoetoreWindow(QWidget):
             return f"{months}か月前"
         return f"{days // 365}年前"
 
-    def _show_price_error(self, message: str, search_generation: int):
+    def _show_price_error(self, message: str | None, search_generation: int):
         trace = self._search_performance_traces.pop(search_generation, None)
         if search_generation != self._search_generation:
             if trace is not None:
                 trace.mark("stale_search_error_discarded")
             return
         self.price_button.setEnabled(True)
+        if message is None:
+            self._set_price_status("検索条件を確認して「検索」を押してください。")
+            if trace is not None:
+                trace.mark("trade_search_cancelled")
+            return
         self.price_list.clear()
         self._set_price_status(_user_facing_trade_error(message))
         if trace is not None:

@@ -20,7 +20,9 @@ from src.poetore.ui import (
     _UniqueRollSlider, _auto_mod_layout_sizes, _replace_filters_with_special_chips, prepare_poetore_window,
     show_poetore_window, _price_currency_icon_filename,
 )
+from src.utils.global_hotkeys import ForegroundSuppressedHotkeyService
 from src.utils.poe_version_data import POE1, POE2
+from src.utils.win32_suppressed_hotkey import HotkeyEventProcessor, VK_MENU
 
 
 def test_obs_streaming_mode_keeps_one_window_and_collapses_instead_of_closing(qapp):
@@ -442,7 +444,7 @@ def test_capture_failure_opens_the_dark_error_dialog_when_enabled(qapp):
 
         build.assert_called_once()
         assert build.call_args.args == ()
-        dialog.exec.assert_called_once_with()
+        dialog.show.assert_called_once_with()
     finally:
         window.close()
 
@@ -509,9 +511,11 @@ def test_poe2_alt_d_capture_accepts_meta_gem_with_windows_bidi_marker(qapp):
 ソケットされたすべての呪いスキルを凶悪なオーラに変化させる。
 """
     try:
-        with patch("src.poetore.ui.read_item_clipboard", return_value=copied), patch.object(
-            window, "_build_capture_error_dialog"
-        ) as error_dialog:
+        with (
+            patch("src.poetore.ui.read_item_clipboard", return_value=copied),
+            patch.object(window, "_build_capture_error_dialog") as error_dialog,
+            patch.object(window, "search_current_item"),
+        ):
             window._capture_item_copy()
 
         error_dialog.assert_not_called()
@@ -669,18 +673,288 @@ def test_new_hotkey_discards_previous_clipboard_poll(qtbot, monkeypatch):
     copied.assert_called_once_with()
 
 
-def test_copy_uses_existing_capture_after_clipboard_timeout(qapp):
+def test_alt_d_retry_sends_copy_while_previous_failure_notification_is_visible(qapp, qtbot):
+    window = PoetoreWindow(app_config={
+        "poetore": {"capture_error_notification_enabled": True},
+    })
+    keyboard = Mock()
+    capture = Mock()
+    dialogs = []
+    scheduled = []
+    modal_widgets_during_retry = []
+    build_dialog = window._build_capture_error_dialog
+    real_single_shot = QTimer.singleShot
+
+    def retry_capture():
+        window.capture_from_poe(capture_hotkey="alt+d")
+        window.capture_hotkey_released()
+
+    def build_notification():
+        dialog = build_dialog()
+        dialogs.append(dialog)
+        real_single_shot(0, retry_capture)
+        # Let a regressed modal dialog exit so the assertion can report it.
+        real_single_shot(500, dialog, dialog.reject)
+        return dialog
+
+    def press_key(key):
+        if key == "c" and keyboard.press.call_count == 4:
+            modal_widget = qapp.activeModalWidget()
+            modal_widgets_during_retry.append(modal_widget)
+            if modal_widget is None:
+                token.return_value = ("windows", 11)
+
+    keyboard.press.side_effect = press_key
+    try:
+        with (
+            patch("pynput.keyboard.Controller", return_value=keyboard),
+            patch("src.poetore.ui.get_foreground_window", return_value=None),
+            patch("src.poetore.ui.clipboard_change_token", return_value=("windows", 10)) as token,
+            patch.object(window, "_capture_item_copy", capture),
+            patch.object(window, "_build_capture_error_dialog", side_effect=build_notification),
+            patch.object(
+                QTimer, "singleShot",
+                side_effect=lambda delay, fn: scheduled.append((delay, fn)),
+            ),
+        ):
+            window.capture_from_poe(capture_hotkey="alt+d")
+            window.capture_hotkey_released()
+            assert scheduled.pop(0)[0] == 250  # Initial release fallback.
+            for _ in range(33):
+                scheduled.pop(0)[1]()
+
+            qtbot.waitUntil(lambda: bool(modal_widgets_during_retry))
+            assert modal_widgets_during_retry == [None]
+            assert len(dialogs) == 1
+            dialog = dialogs[0]
+            assert dialog.isVisible()
+            assert dialog.windowModality() == Qt.NonModal
+            assert dialog.testAttribute(Qt.WA_ShowWithoutActivating)
+            assert dialog.windowFlags() & Qt.WindowDoesNotAcceptFocus
+            capture.assert_called_once_with()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize(
+    ("poe_version", "item_class", "previous_base", "retry_base"),
+    [
+        (POE1, "Boots", "Mesh Boots", "Sharkskin Boots"),
+        (POE2, "Spears", "Soaring Spear", "Winged Spear"),
+    ],
+    ids=["poe1", "poe2"],
+)
+def test_alt_d_retry_refocuses_poe_when_results_activate_before_release(
+    qapp, poe_version, item_class, previous_base, retry_base,
+):
+    window = PoetoreWindow(app_config={"poe_version": poe_version})
+    poe_hwnd, result_hwnd = 11, 22
+    foreground = poe_hwnd
+    sequence = 10
+    copied_text = ""
+    now_ms = 0
+    scheduled = []
+    copy_targets = []
+
+    def activate(hwnd):
+        nonlocal foreground
+        foreground = hwnd
+        return True
+
+    def set_clipboard(base_type):
+        nonlocal copied_text, sequence
+        copied_text = (
+            f"Item Class: {item_class}\nRarity: Normal\n{base_type}\n"
+            "--------\nItem Level: 68\n"
+        )
+        sequence += 1
+
+    def press_key(key):
+        if key == "c":
+            copy_targets.append(foreground)
+            if len(copy_targets) == 2 and foreground == poe_hwnd:
+                set_clipboard(retry_base)
+
+    def advance_to(target_ms):
+        nonlocal now_ms
+        while scheduled:
+            scheduled.sort(key=lambda timer: timer[0])
+            now_ms, callback = scheduled[0]
+            if now_ms > target_ms:
+                break
+            scheduled.pop(0)
+            callback()
+        now_ms = target_ms
+
+    focus_poe = Mock(side_effect=activate)
+    service = ForegroundSuppressedHotkeyService(
+        "poetore_capture", "alt+d", native_hook_factory=Mock(), platform="win32",
+        foreground_getter=lambda: foreground,
+        poe_window_checker=lambda hwnd: hwnd == poe_hwnd,
+        result_window_checker=lambda hwnd: hwnd == result_hwnd,
+        poe_target_getter=lambda: window._poe_window_hwnd,
+        focus_target=focus_poe,
+    )
+    hook = HotkeyEventProcessor(
+        {"alt"}, ord("D"), service._should_suppress_native_event, service._receive_native_event,
+    )
+
+    def dispatch(command):
+        if command == "poetore_capture":
+            window.capture_from_poe(capture_hotkey="alt+d")
+        elif command == "poetore_capture_released":
+            window.capture_hotkey_released()
+
+    service.command.connect(dispatch)
+    try:
+        with (
+            patch("src.utils.internal_key_input.monotonic", side_effect=lambda: 100 + now_ms / 1000),
+            patch("src.utils.internal_key_input._suppress_until", 0.0),
+            patch("pynput.keyboard.Controller", return_value=Mock(press=press_key)),
+            patch("src.poetore.ui.get_foreground_window", side_effect=lambda: foreground),
+            patch("src.poetore.ui.is_path_of_exile_window", side_effect=lambda hwnd: hwnd == poe_hwnd),
+            patch("src.poetore.ui.clipboard_change_token", side_effect=lambda _: ("windows", sequence)),
+            patch("src.poetore.ui.read_item_clipboard", side_effect=lambda _: copied_text),
+            patch("src.poetore.ui.english_trade_identity", side_effect=lambda item, *_: (item.base_type, None)),
+            patch.object(window, "_resolved_trade_filters", return_value=()),
+            patch.object(window, "_should_defer_initial_trade_search", return_value=True),
+            patch.object(window, "_start_outside_click_listener"),
+            patch.object(window, "_queue_poe_ninja_price"),
+            patch.object(window, "show"),
+            patch.object(window, "activateWindow", side_effect=lambda: activate(result_hwnd)),
+            patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: scheduled.append((now_ms + ms, fn))),
+        ):
+            service.start()
+            hook.process(VK_MENU, True)
+            assert hook.process(ord("D"), True)
+            hook.process(VK_MENU, False)
+            assert hook.process(ord("D"), False)
+
+            advance_to(300)
+            set_clipboard(previous_base)
+            advance_to(310)
+            assert window._parsed_item.base_type == previous_base
+
+            activate(poe_hwnd)
+            hook.process(VK_MENU, True)
+            assert hook.process(ord("D"), True)
+            # The previous result can regain focus between press and release.
+            activate(result_hwnd)
+            hook.process(VK_MENU, False)
+            assert hook.process(ord("D"), False)
+
+            assert copy_targets == [poe_hwnd, poe_hwnd]
+            focus_poe.assert_called_once_with(poe_hwnd)
+            assert window._parsed_item.base_type == retry_base
+    finally:
+        service.stop()
+        window.close()
+
+
+def test_copy_uses_existing_capture_after_qt_clipboard_timeout(qapp):
     window = PoetoreWindow()
     window._clipboard_wait_generation = 1
     callback = Mock()
     try:
         with patch(
-            "src.poetore.ui.clipboard_change_token", return_value=("windows", 10),
+            "src.poetore.ui.clipboard_change_token", return_value=("qt", "same text"),
         ), patch.object(QTimer, "singleShot") as single_shot:
-            window._wait_for_clipboard_update(("windows", 10), callback, 1, 300)
+            window._wait_for_clipboard_update(("qt", "same text"), callback, 1, 300)
 
         callback.assert_called_once_with()
         single_shot.assert_not_called()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize(
+    ("poe_version", "item_class", "base_type", "search_target"),
+    [
+        (POE1, "Boots", "Mesh Boots", "src.poetore.ui.search_prices"),
+        (POE2, "Spears", "Soaring Spear", "src.poetore.poe2.trade.search_prices"),
+    ],
+    ids=["poe1", "poe2"],
+)
+@pytest.mark.parametrize(
+    ("update_at_ms", "notify"),
+    [(None, True), (None, False), (300, True), (310, True)],
+    ids=["timeout-notify", "timeout-silent", "same-text-recopy", "same-text-recopy-in-grace"],
+)
+def test_alt_d_capture_uses_windows_clipboard_sequence(
+    qtbot, poe_version, item_class, base_type, search_target, update_at_ms, notify,
+):
+    window = PoetoreWindow(app_config={
+        "poe_version": poe_version,
+        "poetore": {"capture_error_notification_enabled": notify},
+    })
+    copied = f"Item Class: {item_class}\nRarity: Normal\n{base_type}\n--------\nItem Level: 68\n"
+    old_result = PriceResult(
+        "Standard", "old-query", 20, (PriceListing(1, "divine"),),
+        next_result_ids=("listing-11",), web_url="https://example.invalid/old-trade",
+    )
+    new_result = replace(old_result, query_id="new-query")
+    scheduled = []
+    dialog = Mock()
+    try:
+        with (
+            patch("pynput.keyboard.Controller"),
+            patch("src.poetore.ui.get_foreground_window", return_value=None),
+            patch("src.poetore.ui.read_item_clipboard", return_value=copied) as read_clipboard,
+            patch("src.poetore.ui.clipboard_change_token", return_value=("windows", 10)) as token,
+            patch("src.poetore.ui.english_trade_identity", return_value=(base_type, None)),
+            patch.object(window, "_resolved_trade_filters", return_value=()),
+            patch.object(window, "show_at_context"),
+            patch.object(window, "_build_capture_error_dialog", return_value=dialog) as build_dialog,
+            patch(search_target, return_value=new_result) as search,
+            patch.object(
+                QTimer, "singleShot",
+                side_effect=lambda delay, fn: scheduled.append((delay, fn)),
+            ),
+        ):
+            window.input_edit.setPlainText(copied)
+            window.parse_current_text()
+            window._show_price_result(old_result)
+            old_status = window.price_status.text()
+            old_item = window._parsed_item
+
+            window.capture_from_poe(capture_hotkey="alt+d")
+            window.capture_hotkey_released()
+            assert scheduled.pop(0)[0] == 250  # Hotkey release fallback.
+            for elapsed_ms in range(10, 331, 10):
+                if elapsed_ms == update_at_ms:
+                    token.return_value = ("windows", 11)
+                delay, poll = scheduled.pop(0)
+                assert delay == 10
+                poll()
+                if elapsed_ms == update_at_ms:
+                    break
+                if elapsed_ms == 300:
+                    build_dialog.assert_not_called()
+                    read_clipboard.assert_not_called()
+            assert not scheduled
+
+            if update_at_ms is not None:
+                qtbot.waitUntil(lambda: window._last_price_result is new_result)
+                read_clipboard.assert_called_once()
+                assert search.call_count == 1
+                assert search.call_args.args[0].base_type == base_type
+                build_dialog.assert_not_called()
+            else:
+                assert window._last_price_result is old_result
+                assert window.price_list.topLevelItemCount() == 1
+                assert window.price_status.text() == old_status
+                assert window._parsed_item is old_item
+                assert window.price_button.isEnabled()
+                assert window.trade_url_button.isEnabled()
+                assert window.additional_results_button.isHidden() == (poe_version == POE1)
+                assert window.additional_results_button.isEnabled() == (poe_version == POE2)
+                read_clipboard.assert_not_called()
+                search.assert_not_called()
+                if notify:
+                    build_dialog.assert_called_once_with()
+                    dialog.show.assert_called_once_with()
+                else:
+                    build_dialog.assert_not_called()
     finally:
         window.close()
 
@@ -881,7 +1155,77 @@ def test_search_does_not_reuse_item_parsed_for_another_mode(qapp):
         window.close()
 
 
-def test_failed_copy_invalidates_older_search_and_preserves_parsed_item(qapp):
+@pytest.mark.parametrize(
+    ("poe_version", "item_class", "base_type", "search_target"),
+    [
+        (POE1, "Boots", "Mesh Boots", "src.poetore.ui.search_prices"),
+        (POE2, "Spears", "Soaring Spear", "src.poetore.poe2.trade.search_prices"),
+    ],
+    ids=["poe1", "poe2"],
+)
+def test_alt_d_foreign_clipboard_text_preserves_in_flight_search(
+    qtbot, poe_version, item_class, base_type, search_target,
+):
+    window = PoetoreWindow(app_config={"poe_version": poe_version})
+    copied = f"Item Class: {item_class}\nRarity: Normal\n{base_type}\n--------\nItem Level: 68\n"
+    result = PriceResult(
+        "Standard", "query", 1, (PriceListing(1, "divine"),),
+        web_url="https://example.invalid/trade",
+    )
+    search_started = threading.Event()
+    finish_search = threading.Event()
+
+    def search_in_flight(*args, **kwargs):
+        search_started.set()
+        assert finish_search.wait(5)
+        return result
+
+    try:
+        with (
+            patch(search_target, side_effect=search_in_flight) as search,
+            patch("src.poetore.ui.english_trade_identity", return_value=(base_type, None)),
+            patch("src.poetore.ui.read_item_clipboard", return_value="unrelated copied text"),
+            patch(
+                "src.poetore.ui.clipboard_change_token",
+                side_effect=[("windows", 10), ("windows", 11)],
+            ),
+            patch("src.poetore.ui.get_foreground_window", return_value=None),
+            patch("pynput.keyboard.Controller"),
+            patch.object(window, "_resolved_trade_filters", return_value=()),
+            patch.object(window, "_queue_augment_values"),
+            patch.object(QTimer, "singleShot"),
+        ):
+            window.input_edit.setPlainText(copied)
+            window.parse_current_text()
+            window.search_current_item()
+            assert search_started.wait(2)
+            assert not window.price_button.isEnabled()
+            generation = window._search_generation
+            item = window._parsed_item
+            status = window.price_status.text()
+
+            window.capture_from_poe(capture_hotkey="alt+d")
+            window.capture_hotkey_released()
+
+            assert window._last_capture_parse_error
+            assert window._search_generation == generation
+            assert window._parsed_item is item
+            assert window._parsed_item_source_text == copied
+            assert window._parsed_item_poe_version == poe_version
+            assert window.price_status.text() == status
+
+            finish_search.set()
+            qtbot.waitUntil(lambda: window._last_price_result is result)
+            search.assert_called_once()
+            assert window.price_list.topLevelItemCount() == 1
+            assert window.price_button.isEnabled()
+            assert window.trade_url_button.isEnabled()
+    finally:
+        finish_search.set()
+        window.close()
+
+
+def test_failed_copy_preserves_search_generation_and_parsed_item(qapp):
     window = PoetoreWindow()
     window._search_generation = 8
     previous_search = window._search_cancel
@@ -900,9 +1244,9 @@ def test_failed_copy_invalidates_older_search_and_preserves_parsed_item(qapp):
         ):
             window._capture_item_copy()
 
-        assert window._search_generation == 9
-        assert previous_search.is_set()
-        assert not window._search_cancel.is_set()
+        assert window._search_generation == 8
+        assert window._search_cancel is previous_search
+        assert not previous_search.is_set()
         assert window._parsed_item is previous_item
         assert window._parsed_item_source_text == "old"
         assert window._parsed_item_poe_version == "poe1"
@@ -1401,8 +1745,11 @@ def test_alt_d_cancels_pending_poe2_search_and_recovers_after_failed_copy(
     result = PriceResult("Standard", "stale", 0, ())
 
     def search(*_args, **_kwargs):
+        from src.poetore.trade import _raise_if_trade_cancelled
+
         started.set()
         assert release.wait(3)
+        _raise_if_trade_cancelled()
         return result
 
     monkeypatch.setattr("src.poetore.poe2.trade.search_prices", search)
@@ -1416,7 +1763,7 @@ def test_alt_d_cancels_pending_poe2_search_and_recovers_after_failed_copy(
         ):
             window.capture_from_poe(capture_hotkey="alt+d")
             window.capture_hotkey_released()
-        with qtbot.waitSignal(window._trade_signals.completed):
+        with qtbot.waitSignal(window._trade_signals.failed):
             release.set()
         qapp.processEvents()
 
@@ -3804,7 +4151,7 @@ def test_poe2_augment_recovery_hides_hint_when_listing_is_better(qapp):
         window.close()
 
 
-def test_partial_price_result_is_shown_without_finishing_search(qapp):
+def test_partial_price_result_is_preserved_when_remaining_requests_cancel(qapp):
     window = PoetoreWindow()
     window._search_generation = 7
     window.price_button.setEnabled(False)
@@ -3819,6 +4166,11 @@ def test_partial_price_result_is_shown_without_finishing_search(qapp):
         assert window.price_list.topLevelItemCount() == 1
         assert not window.price_button.isEnabled()
         assert not window.trade_url_button.isEnabled()
+
+        window._show_price_error(None, 7)
+
+        assert window.price_list.topLevelItemCount() == 1
+        assert window.price_button.isEnabled()
     finally:
         window.close()
 
@@ -3860,21 +4212,41 @@ def test_failed_copy_preserves_poe2_prices_and_reenables_next_page(qtbot, monkey
     window._show_price_result(result)
     status = window.price_status.text()
     expanded = replace(result, next_result_ids=(), fetched_count=20)
-    monkeypatch.setattr("src.poetore.poe2.trade.fetch_additional_prices", Mock(return_value=expanded))
-    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", Mock(return_value=""))
+    started, release = threading.Event(), threading.Event()
 
-    with qtbot.waitSignal(window._trade_signals.additional_completed):
+    def fetch(_result):
+        from src.poetore.trade import _raise_if_trade_cancelled
+
+        started.set()
+        assert release.wait(3)
+        _raise_if_trade_cancelled()
+        return expanded
+
+    monkeypatch.setattr("src.poetore.poe2.trade.fetch_additional_prices", fetch)
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", Mock(return_value=""))
+    monkeypatch.setattr(window, "_queue_augment_values", Mock())
+
+    try:
         window.additional_results_button.click()
+        assert started.wait(1)
         assert not window.additional_results_button.isEnabled()
         with patch("pynput.keyboard.Controller"), patch.object(QTimer, "singleShot"):
             window.capture_from_poe(capture_hotkey="alt+d")
-    window._capture_item_copy()
+        window._capture_item_copy()
+        with qtbot.waitSignal(window._trade_signals.additional_failed):
+            release.set()
+    finally:
+        release.set()
 
     assert window._last_price_result is result
     assert window.price_status.text() == status
     assert window.price_list.topLevelItemCount() == 1
     assert window.additional_results_button.isEnabled()
     assert window.additional_results_button.text() == "次の10件を取得"
+
+    with qtbot.waitSignal(window._trade_signals.additional_completed):
+        window.additional_results_button.click()
+    assert window._last_price_result is expanded
 
 
 def test_relative_listing_time_is_shown_without_online_status(qapp):

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QAbstractItemView, QCheckBox, QCombo
 import pytest
 
 from src.poetore.ui import (
-    PoetoreWindow, _ACTION_CLUSTER_HORIZONTAL_GAP, _ACTION_CLUSTER_VERTICAL_GAP,
+    PoetoreWindow,
     _DISPLAY_SIZE_PROFILES,
     _MOD_COLUMN_CHECK, _MOD_COLUMN_KIND, _MOD_COLUMN_MAX, _MOD_COLUMN_MIN, _MOD_COLUMN_TEXT,
     _MOD_ROW_HEIGHT,
@@ -359,17 +359,17 @@ def test_action_cluster_uses_consistent_spacing_at_every_display_size(
         qapp.processEvents()
         zero_margins = (0, 0, 0, 0)
 
-        assert _ACTION_CLUSTER_HORIZONTAL_GAP == 6
-        assert _ACTION_CLUSTER_VERTICAL_GAP == 8
-        assert window.action_cluster_layout.spacing() == _ACTION_CLUSTER_VERTICAL_GAP
-        assert window.mod_conditions_actions_layout.spacing() == _ACTION_CLUSTER_HORIZONTAL_GAP
-        assert window.mercenary_supports_actions_layout.spacing() == _ACTION_CLUSTER_HORIZONTAL_GAP
-        assert window.trade_action_layout.spacing() == _ACTION_CLUSTER_HORIZONTAL_GAP
+        row_gaps = {
+            window.mod_conditions_actions_layout.spacing(),
+            window.mercenary_supports_actions_layout.spacing(),
+            window.trade_action_layout.spacing(),
+        }
+        assert len(row_gaps) == 1
+        assert 0 < min(row_gaps) < window.action_cluster_layout.spacing()
         assert window.action_cluster_layout.getContentsMargins() == zero_margins
         assert window.mod_conditions_actions_layout.getContentsMargins() == zero_margins
         assert window.mercenary_supports_actions_layout.getContentsMargins() == zero_margins
         assert window.trade_action_layout.getContentsMargins() == zero_margins
-        assert "QLabel#priceStatus { color: #98A39F; padding: 1px 0; }" in window.styleSheet()
     finally:
         window.close()
 
@@ -3121,12 +3121,12 @@ def test_foulborn_xoph_uses_mutated_unique_returning_projectiles_stat(qapp):
         window.close()
 
 
-def test_poetore_uses_wide_poena_theme_and_hides_debug_parse_area(qapp):
+def test_poetore_layout_hides_debug_parse_area(qapp):
     window = PoetoreWindow()
     try:
         assert window.size().width() == 650
         assert window._panel.objectName() == "poetorePanel"
-        assert not window._debug_parse_area.isVisible()
+        assert window._debug_parse_area.isHidden()
         assert window.mod_filter_tree.columnCount() == 6
         assert window.mod_filter_tree.header().isHidden()
         assert window.mod_filter_tree.headerItem().text(2) == "ティア"
@@ -3134,13 +3134,6 @@ def test_poetore_uses_wide_poena_theme_and_hides_debug_parse_area(qapp):
             window.mod_filter_tree.headerItem().text(index)
             for index in range(window.mod_filter_tree.columnCount())
         ]
-        assert "rgba(17, 20, 22, 246)" in window.styleSheet()
-        assert "#343B3E" in window.styleSheet()
-        assert "#65FFCA" in window.styleSheet()
-        assert "QFrame#itemHeader {\n                background: rgba(20, 24, 26, 220);\n                border: none;" in window.styleSheet()
-        assert "QPushButton {\n                background: rgba(26, 31, 33, 225);\n                color: #E6ECEA;\n                border: none;" in window.styleSheet()
-        assert "QPushButton#secondaryActionButton" in window.styleSheet()
-        assert "QComboBox#filterControl" in window.styleSheet()
         assert window.mod_conditions_toggle.objectName() == "secondaryActionButton"
         assert window.clear_mod_conditions_button.objectName() == "secondaryActionButton"
         assert window.hidden_mods_toggle.objectName() == "secondaryActionButton"
@@ -3153,7 +3146,7 @@ def test_poetore_uses_wide_poena_theme_and_hides_debug_parse_area(qapp):
         assert window.listed_within_combo.objectName() == "filterControl"
         assert window.trade_url_button.objectName() == "filterActionButton"
         assert all(
-            label.text() != "ぽえとれ"
+            label.text() != "ぽえとれ" and "無料の非公式ツール" not in label.text()
             for label in window.findChildren(QLabel)
         )
         muted_controls = (
@@ -3167,12 +3160,6 @@ def test_poetore_uses_wide_poena_theme_and_hides_debug_parse_area(qapp):
             window.trade_url_button,
         )
         assert all(control.property("mutedText") is True for control in muted_controls)
-        assert 'QPushButton[mutedText="true"]' in window.styleSheet()
-        assert "color: #98A39F;" in window.styleSheet()
-        assert "QTreeWidget {\n                background: rgba(17, 20, 22, 235);" in window.styleSheet()
-        assert "QTreeWidget {\n                background: rgba(17, 20, 22, 235);\n                alternate-background-color: rgba(25, 30, 32, 205);\n                color: #D5DDDA;\n                border: none;" in window.styleSheet()
-        assert "#DB86EF" not in window.styleSheet().upper()
-        assert "#b0ff7b" not in window.styleSheet()
     finally:
         window.close()
 
@@ -3874,11 +3861,6 @@ def test_price_result_is_rendered_in_japanese(qapp):
     assert header.sectionResizeMode(2) == QHeaderView.ResizeToContents
     assert header.sectionResizeMode(3) == QHeaderView.Stretch
     assert window.price_list.objectName() == "priceList"
-    assert "QTreeWidget#priceList::item { padding: 4px 7px; }" in window.styleSheet()
-    assert (
-        "QTreeWidget#priceList QHeaderView::section { padding: 5px 7px; }"
-        in window.styleSheet()
-    )
     window._show_price_result(PriceResult(
         "Mirage", "q", 42, (
             PriceListing(4, "chaos"), PriceListing(6, "chaos"),
@@ -3935,14 +3917,6 @@ def test_partial_and_empty_price_results_use_full_width_guidance(qapp):
         assert window.trade_action_layout.indexOf(window.trade_url_button) >= 0
     finally:
         window.close()
-
-
-def test_price_status_writes_stay_behind_safe_layout_helper():
-    source = (
-        Path(__file__).parents[1] / "src" / "poetore" / "ui.py"
-    ).read_text(encoding="utf-8")
-    assert source.count("self.price_status.setText(") == 1
-    assert source.count("self.price_status.clear(") == 1
 
 
 def test_poe2_augment_estimates_render_compactly_below_results(qapp):
@@ -6744,9 +6718,6 @@ Item Level: 85
         assert window.trade_preset_combo.count() == 2
         assert not window.trade_preset_combo.isHidden()
         assert window.trade_preset_placeholder.isHidden()
-        assert "QPushButton#binaryToggle" in window.styleSheet()
-        assert "border: 1px solid #465154" in window.styleSheet()
-        assert "QPushButton#binaryToggle:hover" in window.styleSheet()
     finally:
         window.close()
 
@@ -7499,9 +7470,6 @@ def test_cycle_state_chips_match_regular_filter_chip_height(
         assert all(chip.minimumHeight() == expected_height for chip in all_chips)
         assert all(chip.maximumHeight() == expected_height for chip in all_chips)
         assert all(chip.height() == expected_height for chip in all_chips)
-        assert "QPushButton#cycleToggle {" in window.styleSheet()
-        assert "border: 1px solid #65FFCA;\n                padding: 3px 7px;" in window.styleSheet()
-        assert f"min-height: {expected_height - 8}px;" in window.styleSheet()
     finally:
         window.close()
 

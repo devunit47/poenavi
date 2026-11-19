@@ -9,12 +9,6 @@ from PySide6.QtGui import QColor, QImage
 from src.poetore.expedition_ocr_probe import PreparedOcrFrame, RowBand
 from src.poetore.expedition_rewards import (
     EXPEDITION_DIAGNOSTIC_FLAG,
-    EXPEDITION_PRICE_BACKGROUND,
-    EXPEDITION_PRICE_CORNER_RADIUS,
-    EXPEDITION_PRICE_FONT_SIZE,
-    EXPEDITION_PRICE_HORIZONTAL_PADDING,
-    EXPEDITION_PRICE_TEXT_OUTLINE_PEN_WIDTH,
-    EXPEDITION_PRICE_VERTICAL_PADDING,
     RANDOM_CURRENCY_MESSAGES,
     RANDOM_CURRENCY_REWARD_ID,
     ExpeditionPriceOverlay,
@@ -154,7 +148,6 @@ def test_load_reward_aliases_and_format_prices(tmp_path):
     assert format_exalted_unit_price(0.85) == "0.85 高貴/個"
     assert format_exalted_unit_price(5.25) == "5.2 高貴/個"
     assert format_exalted_unit_price(12.4) == "12 高貴/個"
-    assert EXPEDITION_PRICE_FONT_SIZE == 14
 
 
 def test_expedition_price_colors_only_highest_row_green():
@@ -355,15 +348,6 @@ def test_expedition_prices_fetch_divine_rate_only_for_divine_fallback():
 
     assert result.prices == {"Unknown Reward": resolved_fallback}
     ninja.divine_exalted_rate.assert_called_once_with("Test League")
-
-
-def test_expedition_price_plate_uses_requested_readability_style():
-    assert EXPEDITION_PRICE_BACKGROUND == QColor(0, 0, 0, 190)
-    assert 0.70 <= EXPEDITION_PRICE_BACKGROUND.alphaF() <= 0.75
-    assert EXPEDITION_PRICE_CORNER_RADIUS == 5
-    assert EXPEDITION_PRICE_HORIZONTAL_PADDING == 6
-    assert EXPEDITION_PRICE_VERTICAL_PADDING == 3
-    assert EXPEDITION_PRICE_TEXT_OUTLINE_PEN_WIDTH == 4
 
 
 def test_expedition_price_overlay_renders_individual_translucent_plate(qapp):

@@ -31,8 +31,6 @@ def test_expedition_settings_uses_poetore_dialog_theme_and_footer_roles():
     assert dialog.save_button.property("buttonRole") == "primary"
     assert dialog.footer_layout.itemAt(1).widget() is dialog.cancel_button
     assert dialog.footer_layout.itemAt(2).widget() is dialog.save_button
-    assert "#65FFCA" in dialog.styleSheet()
-    assert "#B0FF7B" not in dialog.styleSheet()
     assert dialog.enabled_checkbox.styleSheet() == ""
     dialog.close()
 

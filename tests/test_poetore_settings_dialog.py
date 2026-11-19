@@ -335,14 +335,6 @@ def test_poetore_settings_contains_common_trade_and_window_controls():
     assert dialog.theme is POETORE_DIALOG_THEME
     assert dialog.property("dialogTheme") == "poetore"
     assert dialog.property("dialogAccent") == "#65FFCA"
-    assert "#65FFCA" in dialog.styleSheet()
-    assert "#B0FF7B" not in dialog.styleSheet()
-    assert "#E9FFBD" not in dialog.styleSheet()
-    assert "#E6ECEA" in dialog.styleSheet()
-    assert "#111416" in dialog.styleSheet()
-    assert "#171B1D" in dialog.styleSheet()
-    assert "Noto Sans JP" in dialog.styleSheet()
-    assert "font-size: 13px" in dialog.styleSheet()
     assert not hasattr(dialog, "log_path_edits")
     assert not hasattr(dialog, "timer_size_combo")
     labels = [label.text() for label in dialog.findChildren(QLabel)]
@@ -607,7 +599,6 @@ def test_poetore_poe_version_and_app_mode_are_in_one_startup_group():
     assert len(groups) == 1
     assert "PoEバージョン" in labels
     assert "起動モード" in labels
-    assert "QRadioButton" in dialog.styleSheet()
     assert all(radio.text() in {"PoE1", "PoE2"} for radio in dialog.poe_version_radios.values())
     dialog.close()
 

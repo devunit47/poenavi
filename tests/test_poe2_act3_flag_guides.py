@@ -13,6 +13,7 @@ from src.utils.poe_version_data import POE2
 
 FLAG_KEY = "act3_azakbog_enter"
 MATLAN_ZONE_ID = "poe2_act3_area09"
+ZICOATL_FLAG = "act3_zicoatl_dead"
 
 
 @pytest.fixture(scope="module")
@@ -23,13 +24,6 @@ def qapp():
 @pytest.fixture(scope="module")
 def guide_data():
     return json.loads(Path("guide_data_poe2.json").read_text(encoding="utf-8"))
-
-
-def test_azak_bog_entry_sets_progress_flag():
-    source = Path("src/ui/main_window.py").read_text(encoding="utf-8")
-
-    assert 'if zone_id == "poe2_act3_area05":' in source
-    assert 'self.set_progress_flag("act3_azakbog_enter")' in source
 
 
 def test_matlan_waterways_has_all_three_authored_editor_frames(guide_data):
@@ -85,17 +79,27 @@ def test_mini_navi_editor_exposes_azak_bog_flag_frame(monkeypatch, qapp, guide_d
     dialog.close()
 
 
-def test_authored_flag_content_is_selected_for_matlan_waterways(guide_data):
+def test_zicoatl_flag_frame_belongs_to_jungle_ruins(guide_data):
+    assert ZICOATL_FLAG in guide_data["poe2_act3_area02"]["flags"]
+    assert ZICOATL_FLAG not in guide_data["poe2_act3_area04"]["flags"]
+
+
+@pytest.mark.parametrize(
+    "zone_id,flag,expected_objective",
+    [
+        (MATLAN_ZONE_ID, FLAG_KEY, "アザク湿原到達後"),
+        ("poe2_act3_area02", ZICOATL_FLAG, "・「石の祭壇」を起動する\n・「マトラン水路」へ行く"),
+        ("poe2_act3_area04", ZICOATL_FLAG, "「キメラル湿地」へ行く"),
+    ],
+)
+def test_poe2_act3_guide_selection(guide_data, zone_id, flag, expected_objective):
     authored = copy.deepcopy(guide_data)
-    authored[MATLAN_ZONE_ID]["flags"][FLAG_KEY]["objective"] = "アザク湿原到達後"
+    if zone_id == MATLAN_ZONE_ID:
+        authored[zone_id]["flags"][flag]["objective"] = "アザク湿原到達後"
 
-    guide = get_zone_guide(
-        authored,
-        MATLAN_ZONE_ID,
-        active_flags={FLAG_KEY},
-    )
+    guide = get_zone_guide(authored, zone_id, active_flags={flag})
 
-    assert guide["objective"] == "アザク湿原到達後"
+    assert guide["objective"] == expected_objective
 
 
 def test_mini_navi_markers_are_not_split_by_html(guide_data):

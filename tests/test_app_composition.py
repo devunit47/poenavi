@@ -1,3 +1,4 @@
+import dis
 import subprocess
 import sys
 
@@ -79,8 +80,10 @@ def test_real_poennavi_composition_does_not_import_poetore_shell():
 
 
 def test_composition_uses_static_imports_for_pyinstaller_discovery():
-    source = app_composition.__loader__.get_source(app_composition.__name__)
-
-    assert "from src.ui.main_window import MainWindow" in source
-    assert "from src.ui.poetore_mode_window import PoetoreModeWindow" in source
-    assert "importlib.import_module" not in source
+    # PyInstaller discovers imports from bytecode, including imports inside functions.
+    static_imports = {
+        instruction.argval
+        for instruction in dis.get_instructions(app_composition.resolve_window_class)
+        if instruction.opname == "IMPORT_NAME"
+    }
+    assert {"src.ui.main_window", "src.ui.poetore_mode_window"} <= static_imports

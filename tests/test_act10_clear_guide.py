@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
+from src.ui.main_window import MainWindow
 from src.utils.guide_data import get_zone_guide, get_mini_navi_content
+from src.utils.poe_version_data import POE1
 
 
 def test_act10_area11_contains_integrated_clear_guide():
@@ -22,8 +26,15 @@ def test_act10_area11_contains_integrated_clear_guide():
 
 
 def test_act10_clear_handler_uses_act10_area11_guide():
-    source = Path("src/ui/main_window.py").read_text(encoding="utf-8")
+    window = SimpleNamespace(
+        poe_version=POE1, zone_label=Mock(), advice_label=Mock(),
+        _auto_lap_kitava=Mock(), _update_guide_and_map=Mock(),
+    )
 
-    assert 'zone_id = "act10_area11"' in source
-    assert 'zone_name = "渇望の祭壇"' in source
-    assert 'get_clear_message(self.poe_version, "final")' not in source
+    MainWindow.on_act10_cleared(window)
+
+    assert window.current_zone == "渇望の祭壇"
+    window.zone_label.setText.assert_called_once_with("📍 Act 10 — 渇望の祭壇")
+    window._update_guide_and_map.assert_called_once_with(
+        "渇望の祭壇", "act10_area11", 1, zone_changed=True,
+    )

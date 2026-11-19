@@ -5,15 +5,17 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QPainter
+from PySide6.QtGui import QCursor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -23,16 +25,17 @@ from src.poetore.exchange_catalog import exchange_catalog_by_id
 from src.poetore.exchange_icon_cache import ExchangeIconCache
 from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import ExchangeRatePairStore
-from src.poetore.official_exchange import OfficialExchangeShadowService
+from src.poetore.official_exchange import OfficialExchangeShadowService, SyncCheckResult
 from src.ui.app_theme import POETORE_THEME
 from src.ui.dialog_theme import UI_METRICS
 from src.ui.toolbar_button import ToolbarButton
 from src.ui.toolbar_icons import list_add_icon, reload_icon, trash_icon
 
 RATE_CHECK_INTERVAL_MSEC = 10 * 60 * 1000
-OFFICIAL_DATA_TOOLTIP = (
-    "公式Currency Exchange APIは、完了した1時間ごとの取引データを提供する仕様です。"
-    "ぽえとれは新しい時間データの公開を自動確認します。"
+_JST = timezone(timedelta(hours=9))
+_OFFICIAL_DATA_HELP = (
+    "公式サイトの取引データを自動で取り込みます。\n"
+    "データは1時間分ずつ、集計後に公開されます。"
 )
 
 
@@ -54,8 +57,7 @@ def format_display_rate(value: float) -> str:
 
 
 class _PanelSignals(QObject):
-    table_ready = Signal()
-    checked = Signal(object)
+    checked = Signal(object, object)
     icon_ready = Signal(str, str, str)
 
 
@@ -246,14 +248,14 @@ class CustomExchangeRatePanel(QWidget):
         self.catalog = exchange_catalog_by_id(poe_version)
         self.row_widgets: list[QWidget] = []
         self._signals = _PanelSignals(self)
-        self._signals.table_ready.connect(self._table_ready)
         self._signals.checked.connect(self._sync_checked)
         # A disk-cache hit can complete before the row has been attached to this
         # panel. Queue delivery so the label is discoverable when the icon is
         # applied, regardless of whether the Future completed synchronously.
         self._signals.icon_ready.connect(self._apply_icon, Qt.QueuedConnection)
         self._manual_check = False
-        self._sync_in_progress = False
+        self._active_check: object | None = None
+        self._last_check: SyncCheckResult | None = None
         self._build_ui()
         self.render_rows()
         self.check_timer = QTimer(self)
@@ -280,7 +282,6 @@ class CustomExchangeRatePanel(QWidget):
         self.title_label.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(15)}px; font-weight: bold;"
         )
-        self.title_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
         title_row.addWidget(self.title_label)
         title_row.addStretch()
         self.manage_button = ToolbarButton()
@@ -298,7 +299,6 @@ class CustomExchangeRatePanel(QWidget):
         self.refresh_button.setIconSize(QSize(24, 24))
         self.refresh_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
         self.refresh_button.setAccessibleName("公式取引データを再取得")
-        self.refresh_button.setToolTip(f"公式取引データを再取得\n\n{OFFICIAL_DATA_TOOLTIP}")
         self.refresh_button.clicked.connect(
             lambda: self.refresh_callback(manual=True)
         )
@@ -333,14 +333,6 @@ class CustomExchangeRatePanel(QWidget):
                                            UI_METRICS.overlay_margin, UI_METRICS.control_gap)
         self.rows_layout.setSpacing(UI_METRICS.inline_gap)
         content_layout.addWidget(self.card)
-
-        footer = QHBoxLayout()
-        self.status_label = QLabel("最新データを確認中…")
-        self.status_label.setStyleSheet(f"color: {theme_color('muted_text', '#98A39F')}; font-size: {theme_font_size(11)}px;")
-        self.status_label.setWordWrap(True)
-        self.status_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
-        footer.addWidget(self.status_label, 1)
-        content_layout.addLayout(footer)
 
     def render_rows(self) -> None:
         while self.rows_layout.count():
@@ -386,7 +378,7 @@ class CustomExchangeRatePanel(QWidget):
                 else:
                     display = (
                         "最新データ取得中…"
-                        if self._sync_in_progress
+                        if self._active_check is not None
                         else "最新データを取得できません"
                     )
             row, value, delete = self._make_row(
@@ -420,17 +412,60 @@ class CustomExchangeRatePanel(QWidget):
                 self._centering_space = max(0, rate_labels[0].centered_width() - value_width)
         self.card.setVisible(bool(pairs))
 
-        state = self.service.sync_state(self.poe_version, league)
-        if self._sync_in_progress:
-            self.status_label.setText("最新データを確認中…")
-        elif state.available:
-            self.status_label.setText(
-                f"{league} ・ 公式取引データ（1時間単位・自動取得）"
-            )
-        elif latest_cached_at is not None:
-            age_hours = max(0, int((time.time() - latest_cached_at) // 3600))
-            self.status_label.setText(f"最終確認 {age_hours}時間前")
+        self._render_refresh_status(league, latest_cached_at)
         self.on_rows_changed()
+
+    def _render_refresh_status(self, league: str, latest_cached_at: int | None) -> None:
+        if self._active_check is not None:
+            self._set_refresh_tooltip(league, "更新を確認中…")
+            return
+
+        messages = []
+        if self._last_check is not None and self._last_check.league == league:
+            match self._last_check.status:
+                case "no_market_data":
+                    messages.append("このリーグにはまだ取引データがありません。")
+                case "no_new_data":
+                    messages.append("新しいデータはまだ公開されていません。")
+                case "failed":
+                    messages.extend((
+                        "取引データを取得できませんでした。",
+                        "しばらくしてから再度お試しください。",
+                    ))
+
+        state = self.service.sync_state(self.poe_version, league)
+        if state.available and state.end_hour is not None:
+            hour = datetime.fromtimestamp(state.end_hour, _JST)
+            messages.append(
+                f"取得済みデータは{hour.month}月{hour.day}日 {hour.hour}時台まで（日本時間）"
+            )
+        if latest_cached_at is not None:
+            age_hours = max(0, int((time.time() - latest_cached_at) // 3600))
+            age = f"{age_hours}時間前" if age_hours else "1時間以内"
+            messages.extend((
+                "保存済みのレートを表示しています。",
+                f"最後に保存したレートは{age}に確認しました。",
+            ))
+        self._set_refresh_tooltip(
+            league, "\n".join(messages) or "取引データはまだ取得していません。"
+        )
+
+    def _set_refresh_tooltip(self, league: str, message: str) -> None:
+        description = f"リーグ　{league}\n{message}"
+        action = (
+            "交換レートの更新"
+            if self._active_check is not None
+            else "クリックで交換レートを今すぐ更新"
+        )
+        tooltip = f"{action}\n\n{description}\n\n{_OFFICIAL_DATA_HELP}"
+        button = self.refresh_button
+        was_showing = (
+            button.underMouse() and QToolTip.isVisible() and QToolTip.text() == button.toolTip()
+        )
+        button.setToolTip(tooltip)
+        button.setAccessibleDescription(description)
+        if was_showing:
+            QToolTip.showText(QCursor.pos(), tooltip, button)
 
     def preferred_card_width(self) -> int:
         return self.card.sizeHint().width() + self._centering_space
@@ -524,55 +559,44 @@ class CustomExchangeRatePanel(QWidget):
         self.store.remove(self.poe_version, index)
         self.render_rows()
 
+    def begin_refresh(self) -> object:
+        self._active_check = request = object()
+        self.refresh_button.setEnabled(False)
+        self._set_refresh_tooltip(self.league_getter(), "更新を確認中…")
+        return request
+
     def refresh(self, *, manual: bool = False) -> None:
         self._manual_check = self._manual_check or manual
-        self._sync_in_progress = True
-        self.status_label.setText("最新データを確認中…")
-        self.refresh_button.setEnabled(False)
+        request = self.begin_refresh()
         self.render_rows()
         league = self.league_getter()
         self.service.queue_sync(
             self.poe_version,
             league,
-            on_complete=lambda _result: self._signals.table_ready.emit(),
-            on_checked=lambda result: self._signals.checked.emit(result),
+            on_checked=lambda result: self._signals.checked.emit(request, result),
         )
 
-    def _table_ready(self) -> None:
-        self.render_rows()
+    def refresh_failed(self) -> None:
+        result = SyncCheckResult("failed", self.poe_version, self.league_getter(), None)
+        self._finish_refresh(result)
 
-    def _sync_checked(self, result) -> None:
-        self._sync_in_progress = False
-        self.refresh_button.setEnabled(True)
-        manual = self._manual_check
+    def _sync_checked(self, request: object, result: SyncCheckResult) -> None:
+        if request is self._active_check:
+            self._finish_refresh(result)
+
+    def _finish_refresh(self, result: SyncCheckResult) -> None:
+        self._active_check = None
+        self._last_check = (
+            result if result.status != "no_new_data" or self._manual_check else None
+        )
         self._manual_check = False
+        self.refresh_button.setEnabled(True)
         self.render_rows()
-        if result.status == "no_market_data":
-            self.status_label.setText(
-                "このリーグの取引データはまだありません（自動確認中）"
-            )
-        elif result.status == "no_new_data" and manual:
-            self.status_label.setText("新しい公式データはまだありません")
-        elif result.status == "failed":
-            has_cached = any(
-                self.value_cache.get(
-                    self.poe_version,
-                    self.league_getter(),
-                    pair.left_item_id,
-                    pair.right_item_id,
-                ) is not None
-                for pair in self.store.pairs(self.poe_version)
-            )
-            if not has_cached:
-                self.status_label.setText("公式データを取得できませんでした")
 
     def available_item_ids(self) -> frozenset[str]:
         return self.service.exchange_item_ids(
             self.poe_version, self.league_getter()
         )
-
-    def league_changed(self) -> None:
-        self.render_rows()
 
     def stop(self) -> None:
         self.check_timer.stop()

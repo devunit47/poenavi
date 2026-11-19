@@ -621,14 +621,18 @@ class PoetoreModeWindow(QMainWindow):
             header.addWidget(button)
         toolbar.addLayout(header)
 
-        self.focus_message_label = QLabel("")
-        self.focus_message_label.setObjectName("focusMessageLabel")
-        self.focus_message_label.setStyleSheet(
+        self.toolbar_message_label = QLabel("")
+        self.toolbar_message_label.setObjectName("toolbarMessageLabel")
+        self.toolbar_message_label.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(12)}px;"
         )
-        self.focus_message_label.setWordWrap(True)
-        self.focus_message_label.hide()
-        toolbar.addWidget(self.focus_message_label)
+        self.toolbar_message_label.setWordWrap(True)
+        self.toolbar_message_label.hide()
+        toolbar.addWidget(self.toolbar_message_label)
+        self._toolbar_message_timer = QTimer(self)
+        self._toolbar_message_timer.setSingleShot(True)
+        self._toolbar_message_timer.setInterval(6000)
+        self._toolbar_message_timer.timeout.connect(self._hide_toolbar_message)
         body_layout.addLayout(toolbar)
 
         from src.poetore.official_exchange import (
@@ -656,7 +660,6 @@ class PoetoreModeWindow(QMainWindow):
         for widget in (self, central, body, self._rate_scroll,
                        self._rate_scroll.viewport(), self.rate_panel, self.rate_panel.card):
             widget.setProperty("themeLayoutManaged", True)
-        self.rate_status = self.rate_panel.status_label
         self.rate_refresh_button = self.rate_panel.refresh_button
         self.divine_rate_value = self.rate_panel.findChild(QLabel, "customRateValue0")
 
@@ -797,13 +800,16 @@ class PoetoreModeWindow(QMainWindow):
         if kind == "poe_not_running":
             QMessageBox.information(self, "隠れ家滞在通知", text)
             return
-        self.focus_message_label.setText(text)
-        self.focus_message_label.show()
-        self._apply_rate_panel_height()
-        QTimer.singleShot(6000, self, self._hide_focus_message)
+        self._show_toolbar_message(text)
 
-    def _hide_focus_message(self):
-        self.focus_message_label.hide()
+    def _show_toolbar_message(self, text):
+        self.toolbar_message_label.setText(text)
+        self.toolbar_message_label.show()
+        self._apply_rate_panel_height()
+        self._toolbar_message_timer.start()
+
+    def _hide_toolbar_message(self):
+        self.toolbar_message_label.hide()
         self._apply_rate_panel_height()
 
     def _start_hotkeys(self):
@@ -942,9 +948,7 @@ class PoetoreModeWindow(QMainWindow):
         if self._league_request_running:
             return
         self._league_request_running = True
-        if hasattr(self, "rate_status"):
-            self.rate_status.setText("最新データを確認中…")
-            self.rate_refresh_button.setEnabled(False)
+        self.rate_panel.begin_refresh()
 
         def run():
             try:
@@ -959,14 +963,11 @@ class PoetoreModeWindow(QMainWindow):
     def _queue_rate_sync(self, league, manual):
         self._league_request_running = False
         self._resolved_rate_league = league
-        self.rate_panel.league_changed()
         self.rate_panel.refresh(manual=manual)
 
-    def _show_rate_error(self, message):
+    def _show_rate_error(self, _message):
         self._league_request_running = False
-        self.rate_refresh_button.setEnabled(True)
-        self.rate_panel.render_rows()
-        self.rate_status.setText("公式データを取得できませんでした")
+        self.rate_panel.refresh_failed()
 
     def open_exchange_rate_management(self):
         from src.ui.exchange_rate_management_dialog import (
@@ -991,7 +992,7 @@ class PoetoreModeWindow(QMainWindow):
         )
 
     def _queue_rate_panel_height(self):
-        # Qt invalidates the layout for new rows and footer visibility via posted events.
+        # Qt invalidates the layout for new rows via posted events.
         QTimer.singleShot(0, self, self._apply_rate_panel_height)
 
     def _apply_rate_panel_height(self, *, keep_on_screen=False):
@@ -1184,10 +1185,10 @@ class PoetoreModeWindow(QMainWindow):
         return self._ensure_heist_curio_controller().request_scan()
 
     def _show_heist_curio_status(self, message):
-        self.rate_status.setText(message)
+        self._show_toolbar_message(message)
 
     def _show_heist_curio_error(self, message):
-        self.rate_status.setText(f"ハイスト報酬読取失敗：{message}")
+        self._show_toolbar_message(f"ハイスト報酬読取失敗：{message}")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.showMessage(
                 "ハイスト報酬価格チェック", message, QSystemTrayIcon.Warning, 5000,
@@ -1198,7 +1199,7 @@ class PoetoreModeWindow(QMainWindow):
 
         window = show_poetore_window(self, activate=False)
         window.show_heist_curio_match(match, placement)
-        self.rate_status.setText(f"ハイスト報酬：{match.item.name_ja}")
+        self._show_toolbar_message(f"ハイスト報酬：{match.item.name_ja}")
 
     def _ensure_desecration_tier_controller(self):
         if self._desecration_tier_controller is None:
@@ -1230,18 +1231,18 @@ class PoetoreModeWindow(QMainWindow):
         return self._ensure_desecration_tier_controller().request_scan()
 
     def _show_desecration_status(self, message):
-        self.rate_status.setText(message)
+        self._show_toolbar_message(message)
 
     def _show_desecration_error(self, message):
-        self.rate_status.setText(f"冒涜Mod読取失敗：{message}")
+        self._show_toolbar_message(f"冒涜Mod読取失敗：{message}")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.showMessage("アビス冒涜Modティア", message, QSystemTrayIcon.Warning, 5000)
 
     def _show_expedition_status(self, message):
-        self.rate_status.setText(message)
+        self._show_toolbar_message(message)
 
     def _show_expedition_error(self, message):
-        self.rate_status.setText(f"報酬読取失敗：{message}")
+        self._show_toolbar_message(f"報酬読取失敗：{message}")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.showMessage("エクスペディション報酬価格", message, QSystemTrayIcon.Warning, 5000)
 

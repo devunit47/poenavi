@@ -1417,6 +1417,8 @@ def test_main_window_height_expands_with_saved_rows_without_scroll(qtbot):
         lambda: scroll.viewport().rect().contains(scroll.widget().geometry())
     )
     assert scroll.verticalScrollBar().maximum() == 0
+    card = window.rate_panel.card
+    assert window.height() - card.mapTo(window, QPoint(0, card.height())).y() == UI_METRICS.page_margin
     window.close()
     app.processEvents()
 
@@ -1513,3 +1515,34 @@ def test_poe2_currency_rate_auto_league_does_not_call_trade2_api():
     assert window._currency_rate_league() == "Forbidden Rites"
     window.close()
     app.processEvents()
+
+
+def test_rate_league_lookup_failure_leaves_toolbar_messages_independent(qapp, qtbot):
+    with patch(
+        "src.ui.poetore_mode_window.ConfigManager.load_config",
+        return_value={"poe_version": POE1, "hotkeys": {}},
+    ), patch(
+        "src.ui.poetore_mode_window.GlobalHotkeyService",
+    ), patch.object(PoetoreModeWindow, "refresh_currency_rate"):
+        window = PoetoreModeWindow()
+        window.show()
+        qapp.processEvents()
+    qtbot.addWidget(window)
+
+    window.rate_panel.refresh_callback = window.refresh_currency_rate
+    button = window.rate_refresh_button
+    with patch.object(window, "_currency_rate_league", side_effect=RuntimeError):
+        QTest.mouseClick(button, Qt.LeftButton)
+        assert not button.isEnabled()
+        assert button.accessibleDescription() == "リーグ　Standard\n更新を確認中…"
+        qtbot.waitUntil(button.isEnabled)
+    assert button.accessibleDescription() == (
+        "リーグ　Standard\n取引データを取得できませんでした。\n"
+        "しばらくしてから再度お試しください。"
+    )
+
+    tooltip = button.toolTip()
+    window._show_heist_curio_status("ハイスト報酬を読み取っています…")
+    assert window.toolbar_message_label.isVisible()
+    assert window.toolbar_message_label.text() == "ハイスト報酬を読み取っています…"
+    assert button.toolTip() == tooltip

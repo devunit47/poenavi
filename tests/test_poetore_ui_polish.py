@@ -12,7 +12,7 @@ from src.app_font import bundled_font_path
 from src.poetore.exchange_rate_settings import (
     CHAOS_ORB_ID, DEFAULT_RATE_PAIRS, DIVINE_ORB_ID, EXALTED_ORB_ID, MAX_RATE_PAIRS,
 )
-from src.poetore.official_exchange import DirectPairPrice
+from src.poetore.official_exchange import DirectPairPrice, ExchangeSyncState
 from src.ui.appearance import (
     PRESETS, apply_application_appearance, configure_appearance,
     current_appearance, requested_appearance, resolve_tokens,
@@ -626,6 +626,10 @@ def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request,
         assert window.title_label.palette().color(window.title_label.foregroundRole()).name() == "#c68cff"
 
 
+def _available_sync_state(version, league):
+    return ExchangeSyncState(version, league, 720, 720, 0, False, True)
+
+
 @pytest.mark.parametrize("size", [13, 24])
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
 @pytest.mark.parametrize("long_quotes", [False, True])
@@ -643,6 +647,7 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
         (right, DIVINE_ORB_ID): 0.00001852 if long_quotes else 0.0057,
     }
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, prices[left, right], 720,
         ),
@@ -682,6 +687,7 @@ def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp
     for index in range(MAX_RATE_PAIRS - 1):
         window._rate_pair_store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, 100_000_000.1, 720,
         ),
@@ -739,6 +745,7 @@ def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, mon
     for index in range(MAX_RATE_PAIRS):
         store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, 197.2, 720,
         ),
@@ -788,6 +795,7 @@ def test_main_rate_paints_full_or_explicitly_elided_quote(
     window = build_scenario("main", tmp_path)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, price, 720,
         ),

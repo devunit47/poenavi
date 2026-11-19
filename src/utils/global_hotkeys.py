@@ -373,6 +373,12 @@ class ForegroundSuppressedHotkeyService(QObject):
         self._pending_focus_target = None
         if not self._running:
             return
+        if self._action == "poetore_capture":
+            # A previous copy can activate the result window while the keys are held.
+            self._refresh_foreground_context()
+            if self._foreground_context == "outside":
+                return
+            focus_target = self._cached_focus_target
         if focus_target is not None and not self._focus_target(focus_target):
             record_hotkey_event("focus_failed", hotkey=self._hotkey)
             return

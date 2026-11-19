@@ -20,7 +20,9 @@ from src.poetore.ui import (
     _UniqueRollSlider, _auto_mod_layout_sizes, _replace_filters_with_special_chips, prepare_poetore_window,
     show_poetore_window, _price_currency_icon_filename,
 )
+from src.utils.global_hotkeys import ForegroundSuppressedHotkeyService
 from src.utils.poe_version_data import POE1, POE2
+from src.utils.win32_suppressed_hotkey import HotkeyEventProcessor, VK_MENU
 
 
 def test_obs_streaming_mode_keeps_one_window_and_collapses_instead_of_closing(qapp):
@@ -706,6 +708,122 @@ def test_alt_d_retry_sends_copy_while_previous_failure_notification_is_visible(q
             assert dialog.windowFlags() & Qt.WindowDoesNotAcceptFocus
             capture.assert_called_once_with()
     finally:
+        window.close()
+
+
+@pytest.mark.parametrize(
+    ("poe_version", "item_class", "previous_base", "retry_base"),
+    [
+        (POE1, "Boots", "Mesh Boots", "Sharkskin Boots"),
+        (POE2, "Spears", "Soaring Spear", "Winged Spear"),
+    ],
+    ids=["poe1", "poe2"],
+)
+def test_alt_d_retry_refocuses_poe_after_late_capture_activates_results(
+    qapp, poe_version, item_class, previous_base, retry_base,
+):
+    window = PoetoreWindow(app_config={"poe_version": poe_version})
+    poe_hwnd, result_hwnd = 11, 22
+    foreground = poe_hwnd
+    sequence = 10
+    copied_text = ""
+    now_ms = 0
+    scheduled = []
+    copy_targets = []
+
+    def activate(hwnd):
+        nonlocal foreground
+        foreground = hwnd
+        return True
+
+    def set_clipboard(base_type):
+        nonlocal copied_text, sequence
+        copied_text = (
+            f"Item Class: {item_class}\nRarity: Normal\n{base_type}\n"
+            "--------\nItem Level: 68\n"
+        )
+        sequence += 1
+
+    def press_key(key):
+        if key == "c":
+            copy_targets.append(foreground)
+            if len(copy_targets) == 2 and foreground == poe_hwnd:
+                set_clipboard(retry_base)
+
+    def advance_to(target_ms):
+        nonlocal now_ms
+        while scheduled:
+            scheduled.sort(key=lambda timer: timer[0])
+            now_ms, callback = scheduled[0]
+            if now_ms > target_ms:
+                break
+            scheduled.pop(0)
+            callback()
+        now_ms = target_ms
+
+    focus_poe = Mock(side_effect=activate)
+    service = ForegroundSuppressedHotkeyService(
+        "poetore_capture", "alt+d", native_hook_factory=Mock(), platform="win32",
+        foreground_getter=lambda: foreground,
+        poe_window_checker=lambda hwnd: hwnd == poe_hwnd,
+        result_window_checker=lambda hwnd: hwnd == result_hwnd,
+        poe_target_getter=lambda: window._poe_window_hwnd,
+        focus_target=focus_poe,
+    )
+    hook = HotkeyEventProcessor(
+        {"alt"}, ord("D"), service._should_suppress_native_event, service._receive_native_event,
+    )
+
+    def dispatch(command):
+        if command == "poetore_capture":
+            window.capture_from_poe(capture_hotkey="alt+d")
+        elif command == "poetore_capture_released":
+            window.capture_hotkey_released()
+
+    service.command.connect(dispatch)
+    try:
+        with (
+            patch("src.utils.internal_key_input.monotonic", side_effect=lambda: 100 + now_ms / 1000),
+            patch("src.utils.internal_key_input._suppress_until", 0.0),
+            patch("pynput.keyboard.Controller", return_value=Mock(press=press_key)),
+            patch("src.poetore.ui.get_foreground_window", side_effect=lambda: foreground),
+            patch("src.poetore.ui.is_path_of_exile_window", side_effect=lambda hwnd: hwnd == poe_hwnd),
+            patch("src.poetore.ui.clipboard_change_token", side_effect=lambda _: ("windows", sequence)),
+            patch("src.poetore.ui.read_item_clipboard", side_effect=lambda _: copied_text),
+            patch("src.poetore.ui.english_trade_identity", side_effect=lambda item, *_: (item.base_type, None)),
+            patch.object(window, "_resolved_trade_filters", return_value=()),
+            patch.object(window, "_should_defer_initial_trade_search", return_value=True),
+            patch.object(window, "_start_outside_click_listener"),
+            patch.object(window, "_queue_poe_ninja_price"),
+            patch.object(window, "show"),
+            patch.object(window, "activateWindow", side_effect=lambda: activate(result_hwnd)),
+            patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: scheduled.append((now_ms + ms, fn))),
+        ):
+            service.start()
+            hook.process(VK_MENU, True)
+            assert hook.process(ord("D"), True)
+            hook.process(VK_MENU, False)
+            assert hook.process(ord("D"), False)
+
+            advance_to(290)
+            hook.process(VK_MENU, True)
+            assert hook.process(ord("D"), True)
+            advance_to(300)
+            set_clipboard(previous_base)
+            advance_to(310)
+            assert foreground == result_hwnd
+            assert window._parsed_item.base_type == previous_base
+
+            # Release before the next foreground poll can observe the result window.
+            advance_to(320)
+            hook.process(VK_MENU, False)
+            assert hook.process(ord("D"), False)
+
+            assert copy_targets == [poe_hwnd, poe_hwnd]
+            focus_poe.assert_called_once_with(poe_hwnd)
+            assert window._parsed_item.base_type == retry_base
+    finally:
+        service.stop()
         window.close()
 
 

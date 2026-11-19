@@ -1,10 +1,11 @@
+import time
 from concurrent.futures import Future
 from copy import deepcopy
 
 import pytest
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolTip
 
 from src.poetore.exchange_catalog import (
     divination_card_icon_path,
@@ -26,13 +27,13 @@ from src.poetore.official_exchange import (
 )
 from src.ui.app_theme import POETORE_THEME
 from src.ui.custom_exchange_rate_panel import (
-    OFFICIAL_DATA_TOOLTIP,
     RATE_CHECK_INTERVAL_MSEC,
     CustomExchangeRatePanel,
-    DecimalAlignedRateLabel,
     format_display_rate,
 )
+from src.ui.dialog_theme import UI_METRICS
 from src.utils.poe_version_data import POE1, POE2
+from tests.test_theme_painter_audit import inspect_paint
 
 
 @pytest.fixture(scope="module")
@@ -70,8 +71,8 @@ class FakeService:
     def exchange_item_ids(self, *_args):
         return self.ids
 
-    def queue_sync(self, version, league, *, on_complete, on_checked):
-        self.queued.append((version, league, on_complete, on_checked))
+    def queue_sync(self, version, league, *, on_checked):
+        self.queued.append((version, league, on_checked))
         return True
 
 
@@ -93,7 +94,7 @@ def make_panel(
         store=store,
         league_getter=lambda: "League",
         service=service or FakeService(),
-        value_cache=ExchangeRateValueCache(tmp_path / "rates.json", clock=lambda: 1000),
+        value_cache=ExchangeRateValueCache(tmp_path / "rates.json"),
         icon_cache=icon_cache or FakeIconCache(icon),
         on_manage=lambda: None,
     )
@@ -101,6 +102,18 @@ def make_panel(
     panel.show()
     qapp.processEvents()
     return panel, store, saved
+
+
+def assert_refresh_status(panel, *lines, league="League", checking=False):
+    button = panel.refresh_button
+    description = "\n".join((f"リーグ　{league}", *lines))
+    action = "交換レートの更新" if checking else "クリックで交換レートを今すぐ更新"
+    assert button.toolTip() == (
+        f"{action}\n\n{description}\n\n"
+        "公式サイトの取引データを自動で取り込みます。\n"
+        "データは1時間分ずつ、集計後に公開されます。"
+    )
+    assert button.accessibleDescription() == description
 
 
 @pytest.mark.parametrize(
@@ -125,34 +138,35 @@ def test_rates_use_one_decimal_at_or_above_one_and_significant_digits_below_one(
     assert format_display_rate(value) == expected
 
 
-def test_rate_rows_center_equals_and_share_decimal_anchor(qapp, tmp_path):
+def test_rate_rows_align_equals_in_shared_columns(qapp, tmp_path):
     ids = list(exchange_catalog_by_id(POE1))[:4]
-    pairs = [RatePair(ids[0], ids[2]), RatePair(ids[1], ids[3])]
-    results = {
-        (pairs[0].left_item_id, pairs[0].right_item_id): DirectPairPrice(
-            "available", pairs[0].left_item_id, pairs[0].right_item_id, 681, 720
-        ),
-        (pairs[1].left_item_id, pairs[1].right_item_id): DirectPairPrice(
-            "available", pairs[1].left_item_id, pairs[1].right_item_id, 7.398, 720
-        ),
-    }
+    pairs = [RatePair(ids[0], ids[2]), RatePair(ids[1], ids[3]), RatePair(ids[2], ids[0])]
+    results = {}
+    for pair, price in zip(pairs, (152.5, 0.0012341, None), strict=True):
+        left, right = pair.left_item_id, pair.right_item_id
+        status = "no_trades" if price is None else "available"
+        results[left, right] = DirectPairPrice(status, left, right, price, 720)
     panel, *_ = make_panel(qapp, tmp_path, pairs=pairs, service=FakeService(results))
     try:
-        values = [
-            panel.findChild(DecimalAlignedRateLabel, f"customRateValue{index}")
-            for index in range(2)
-        ]
-        assert [value.text() for value in values] == ["1 ＝ 681", "1 ＝ 7.4"]
-        equals_centers = []
-        decimal_anchors = []
-        for value in values:
-            unit, equals, integer, fraction = value._column_rects()
-            assert abs(equals.center().x() - value.contentsRect().center().x()) <= 1
-            assert unit.right() < equals.left() < integer.left()
-            assert integer.right() + 1 == fraction.left()
-            equals_centers.append(value.mapTo(panel, equals.center()).x())
-            decimal_anchors.append(value.mapTo(panel, fraction.topLeft()).x())
-        assert len(set(equals_centers)) == len(set(decimal_anchors)) == 1
+        for width in (800, 360, 800):
+            panel.resize(width, panel.height())
+            qapp.processEvents()
+            for column in ("LeftName", "Value", "RightName"):
+                labels = [
+                    row.findChild(QLabel, f"customRate{column}{index}")
+                    for index, row in enumerate(panel.row_widgets)
+                ]
+                assert len({(label.mapTo(panel, QPoint()).x(), label.width()) for label in labels}) == 1
+            prefix_starts = []
+            for index, expected in enumerate(("1 ＝ 152.5", "1 ＝ 0.001234", "取引データなし")):
+                value = panel.row_widgets[index].findChild(QLabel, f"customRateValue{index}")
+                assert value.text() == value.toolTip() == expected
+                bounds = []
+                assert not inspect_paint(value, (expected,), centered=index != 0, text_bounds=bounds)
+                if expected.startswith("1 ＝ "):
+                    (text_rect,) = bounds
+                    prefix_starts.append(value.mapTo(panel, text_rect.topLeft()).x())
+            assert prefix_starts[0] == prefix_starts[1]
         cached = panel.value_cache.get(
             POE1,
             "League",
@@ -160,7 +174,7 @@ def test_rate_rows_center_equals_and_share_decimal_anchor(qapp, tmp_path):
             pairs[1].right_item_id,
         )
         assert cached is not None
-        assert cached.price == 7.398
+        assert cached.price == 0.0012341
     finally:
         panel.stop()
         panel.close()
@@ -183,6 +197,24 @@ def test_zero_through_ten_rows_have_one_management_entry(
         assert not panel.manage_button.icon().isNull()
         assert panel.manage_button.toolTip() and panel.manage_button.accessibleName()
         assert panel.card.isVisible() == bool(count)
+    finally:
+        panel.stop()
+        panel.close()
+
+
+def test_refresh_button_sits_next_to_manage_button_in_title_row(qapp, tmp_path):
+    panel, *_ = make_panel(qapp, tmp_path)
+    try:
+        title_row = panel.layout().itemAt(0).layout()
+        manage = panel.manage_button
+        refresh = panel.refresh_button
+        assert title_row.indexOf(refresh) == title_row.indexOf(manage) + 1
+        assert refresh.y() == manage.y()
+        assert refresh.size() == manage.size()
+        assert refresh.x() - manage.geometry().right() - 1 == UI_METRICS.inline_gap
+        content = panel.scroll_area.widget().layout()
+        assert content.count() == 1
+        assert content.itemAt(0).widget() is panel.card
     finally:
         panel.stop()
         panel.close()
@@ -275,10 +307,12 @@ def test_delete_reveals_on_row_hover_without_moving_columns(qapp, tmp_path):
 
         panel.manage_button.setFocus(Qt.TabFocusReason)
         QTest.keyClick(panel.manage_button, Qt.Key_Tab)
+        assert panel.refresh_button.hasFocus()
+        QTest.keyClick(panel.refresh_button, Qt.Key_Tab)
         assert delete.hasFocus()
         assert delete_pixels() != idle
         QTest.keyClick(delete, Qt.Key_Backtab)
-        assert not delete.hasFocus()
+        assert panel.refresh_button.hasFocus()
         assert delete_pixels() == idle
 
         move_to(delete)
@@ -310,39 +344,96 @@ def test_removed_scarab_pair_is_not_rendered_or_queried(qapp, tmp_path):
         panel.close()
 
 
-def test_refresh_is_nonblocking_and_manual_result_text_is_specific(qapp, tmp_path):
+def test_refresh_progress_and_failure_without_cache(qapp, qtbot, tmp_path):
     service = FakeService()
     panel, *_ = make_panel(qapp, tmp_path, service=service)
     try:
         previous_row = panel.row_widgets[0]
-        panel.refresh(manual=True)
+        QTest.mouseClick(panel.refresh_button, Qt.LeftButton)
+        assert len(service.queued) == 1
+        assert service.queued[0][:2] == (POE1, "League")
         assert not previous_row.isVisible()
-        assert panel.status_label.text() == "最新データを確認中…"
+        assert_refresh_status(panel, "更新を確認中…", checking=True)
         loading_value = panel.row_widgets[0].findChild(QLabel, "customRateValue0")
         assert loading_value.text() == "最新データ取得中…"
         assert loading_value.toolTip() == "最新データ取得中…"
         assert "font-size: 12px" in loading_value.styleSheet()
         assert loading_value.sizeHint().width() <= loading_value.width()
         assert not panel.refresh_button.isEnabled()
-        callback = service.queued[-1][3]
-        callback(SyncCheckResult("no_new_data", POE1, "League", 720))
+        QTest.mouseClick(panel.refresh_button, Qt.LeftButton)
+        assert len(service.queued) == 1
+
+        panel.activateWindow()
+        assert QTest.qWaitForWindowActive(panel)
+        handle = panel.windowHandle()
+        QTest.mouseMove(handle, panel.title_label.geometry().center())
+        QTest.mouseMove(handle, panel.refresh_button.geometry().center())
+        qtbot.waitUntil(
+            lambda: QToolTip.isVisible() and QToolTip.text() == panel.refresh_button.toolTip(),
+            timeout=2000,
+        )
+
+        callback = service.queued[-1][2]
+        callback(SyncCheckResult("failed", POE1, "League", None))
         qapp.processEvents()
-        assert panel.status_label.text() == "新しい公式データはまだありません"
+        assert_refresh_status(
+            panel,
+            "取引データを取得できませんでした。",
+            "しばらくしてから再度お試しください。",
+        )
+        assert QToolTip.isVisible()
+        assert QToolTip.text() == panel.refresh_button.toolTip()
         failed_value = panel.row_widgets[0].findChild(QLabel, "customRateValue0")
         assert failed_value.text() == "最新データを取得できません"
         assert failed_value.toolTip() == "最新データを取得できません"
         assert panel.refresh_button.isEnabled()
         assert panel.check_timer.interval() == RATE_CHECK_INTERVAL_MSEC
     finally:
+        QToolTip.hideText()
         panel.stop()
         panel.close()
 
 
-def test_official_hourly_explanation_is_exact(qapp, tmp_path):
+def test_initial_rate_tooltip_is_only_on_refresh_button(qapp, tmp_path):
     panel, *_ = make_panel(qapp, tmp_path)
     try:
-        assert panel.title_label.toolTip() == OFFICIAL_DATA_TOOLTIP
-        assert panel.refresh_button.text() == "最新データ確認"
+        assert not panel.title_label.toolTip()
+        assert not panel.refresh_button.text()
+        assert not panel.refresh_button.icon().isNull()
+        assert panel.refresh_button.accessibleName() == "公式取引データを再取得"
+        assert_refresh_status(panel, "取引データはまだ取得していません。")
+    finally:
+        panel.stop()
+        panel.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "manual", "status_lines"),
+    [
+        ("updated", True, ()),
+        ("no_new_data", False, ()),
+        ("no_new_data", True, ("新しいデータはまだ公開されていません。",)),
+        ("failed", True, (
+            "取引データを取得できませんでした。",
+            "しばらくしてから再度お試しください。",
+        )),
+    ],
+)
+def test_refresh_status_with_hourly_data(qapp, tmp_path, status, manual, status_lines):
+    service = FakeService()
+    panel, *_ = make_panel(qapp, tmp_path, service=service)
+    try:
+        panel.refresh(manual=manual)
+        assert not panel.refresh_button.isEnabled()
+        end_hour = 1795064400  # 2026-11-19 05:00 UTC
+        service.state = ExchangeSyncState(POE1, "League", end_hour, end_hour, 0, False, True)
+        _, _, on_checked = service.queued[-1]
+        on_checked(SyncCheckResult(status, POE1, "League", end_hour))
+        qapp.processEvents()
+        assert_refresh_status(
+            panel, *status_lines, "取得済みデータは11月19日 14時台まで（日本時間）"
+        )
+        assert panel.refresh_button.isEnabled()
     finally:
         panel.stop()
         panel.close()
@@ -353,13 +444,68 @@ def test_pending_new_league_status_explains_automatic_retry(qapp, tmp_path):
     panel, *_ = make_panel(qapp, tmp_path, service=service)
     try:
         panel.refresh()
-        callback = service.queued[-1][3]
+        callback = service.queued[-1][2]
         callback(SyncCheckResult("no_market_data", POE1, "League", 720))
         qapp.processEvents()
-        assert panel.status_label.text() == (
-            "このリーグの取引データはまだありません（自動確認中）"
-        )
+        assert_refresh_status(panel, "このリーグにはまだ取引データがありません。")
+        panel.render_rows()
+        assert_refresh_status(panel, "このリーグにはまだ取引データがありません。")
         assert panel.check_timer.isActive()
+    finally:
+        panel.stop()
+        panel.close()
+
+
+def test_status_when_showing_saved_rates_before_and_after_failed_refresh(qapp, tmp_path):
+    service = FakeService()
+    panel, *_ = make_panel(qapp, tmp_path, service=service)
+    try:
+        panel.value_cache.put(
+            POE1, "League", DIVINE_ORB_ID, CHAOS_ORB_ID, 372.5, 720,
+            confirmed_at=time.time() - 2.5 * 3600,
+        )
+        panel.render_rows()
+        cached_lines = (
+            "保存済みのレートを表示しています。",
+            "最後に保存したレートは2時間前に確認しました。",
+        )
+        assert_refresh_status(panel, *cached_lines)
+
+        panel.refresh()
+        service.queued[-1][2](SyncCheckResult("failed", POE1, "League", None))
+        qapp.processEvents()
+        assert_refresh_status(
+            panel,
+            "取引データを取得できませんでした。",
+            "しばらくしてから再度お試しください。",
+            *cached_lines,
+        )
+        label = panel.row_widgets[0].findChild(QLabel, "customRateValue0")
+        assert label.text() == "1 ＝ 372.5"
+        assert panel.refresh_button.isEnabled()
+    finally:
+        panel.stop()
+        panel.close()
+
+
+def test_outdated_check_cannot_replace_refresh_tooltip_for_current_league(qapp, tmp_path):
+    service = FakeService()
+    panel, *_ = make_panel(qapp, tmp_path, service=service)
+    try:
+        panel.refresh()
+        panel.league_getter = lambda: "Other League"
+        panel.refresh()
+        service.queued[0][2](SyncCheckResult("failed", POE1, "League", None))
+        qapp.processEvents()
+        assert_refresh_status(panel, "更新を確認中…", league="Other League", checking=True)
+        assert not panel.refresh_button.isEnabled()
+
+        service.queued[1][2](SyncCheckResult("no_market_data", POE1, "Other League", 720))
+        qapp.processEvents()
+        assert_refresh_status(
+            panel, "このリーグにはまだ取引データがありません。", league="Other League"
+        )
+        assert panel.refresh_button.isEnabled()
     finally:
         panel.stop()
         panel.close()

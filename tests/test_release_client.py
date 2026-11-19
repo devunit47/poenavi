@@ -1,5 +1,6 @@
 import io
 import json
+from http.client import IncompleteRead
 
 import pytest
 
@@ -94,6 +95,41 @@ def test_fetch_latest_release_sends_user_agent_and_timeout():
     assert calls[0][0].full_url == RELEASES_API
     assert calls[0][0].get_header("User-agent") == "PoENavi-Updater"
     assert calls[0][1] == 10
+
+
+def test_fetch_latest_release_limits_total_time_while_data_keeps_arriving(monkeypatch):
+    elapsed = 0
+    monkeypatch.delenv("POENAVI_UPDATE_TEST_TAG", raising=False)
+    monkeypatch.setattr("src.update.release_client.monotonic", lambda: elapsed)
+
+    class SlowResponse(io.BytesIO):
+        def read1(self, size):
+            nonlocal elapsed
+            elapsed += 8
+            return super().read1(1)
+
+    response = SlowResponse(json.dumps(release_payload()).encode("utf-8"))
+
+    def opener(_request, timeout):
+        nonlocal elapsed
+        assert timeout == 10
+        elapsed += 8
+        return response
+
+    with pytest.raises(TimeoutError, match="更新確認がタイムアウトしました。"):
+        fetch_latest_release("2.4.0", opener=opener)
+
+    assert elapsed == 32
+    assert response.closed
+
+
+def test_fetch_latest_release_rejects_incomplete_body_with_content_length(monkeypatch):
+    monkeypatch.delenv("POENAVI_UPDATE_TEST_TAG", raising=False)
+    response = io.BytesIO(json.dumps(release_payload()).encode("utf-8"))
+    response.length = 1
+
+    with pytest.raises(IncompleteRead):
+        fetch_latest_release("2.4.0", opener=lambda _request, timeout: response)
 
 
 def test_fetch_test_release_uses_tag_endpoint_and_allows_prerelease(monkeypatch):

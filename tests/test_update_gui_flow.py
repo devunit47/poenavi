@@ -222,18 +222,18 @@ def test_declining_apply_keeps_verified_download():
     window.update_controller.launch_updater.assert_not_called()
 
 
-def test_start_update_reuses_verified_download():
+def test_start_update_shows_progress_before_controller_download():
     window = MainWindow.__new__(MainWindow)
     window.update_controller = Mock()
-    window._on_update_download_ready = Mock()
-    archive = Path("cached-PoENavi.zip")
-    window.update_controller.ready_archive.return_value = archive
     release = release_info()
+    with patch("src.ui.main_window.UpdateProgressDialog") as dialog_class:
+        progress = dialog_class.return_value
+        window.update_controller.download.side_effect = lambda _: progress.show.assert_called_once()
 
-    window._start_update_download(release)
+        window._start_update_download(release)
 
-    window._on_update_download_ready.assert_called_once_with(archive, release)
-    window.update_controller.download.assert_not_called()
+    dialog_class.assert_called_once_with(release.version, window)
+    window.update_controller.download.assert_called_once_with(release)
 
 
 def test_close_before_initial_position_does_not_overwrite_saved_geometry():

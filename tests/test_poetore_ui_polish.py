@@ -12,7 +12,7 @@ from src.app_font import bundled_font_path
 from src.poetore.exchange_rate_settings import (
     CHAOS_ORB_ID, DEFAULT_RATE_PAIRS, DIVINE_ORB_ID, EXALTED_ORB_ID, MAX_RATE_PAIRS,
 )
-from src.poetore.official_exchange import DirectPairPrice
+from src.poetore.official_exchange import DirectPairPrice, ExchangeSyncState
 from src.ui.appearance import (
     PRESETS, apply_application_appearance, configure_appearance,
     current_appearance, requested_appearance, resolve_tokens,
@@ -47,6 +47,70 @@ def isolated_ui(qapp):
     assert screens
 
 
+@pytest.mark.parametrize("version", ["poe1", "poe2"])
+@pytest.mark.parametrize("width", [500, 558])
+def test_main_toolbar_groups_and_tab_order(qapp, tmp_path, version, width):
+    apply_application_appearance(qapp, {})
+    window = build_scenario("main", tmp_path, version)
+    settle(qapp, window)
+    window.resize(width, window.height())
+    settle(qapp, window)
+
+    version_buttons = (
+        (window.heist_settings_button, window.map_mods_button)
+        if version == "poe1"
+        else (window.expedition_settings_button, window.desecration_settings_button)
+    )
+    left_buttons = (
+        window.focus_button, window.memo_button, *version_buttons,
+        window.cheat_sheets_button, window.settings_button,
+    )
+    panel = window.rate_panel
+    assert window.rate_refresh_button is panel.refresh_button
+    right_buttons = (panel.manage_button, panel.refresh_button)
+    buttons = (*left_buttons, *right_buttons)
+    assert tuple(button for button in window.header_action_buttons if button.isVisible()) == left_buttons[1:]
+    assert window.width() == width
+    assert all(button.isVisible() for button in buttons)
+
+    rects = [QRect(button.mapTo(window, QPoint()), button.size()) for button in buttons]
+    assert all(window.rect().contains(rect) for rect in rects)
+    assert len({rect.center().y() for rect in rects}) == 1
+    assert rects[0].left() == UI_METRICS.page_margin
+    assert window.width() - rects[-1].right() - 1 == UI_METRICS.page_margin
+    left_rects = rects[:-2]
+    manage_rect, refresh_rect = rects[-2:]
+    for first, second in zip(left_rects, left_rects[1:]):
+        assert second.left() - first.right() - 1 == UI_METRICS.inline_gap
+    assert refresh_rect.left() - manage_rect.right() - 1 == UI_METRICS.inline_gap
+    assert manage_rect.left() - left_rects[-1].right() - 1 > UI_METRICS.inline_gap
+
+    heading = QRect(panel.title_label.mapTo(window, QPoint()), panel.title_label.size())
+    card_top = panel.card.mapTo(window, QPoint()).y()
+    assert heading.top() - rects[0].bottom() - 1 == UI_METRICS.panel_padding
+    assert card_top - heading.bottom() - 1 == UI_METRICS.inline_gap
+
+    def assert_tab_order(row_count):
+        assert len(panel.row_widgets) == row_count
+        deletes = [
+            row.findChild(QPushButton, f"customRateDelete{index}")
+            for index, row in enumerate(panel.row_widgets)
+        ]
+        tab_order = (window.title_bar.close_button, *buttons, *deletes)
+        tab_order[0].setFocus(Qt.TabFocusReason)
+        for current, following in zip(tab_order, tab_order[1:]):
+            assert current.hasFocus()
+            QTest.keyClick(current, Qt.Key_Tab)
+            assert following.hasFocus(), following.accessibleName()
+
+    assert_tab_order(1)
+    ids = list(panel.catalog)
+    window._rate_pair_store.add(version, ids[-2], ids[-1])
+    window._rate_pairs_changed()
+    settle(qapp, window)
+    assert_tab_order(2)
+
+
 def assert_peers(buttons, *, width=True):
     assert len(buttons) >= 2
     assert len({button.height() for button in buttons}) == 1, [(b.text(), b.size()) for b in buttons]
@@ -75,8 +139,13 @@ def _composite(ink, background):
 def test_poetore_toolbar_icons_use_a_single_theme_ink(qapp, tmp_path, appearance):
     apply_application_appearance(qapp, {"appearance": appearance})
     window = build_scenario("main", tmp_path)
+    window.config.pop("notified_update_version")
+    window._sync_update_button_from_config()
     ink = QColor(resolve_tokens(appearance, "poetore").muted_text).getRgb()[:3]
-    for button in (*window.header_action_buttons, window.rate_panel.manage_button):
+    for button in (
+        window.focus_button, *window.header_action_buttons,
+        window.rate_panel.manage_button, window.rate_refresh_button, window.update_button,
+    ):
         icon = button.icon()
         normal = icon.pixmap(button.iconSize()).toImage()
         pixels = [normal.pixelColor(x, y) for x in range(normal.width()) for y in range(normal.height())]
@@ -92,10 +161,31 @@ def test_poetore_toolbar_icons_use_a_single_theme_ink(qapp, tmp_path, appearance
 
 
 @pytest.mark.parametrize("preset", PRESETS)
+def test_update_checking_status_has_contrast_while_disabled(qapp, tmp_path, monkeypatch, preset):
+    appearance = {"preset": preset}
+    apply_application_appearance(qapp, {"appearance": appearance})
+    window = build_scenario("main", tmp_path)
+    settle(qapp, window)
+    monkeypatch.setattr(type(window._update_controller), "checking", True)
+    window._sync_update_button_from_config()
+    button = window.update_button
+    assert not button.isEnabled()
+    assert button.toolTip() == "アプリの更新を確認中…"
+    image = _button_pixels(button)
+    background = QColor(resolve_tokens(appearance, "poetore").background)
+    assert max(
+        contrast(_composite(image.pixelColor(x, y), background), background)
+        for x in range(image.width()) for y in range(image.height())
+    ) >= 3
+
+
+@pytest.mark.parametrize("preset", PRESETS)
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
 def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path, preset, version):
     apply_application_appearance(qapp, {"appearance": {"preset": preset, "overrides": {"base_font_size": 13}}})
     main = build_scenario("main", tmp_path, version)
+    main.config.pop("notified_update_version")
+    main._sync_update_button_from_config()
     trade = build_scenario("trade", tmp_path, version)
     tokens = resolve_tokens({"preset": preset}, "poetore")
     focus_color = QColor(tokens.accent)
@@ -103,10 +193,13 @@ def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path
     rate_delete = rate_row.findChild(QPushButton, "customRateDelete0")
     for window, buttons in (
         (main, (
+            (main.focus_button, (36, 36)),
             *((button, (36, 36)) for button in main.header_action_buttons if not button.isHidden()),
+            (main.update_button, (32, 20)),
             (main.title_bar.minimize_button, (32, 20)),
             (main.title_bar.close_button, (32, 20)),
             (main.rate_panel.manage_button, (36, 36)),
+            (main.rate_refresh_button, (36, 36)),
             (rate_delete, (32, 32)),
         )),
         (trade, ((trade.league_popup_button, (36, 33)), (trade.poetore_close_button, (36, 33)))),
@@ -162,6 +255,39 @@ def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path
             ), button.toolTip()
             assert button.geometry() == original
         window.hide()
+
+
+def test_main_icon_focus_ring_appears_for_tab_and_clears_for_mouse(qapp, tmp_path):
+    window = build_scenario("main", tmp_path)
+    settle(qapp, window)
+    window.activateWindow()
+    qapp.processEvents()
+    accent = QColor(resolve_tokens(current_appearance(), "poetore").accent)
+
+    def has_ring(button):
+        image = _button_pixels(button)
+        return any(image.pixelColor(button.width() // 2, y) == accent for y in range(4))
+
+    update = window.update_button
+    minimize = window.title_bar.minimize_button
+    assert window.isActiveWindow()
+    assert not has_ring(update)
+    assert not has_ring(minimize)
+
+    update.setFocus(Qt.ActiveWindowFocusReason)
+    assert update.hasFocus() and not has_ring(update)
+    QTest.keyClick(update, Qt.Key_Tab)
+    assert minimize.hasFocus() and has_ring(minimize)
+    QTest.keyClick(minimize, Qt.Key_Backtab)
+    assert update.hasFocus() and has_ring(update)
+
+    refresh = window.rate_refresh_button
+    refresh.setFocus(Qt.TabFocusReason)
+    assert has_ring(refresh)
+    window.rate_panel.refresh_callback = Mock()
+    QTest.mouseClick(refresh, Qt.LeftButton)
+    window.rate_panel.refresh_callback.assert_called_once_with(manual=True)
+    assert refresh.hasFocus() and not has_ring(refresh)
 
 
 def test_auxiliary_poetore_icon_buttons_render_transparently(qapp, tmp_path):
@@ -295,9 +421,14 @@ def test_main_rates_reflow_after_screen_move(
     assert window.maximumHeight() == destination.geometry.height()
     assert (window.height() > original_height) == start_small
     assert window.rect().contains(QRect(window.update_button.mapTo(window, QPoint()), window.update_button.size()))
-    scroll.ensureWidgetVisible(window.rate_refresh_button, 0, 0)
+    refresh = window.rate_refresh_button
+    assert window.rect().contains(QRect(refresh.mapTo(window, QPoint()), refresh.size()))
+    last_delete = window.rate_panel.row_widgets[-1].findChild(
+        QPushButton, f"customRateDelete{MAX_RATE_PAIRS - 1}"
+    )
+    scroll.ensureWidgetVisible(last_delete, 0, 0)
     viewport = scroll.viewport()
-    assert viewport.rect().contains(QRect(window.rate_refresh_button.mapTo(viewport, QPoint()), window.rate_refresh_button.size()))
+    assert viewport.rect().contains(QRect(last_delete.mapTo(viewport, QPoint()), last_delete.size()))
 
 
 @pytest.mark.parametrize("notification", ["available", "logical_dpi", "physical_dpi", "device_ratio"])
@@ -336,16 +467,19 @@ def test_main_rates_reflow_when_current_screen_metrics_change(
 @pytest.mark.parametrize("locked", [False, True])
 def test_main_periodic_update_preserves_offscreen_position(qapp, tmp_path, locked):
     window = build_scenario("main", tmp_path)
+    window.config.pop("notified_update_version")
+    window._sync_update_button_from_config()
     window.config["window_locked"] = locked
     settle(qapp, window)
-    assert window.update_button.isHidden()
+    assert window.update_button.toolTip() == "アプリの更新をチェック"
     position = QPoint(-60, 40)
     window.move(position)
     release = ReleaseInfo("99.99.99", "test", "https://example.com", "", "")
 
-    window._handle_background_update_result(release, False)
+    window._handle_update_check_result(release, False)
     assert_geometry_converges(qapp, window)
     assert window.update_button.isVisible()
+    assert window.update_button.toolTip() == "v99.99.99 に更新"
     assert window.pos() == position
 
 
@@ -355,24 +489,28 @@ def test_main_update_fits_at_screen_bottom_without_moving(qapp, tmp_path, monkey
     handle = _WindowHandle(screen)
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
     window = build_scenario("main", tmp_path)
+    window.config.pop("notified_update_version")
+    window._sync_update_button_from_config()
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     window.config["window_locked"] = locked
     settle(qapp, window)
     assert len(window.rate_panel.row_widgets) == 1
-    assert window.update_button.isHidden()
+    original_size = window.size()
+    assert window.update_button.toolTip() == "アプリの更新をチェック"
     position = QPoint(0, screen.geometry.bottom() - window.height() + 1)
     window.move(position)
     assert window.frameGeometry().bottom() == screen.geometry.bottom()
     release = ReleaseInfo("99.99.99", "test", "https://example.com", "", "")
 
-    window._handle_background_update_result(release, False)
+    window._handle_update_check_result(release, False)
     assert_geometry_converges(qapp, window)
 
     assert window.pos() == position
     for button in (window.update_button, window.rate_panel.manage_button, window.title_bar.close_button):
         assert button.isVisible()
         assert screen.geometry.contains(QRect(button.mapToGlobal(QPoint()), button.size()))
-    assert window._rate_scroll.verticalScrollBar().maximum() > 0
+    assert window.size() == original_size
+    assert window._rate_scroll.verticalScrollBar().maximum() == 0
 
 
 @pytest.mark.parametrize("locked", [False, True])
@@ -418,15 +556,17 @@ def test_main_same_screen_relayout_recovers_offscreen_controls(qapp, tmp_path, m
     window.config["window_locked"] = locked
     window._sync_update_button_from_config()
     settle(qapp, window)
-    position = QPoint(0, 560)
+    manage = window.rate_panel.manage_button
+    position = QPoint(0, available.bottom() + 1 - manage.mapTo(window, QPoint()).y())
     window.move(position)
     controls = (
         window.title_bar.close_button, window.title_bar.minimize_button,
-        window.rate_panel.manage_button, window.update_button,
+        window.rate_panel.manage_button, window.rate_refresh_button, window.update_button,
     )
     assert all(button.isVisible() for button in controls)
-    for button in (window.rate_panel.manage_button, window.update_button):
-        assert not available.intersects(QRect(button.mapToGlobal(QPoint()), button.size()))
+    close = window.title_bar.close_button
+    assert available.intersects(QRect(close.mapToGlobal(QPoint()), close.size()))
+    assert not available.intersects(QRect(manage.mapToGlobal(QPoint()), manage.size()))
 
     if action == "tray":
         window._build_tray_icon()
@@ -455,7 +595,6 @@ def test_main_same_screen_relayout_preserves_partially_visible_management(qapp, 
     window = build_scenario("main", tmp_path)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     settle(qapp, window)
-    assert window.update_button.isHidden()
     manage = window.rate_panel.manage_button
     position = QPoint(0, available.bottom() - manage.mapTo(window, manage.rect().center()).y())
     window.move(position)
@@ -468,24 +607,27 @@ def test_main_same_screen_relayout_preserves_partially_visible_management(qapp, 
     assert window.pos() == position
 
 
-def test_main_hiding_update_restores_compact_height(qapp, tmp_path):
+def test_main_update_action_states_keep_compact_height(qapp, tmp_path, monkeypatch):
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
     window = build_scenario("main", tmp_path)
     settle(qapp, window)
-    assert window.update_button.isHidden()
+    button = window.update_button
+    assert button.isVisible()
+    assert window.findChild(QPushButton, "poetoreUpdateButton") is None
     compact_height = window.height()
     compact_viewport_height = window._rate_scroll.viewport().height()
-    window._sync_update_button_from_config()
-    assert_geometry_converges(qapp, window)
-    assert window.update_button.isVisible()
-    assert window.height() >= compact_height + window.update_button.height()
-
-    window.config["notified_update_version"] = ""
-    window._sync_update_button_from_config()
-    assert_geometry_converges(qapp, window)
-    assert window.update_button.isHidden()
-    assert window.height() == compact_height
-    assert window._rate_scroll.viewport().height() == compact_viewport_height
+    for version, checking, title in (
+        ("", False, "アプリの更新をチェック"),
+        ("", True, "アプリの更新を確認中…"),
+        ("99.99.99", False, "v99.99.99 に更新"),
+    ):
+        window.config["notified_update_version"] = version
+        monkeypatch.setattr(type(window._update_controller), "checking", checking)
+        window._sync_update_button_from_config()
+        assert_geometry_converges(qapp, window)
+        assert button.isVisible() and button.toolTip() == title
+        assert window.height() == compact_height
+        assert window._rate_scroll.viewport().height() == compact_viewport_height
 
 
 @pytest.mark.parametrize("preset", [*PRESETS, "custom"])
@@ -509,6 +651,8 @@ def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request,
     window = build_scenario("main", tmp_path, version)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     window._sync_update_button_from_config()
+    window._update_focus_button_state(True)
+    window._update_focus_status("隠れ家滞在通知\nON（エリア待ち）")
     settle(qapp, window)
 
     buttons = [button for button in window.header_action_buttons if button.isVisibleTo(window)]
@@ -548,6 +692,10 @@ def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request,
         assert window.title_label.palette().color(window.title_label.foregroundRole()).name() == "#c68cff"
 
 
+def _available_sync_state(version, league):
+    return ExchangeSyncState(version, league, 720, 720, 0, False, True)
+
+
 @pytest.mark.parametrize("size", [13, 24])
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
 @pytest.mark.parametrize("long_quotes", [False, True])
@@ -565,6 +713,7 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
         (right, DIVINE_ORB_ID): 0.00001852 if long_quotes else 0.0057,
     }
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, prices[left, right], 720,
         ),
@@ -578,7 +727,8 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
     assert window._rate_scroll.horizontalScrollBar().maximum() == 0
     assert window._rate_scroll.verticalScrollBar().maximum() == 0
     assert not geometry_failures(window)
-    centers = set()
+    value_columns = set()
+    prefix_starts = set()
     for index, row in enumerate(window.rate_panel.row_widgets):
         for side in ("Left", "Right"):
             label = row.findChild(QLabel, f"customRate{side}Name{index}")
@@ -586,11 +736,13 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
             if not long_quotes:
                 assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
         value = row.findChild(QLabel, f"customRateValue{index}")
-        unit, equals, integer, fraction = value._column_rects()
-        assert all(value.rect().contains(column) for column in (unit, equals, integer, fraction))
-        assert abs(equals.center().x() - value.contentsRect().center().x()) <= 1
-        centers.add(value.mapTo(window, equals.center()).x())
-    assert len(centers) == 1
+        bounds = []
+        assert not inspect_paint(value, (value.text(),), text_bounds=bounds)
+        (text_rect,) = bounds
+        prefix_starts.add(value.mapTo(window, text_rect.topLeft()).x())
+        value_columns.add((value.mapTo(window, QPoint()).x(), value.width()))
+    assert len(value_columns) == 1
+    assert len(prefix_starts) == 1
 
 
 def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp_path, monkeypatch):
@@ -604,6 +756,7 @@ def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp
     for index in range(MAX_RATE_PAIRS - 1):
         window._rate_pair_store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, 100_000_000.1, 720,
         ),
@@ -661,6 +814,7 @@ def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, mon
     for index in range(MAX_RATE_PAIRS):
         store.add(window.poe_version, ids[index], ids[index + MAX_RATE_PAIRS])
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, 197.2, 720,
         ),
@@ -693,10 +847,10 @@ def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, mon
 @pytest.mark.parametrize(
     ("price", "wide_quote", "narrow_quote"),
     [
-        pytest.param(0.00001234, ("0", ".00001234"), ("0", ".00001…"), id="tiny"),
-        pytest.param(0.0057, ("0", ".0057"), ("0", ".0057"), id="subunit"),
-        pytest.param(100_000_000.1, ("100,000,000", ".1"), ("100,…",), id="large"),
-        pytest.param(197.2, ("197", ".2"), ("197", ".2"), id="normal"),
+        pytest.param(0.00001234, "0.00001234", "0.00001234", id="tiny"),
+        pytest.param(0.0057, "0.0057", "0.0057", id="subunit"),
+        pytest.param(100_000_000_000.1, "100,000,000,000.1", "100,000,000,…", id="large"),
+        pytest.param(197.2, "197.2", "197.2", id="normal"),
     ],
 )
 @pytest.mark.parametrize("narrow", [False, True])
@@ -710,6 +864,7 @@ def test_main_rate_paints_full_or_explicitly_elided_quote(
     window = build_scenario("main", tmp_path)
     monkeypatch.setattr(window, "windowHandle", lambda: handle)
     window.rate_panel.service = Mock(
+        sync_state=_available_sync_state,
         direct_pair=lambda _version, _league, left, right: DirectPairPrice(
             "available", left, right, price, 720,
         ),
@@ -718,9 +873,16 @@ def test_main_rate_paints_full_or_explicitly_elided_quote(
     settle(qapp, window)
 
     value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
-    assert value.toolTip() == "1 ＝ " + "".join(wide_quote)
-    quote = narrow_quote if narrow else wide_quote
-    assert not inspect_paint(value, ("1", "＝", *quote))
+    assert value.toolTip() == f"1 ＝ {wide_quote}"
+    if narrow:
+        window.resize(500, window.height())
+        assert_geometry_converges(qapp, window)
+        assert window.width() == 500
+        assert not inspect_paint(value, (f"1 ＝ {narrow_quote}",), centered=True)
+        window.resize(available.width(), window.height())
+        assert_geometry_converges(qapp, window)
+        assert window.width() == available.width()
+    assert not inspect_paint(value, (f"1 ＝ {wide_quote}",), centered=True)
 
 
 @pytest.mark.parametrize("preset", PRESETS)

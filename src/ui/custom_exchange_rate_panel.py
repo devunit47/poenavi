@@ -5,16 +5,17 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QPainter
+from PySide6.QtGui import QCursor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -24,15 +25,17 @@ from src.poetore.exchange_catalog import exchange_catalog_by_id
 from src.poetore.exchange_icon_cache import ExchangeIconCache
 from src.poetore.exchange_rate_cache import ExchangeRateValueCache
 from src.poetore.exchange_rate_settings import ExchangeRatePairStore
-from src.poetore.official_exchange import OfficialExchangeShadowService
+from src.poetore.official_exchange import OfficialExchangeShadowService, SyncCheckResult
 from src.ui.app_theme import POETORE_THEME
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
-from src.ui.toolbar_icons import list_add_icon, trash_icon
+from src.ui.dialog_theme import UI_METRICS
+from src.ui.toolbar_button import ToolbarButton
+from src.ui.toolbar_icons import list_add_icon, reload_icon, trash_icon
 
 RATE_CHECK_INTERVAL_MSEC = 10 * 60 * 1000
-OFFICIAL_DATA_TOOLTIP = (
-    "公式Currency Exchange APIは、完了した1時間ごとの取引データを提供する仕様です。"
-    "ぽえとれは新しい時間データの公開を自動確認します。"
+_JST = timezone(timedelta(hours=9))
+_OFFICIAL_DATA_HELP = (
+    "公式サイトの取引データを自動で取り込みます。\n"
+    "データは1時間分ずつ、集計後に公開されます。"
 )
 
 
@@ -54,8 +57,7 @@ def format_display_rate(value: float) -> str:
 
 
 class _PanelSignals(QObject):
-    table_ready = Signal()
-    checked = Signal(object)
+    checked = Signal(object, object)
     icon_ready = Signal(str, str, str)
 
 
@@ -75,132 +77,84 @@ class ElidedLabel(QLabel):
         hint.setWidth(getattr(self, "_preferred_width", hint.width()))
         return hint
 
+    def _display_text(self, width: int) -> str:
+        return self.fontMetrics().elidedText(self.text(), Qt.ElideRight, width)
+
+    def _text_rect(self) -> QRect:
+        return self.contentsRect()
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        text = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.width())
+        rect = self._text_rect()
         painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.drawText(self.rect(), int(self.alignment()), text)
+        painter.drawText(rect, int(self.alignment()), self._display_text(rect.width()))
         painter.end()
 
 
-class DecimalAlignedRateLabel(QLabel):
-    """Center the equals sign and use the same decimal column across rows."""
-
-    HORIZONTAL_MARGIN = 2
+class RateValueLabel(ElidedLabel):
+    """Elide a rate at decimal digits or thousands separators."""
 
     def __init__(self, rate: str):
         super().__init__(f"1 ＝ {rate}")
-        self._integer, separator, fraction = rate.partition(".")
-        self._fraction = separator + fraction
-        self._integer_width = self._fraction_width = 0
+        self._shared_text_width: int | None = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setProperty("elideText", True)
 
-    def measured_columns(self) -> tuple[int, int]:
+    def set_shared_text_width(self, width: int) -> None:
+        self._shared_text_width = width
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter | Qt.AlignAbsolute)
+        self.update()
+
+    def _text_rect(self) -> QRect:
+        rect = self.contentsRect()
+        if self._shared_text_width is not None and self._shared_text_width < rect.width():
+            left_margin = (rect.width() - self._shared_text_width) // 2
+            rect.translate(left_margin, 0)
+            rect.setWidth(self._shared_text_width)
+        return rect
+
+    def compact_width(self) -> int:
         self.ensurePolished()
         metrics = self.fontMetrics()
-        return (
-            metrics.horizontalAdvance(self._integer),
-            metrics.size(Qt.TextSingleLine, self._fraction).width(),
+        return min(
+            metrics.size(Qt.TextSingleLine, self.text()).width(),
+            metrics.size(Qt.TextSingleLine, "1 ＝ 999,999.000000").width(),
         )
 
-    def set_column_widths(self, integer: int, fraction: int) -> None:
-        self._integer_width, self._fraction_width = integer, fraction
-        compact_width = self.fontMetrics().horizontalAdvance("1 ＝ 999,999.000000") + 4
-        self.setMinimumWidth(min(self.centered_width(), compact_width))
-
-    def minimumSizeHint(self) -> QSize:
-        hint = super().minimumSizeHint()
-        hint.setWidth(self.minimumWidth())
-        return hint
-
-    def _centered_width(self, quote_width: int) -> int:
+    def _display_text(self, width: int) -> str:
         metrics = self.fontMetrics()
-        half_width = max(metrics.horizontalAdvance("1"), quote_width) + (
-            metrics.horizontalAdvance(" ") + self.HORIZONTAL_MARGIN
-        )
-        return 2 * half_width + metrics.horizontalAdvance("＝")
 
-    def centered_width(self) -> int:
-        return self._centered_width(self._integer_width + self._fraction_width)
+        def fits(text: str) -> bool:
+            return metrics.size(Qt.TextSingleLine, text).width() <= width
 
-    def _column_rects(self) -> tuple[QRect, QRect, QRect, QRect]:
-        rect = self.contentsRect()
-        metrics = self.fontMetrics()
-        gap = metrics.horizontalAdvance(" ")
-        top, height = rect.top(), rect.height()
-        equals = QRect(0, top, metrics.horizontalAdvance("＝"), height)
-        equals.moveCenter(rect.center())
-        unit_width = metrics.horizontalAdvance("1")
-        unit = QRect(equals.left() - gap - unit_width, top, unit_width, height)
-        integer_left = equals.right() + 1 + gap
-        available = max(0, rect.right() + 1 - integer_left - self.HORIZONTAL_MARGIN)
-        integer_text_width = metrics.horizontalAdvance(self._integer)
-        fraction_width = metrics.size(Qt.TextSingleLine, self._fraction).width()
-        if integer_text_width + fraction_width <= available:
-            # Use the shared decimal anchor wherever both parts have room.
-            reserve = min(self._fraction_width, available - integer_text_width)
-            integer_width = min(self._integer_width, available - reserve)
-        elif (
-            self._fraction
-            and integer_text_width + metrics.size(Qt.TextSingleLine, "…").width() <= available
-        ):
-            # Use all remaining space for the fractional prefix and ellipsis.
-            integer_width = integer_text_width
-            fraction_width = available - integer_width
-        else:
-            fraction_width = 0
-            integer_width = min(self._integer_width, available)
-        integer = QRect(integer_left, top, integer_width, height)
-        fraction = QRect(integer.right() + 1, top, fraction_width, height)
-        return unit, equals, integer, fraction
-
-    def _display_integer(self, width: int, *, fraction_omitted: bool) -> str:
-        metrics = self.fontMetrics()
-        text = self._integer + ("…" if fraction_omitted else "")
-        if metrics.horizontalAdvance(text) <= width:
+        text = self.text()
+        if fits(text):
             return text
-        prefix = self._integer
-        while "," in prefix:
-            prefix = prefix.rsplit(",", 1)[0]
-            shortened = prefix + ",…"
-            if metrics.horizontalAdvance(shortened) <= width:
+
+        integer, separator, fraction = text.partition(".")
+        if separator:
+            # Keep as many fractional digits as fit alongside the ellipsis.
+            shortened = integer + "…"
+            for end in range(1, len(fraction)):
+                candidate = integer + separator + fraction[:end] + "…"
+                if not fits(candidate):
+                    break
+                shortened = candidate
+            if fits(shortened):
                 return shortened
-        return "…" if metrics.horizontalAdvance("…") <= width else ""
 
-    def _display_fraction(self, width: int) -> str:
-        metrics = self.fontMetrics()
-        if metrics.size(Qt.TextSingleLine, self._fraction).width() <= width:
-            return self._fraction
-        shortened = "…"
-        for end in range(2, len(self._fraction)):
-            # Include at least one digit when retaining the decimal point.
-            candidate = self._fraction[:end] + "…"
-            if metrics.size(Qt.TextSingleLine, candidate).width() > width:
-                break
-            shortened = candidate
-        return shortened
-
-    def paintEvent(self, event) -> None:
-        unit, equals, integer, fraction = self._column_rects()
-        painter = QPainter(self)
-        painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.setFont(self.font())
-        vertical = Qt.AlignVCenter
-        painter.drawText(unit, vertical | Qt.AlignRight, "1")
-        painter.drawText(equals, vertical | Qt.AlignHCenter, "＝")
-        fraction_omitted = bool(self._fraction) and fraction.width() == 0
-        integer_text = self._display_integer(integer.width(), fraction_omitted=fraction_omitted)
-        painter.drawText(integer, vertical | Qt.AlignRight, integer_text)
-        if fraction.width():
-            painter.drawText(fraction, vertical | Qt.AlignLeft, self._display_fraction(fraction.width()))
-        painter.end()
+        while "," in integer:
+            integer = integer.rsplit(",", 1)[0]
+            if fits(integer + ",…"):
+                return integer + ",…"
+        return "1 ＝ …" if fits("1 ＝ …") else "…"
 
 
-class _RateDeleteButton(QPushButton):
+class _RateDeleteButton(ToolbarButton):
     """Keep the button in the layout and tab order while its row is idle."""
 
     def __init__(self, row: QWidget):
-        super().__init__(row)
-        self.setFocusPolicy(Qt.TabFocus)
+        super().__init__(parent=row)
         row.installEventFilter(self)
 
     def eventFilter(self, watched, event):
@@ -233,6 +187,7 @@ class CustomExchangeRatePanel(QWidget):
         on_manage: Callable[[], None],
         on_rows_changed: Callable[[], None] | None = None,
         refresh_callback: Callable[..., None] | None = None,
+        actions_layout: QHBoxLayout | None = None,
     ):
         super().__init__(parent)
         self.poe_version = poe_version
@@ -247,53 +202,69 @@ class CustomExchangeRatePanel(QWidget):
         self.catalog = exchange_catalog_by_id(poe_version)
         self.row_widgets: list[QWidget] = []
         self._signals = _PanelSignals(self)
-        self._signals.table_ready.connect(self._table_ready)
         self._signals.checked.connect(self._sync_checked)
         # A disk-cache hit can complete before the row has been attached to this
         # panel. Queue delivery so the label is discoverable when the icon is
         # applied, regardless of whether the Future completed synchronously.
         self._signals.icon_ready.connect(self._apply_icon, Qt.QueuedConnection)
         self._manual_check = False
-        self._sync_in_progress = False
-        self._build_ui()
+        self._active_check: object | None = None
+        self._last_check: SyncCheckResult | None = None
+        self._build_ui(actions_layout)
         self.render_rows()
         self.check_timer = QTimer(self)
         self.check_timer.setInterval(RATE_CHECK_INTERVAL_MSEC)
         self.check_timer.timeout.connect(self.refresh_callback)
         self.check_timer.start()
 
-    def _build_ui(self) -> None:
+    def _build_ui(self, actions_layout: QHBoxLayout | None) -> None:
         theme = resolve_app_theme(POETORE_THEME)
-        self.setStyleSheet(f"""
+        tooltip_style = f"""
             QToolTip {{
                 color: {theme.text};
                 background-color: {theme.background};
                 border: 1px solid {theme_color('border', '#66706C')};
                 padding: 5px;
             }}
-        """)
+        """
+        self.setStyleSheet(tooltip_style)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(UI_METRICS.control_gap)
-        title_row = QHBoxLayout()
         self.title_label = QLabel("カレンシー交換レート")
         self.title_label.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(15)}px; font-weight: bold;"
         )
-        self.title_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
-        title_row.addWidget(self.title_label)
-        title_row.addStretch()
-        self.manage_button = QPushButton()
+        if actions_layout is None:
+            root.setSpacing(UI_METRICS.control_gap)
+            actions_layout = QHBoxLayout()
+            actions_layout.setSpacing(UI_METRICS.inline_gap)
+            actions_layout.addWidget(self.title_label)
+            actions_layout.addStretch()
+            root.addLayout(actions_layout)
+        else:
+            root.setSpacing(UI_METRICS.inline_gap)
+            root.addWidget(self.title_label)
+        self.manage_button = ToolbarButton()
         self.manage_button.setObjectName("customRateManageButton")
-        self.manage_button.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         self.manage_button.setIcon(list_add_icon(theme.muted_text))
         self.manage_button.setIconSize(QSize(22, 22))
         self.manage_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
         self.manage_button.setAccessibleName("交換レートの表示を管理")
         self.manage_button.setToolTip("交換レートの表示を管理（追加・削除・並べ替え）")
         self.manage_button.clicked.connect(self.on_manage)
-        title_row.addWidget(self.manage_button)
-        root.addLayout(title_row)
+
+        self.refresh_button = ToolbarButton()
+        self.refresh_button.setIcon(reload_icon(theme.muted_text))
+        self.refresh_button.setIconSize(QSize(24, 24))
+        self.refresh_button.setFixedSize(UI_METRICS.toolbar_size, UI_METRICS.toolbar_size)
+        self.refresh_button.setAccessibleName("公式取引データを再取得")
+        self.refresh_button.clicked.connect(
+            lambda: self.refresh_callback(manual=True)
+        )
+        for button in (self.manage_button, self.refresh_button):
+            # The toolbar may be outside the panel's tooltip stylesheet.
+            button.setStyleSheet(button.styleSheet() + tooltip_style)
+            actions_layout.addWidget(button)
 
         content = QWidget()
         content.setProperty("themeLayoutManaged", True)
@@ -324,25 +295,6 @@ class CustomExchangeRatePanel(QWidget):
         self.rows_layout.setSpacing(UI_METRICS.inline_gap)
         content_layout.addWidget(self.card)
 
-        footer = QHBoxLayout()
-        self.status_label = QLabel("最新データを確認中…")
-        self.status_label.setStyleSheet(f"color: {theme_color('muted_text', '#98A39F')}; font-size: {theme_font_size(11)}px;")
-        self.status_label.setWordWrap(True)
-        self.status_label.setToolTip(OFFICIAL_DATA_TOOLTIP)
-        footer.addWidget(self.status_label, 1)
-        self.refresh_button = QPushButton("最新データ確認")
-        self.refresh_button.setStyleSheet(
-            f"padding: {UI_METRICS.inline_gap}px {UI_METRICS.button_padding}px;"
-        )
-        self.refresh_button.setFocusPolicy(Qt.NoFocus)
-        self.refresh_button.setToolTip(OFFICIAL_DATA_TOOLTIP)
-        self.refresh_button.clicked.connect(
-            lambda: self.refresh_callback(manual=True)
-        )
-        footer.addWidget(self.refresh_button)
-        content_layout.addLayout(footer)
-        equalize_button_sizes((self.refresh_button,), minimum_width=UI_METRICS.action_width)
-
     def render_rows(self) -> None:
         while self.rows_layout.count():
             child = self.rows_layout.takeAt(0)
@@ -354,6 +306,8 @@ class CustomExchangeRatePanel(QWidget):
         pairs = self.store.pairs(self.poe_version)
         value_labels = []
         latest_cached_at = None
+        QWidget.setTabOrder(self.manage_button, self.refresh_button)
+        previous_button = self.refresh_button
         for index, pair in enumerate(pairs):
             display_is_rate = False
             result = self.service.direct_pair(
@@ -385,10 +339,10 @@ class CustomExchangeRatePanel(QWidget):
                 else:
                     display = (
                         "最新データ取得中…"
-                        if self._sync_in_progress
+                        if self._active_check is not None
                         else "最新データを取得できません"
                     )
-            row, value = self._make_row(
+            row, value, delete = self._make_row(
                 index,
                 pair.left_item_id,
                 pair.right_item_id,
@@ -396,41 +350,82 @@ class CustomExchangeRatePanel(QWidget):
                 display_is_rate=display_is_rate,
             )
             self.rows_layout.addWidget(row)
+            QWidget.setTabOrder(previous_button, delete)
+            previous_button = delete
             self.row_widgets.append(row)
             value_labels.append(value)
 
-        rate_labels = [value for value in value_labels if isinstance(value, DecimalAlignedRateLabel)]
-        if rate_labels:
-            widths = [label.measured_columns() for label in rate_labels]
-            integer_width = max(integer for integer, _ in widths)
-            fraction_width = max(fraction for _, fraction in widths)
-            for label in rate_labels:
-                label.set_column_widths(integer_width, fraction_width)
-        self._centering_space = 0
         if value_labels:
-            # Give every row the same stretch budgets even when some values
-            # are showing longer status messages instead of numbers.
-            value_width = max(label.minimumWidth() for label in value_labels)
+            # With the same minimum and stretch, every row allocates the
+            # same width to the value column, including rows with status text.
+            value_width = max(
+                label.compact_width() if isinstance(label, RateValueLabel) else theme_font_size(12)
+                for label in value_labels
+            )
             for label in value_labels:
                 label.setMinimumWidth(value_width)
-            if rate_labels:
-                self._centering_space = max(0, rate_labels[0].centered_width() - value_width)
+        rates = [label for label in value_labels if isinstance(label, RateValueLabel)]
+        if len(rates) > 1:
+            # Draw all numeric rows from the same start so their "1 ＝" prefixes align.
+            width = max(rate.sizeHint().width() for rate in rates)
+            for rate in rates:
+                rate.set_shared_text_width(width)
         self.card.setVisible(bool(pairs))
 
-        state = self.service.sync_state(self.poe_version, league)
-        if self._sync_in_progress:
-            self.status_label.setText("最新データを確認中…")
-        elif state.available:
-            self.status_label.setText(
-                f"{league} ・ 公式取引データ（1時間単位・自動取得）"
-            )
-        elif latest_cached_at is not None:
-            age_hours = max(0, int((time.time() - latest_cached_at) // 3600))
-            self.status_label.setText(f"最終確認 {age_hours}時間前")
+        self._render_refresh_status(league, latest_cached_at)
         self.on_rows_changed()
 
-    def preferred_card_width(self) -> int:
-        return self.card.sizeHint().width() + self._centering_space
+    def _render_refresh_status(self, league: str, latest_cached_at: int | None) -> None:
+        if self._active_check is not None:
+            self._set_refresh_tooltip(league, "更新を確認中…")
+            return
+
+        messages = []
+        if self._last_check is not None and self._last_check.league == league:
+            match self._last_check.status:
+                case "no_market_data":
+                    messages.append("このリーグにはまだ取引データがありません。")
+                case "no_new_data":
+                    messages.append("新しいデータはまだ公開されていません。")
+                case "failed":
+                    messages.extend((
+                        "取引データを取得できませんでした。",
+                        "しばらくしてから再度お試しください。",
+                    ))
+
+        state = self.service.sync_state(self.poe_version, league)
+        if state.available and state.end_hour is not None:
+            hour = datetime.fromtimestamp(state.end_hour, _JST)
+            messages.append(
+                f"取得済みデータは{hour.month}月{hour.day}日 {hour.hour}時台まで（日本時間）"
+            )
+        if latest_cached_at is not None:
+            age_hours = max(0, int((time.time() - latest_cached_at) // 3600))
+            age = f"{age_hours}時間前" if age_hours else "1時間以内"
+            messages.extend((
+                "保存済みのレートを表示しています。",
+                f"最後に保存したレートは{age}に確認しました。",
+            ))
+        self._set_refresh_tooltip(
+            league, "\n".join(messages) or "取引データはまだ取得していません。"
+        )
+
+    def _set_refresh_tooltip(self, league: str, message: str) -> None:
+        description = f"リーグ　{league}\n{message}"
+        action = (
+            "交換レートの更新"
+            if self._active_check is not None
+            else "クリックで交換レートを今すぐ更新"
+        )
+        tooltip = f"{action}\n\n{description}\n\n{_OFFICIAL_DATA_HELP}"
+        button = self.refresh_button
+        was_showing = (
+            button.underMouse() and QToolTip.isVisible() and QToolTip.text() == button.toolTip()
+        )
+        button.setToolTip(tooltip)
+        button.setAccessibleDescription(description)
+        if was_showing:
+            QToolTip.showText(QCursor.pos(), tooltip, button)
 
     def _make_row(
         self,
@@ -440,7 +435,7 @@ class CustomExchangeRatePanel(QWidget):
         display: str,
         *,
         display_is_rate: bool,
-    ) -> tuple[QWidget, QLabel]:
+    ) -> tuple[QWidget, QLabel, _RateDeleteButton]:
         row = QWidget()
         row.setObjectName(f"customRateRow{index}")
         layout = QHBoxLayout(row)
@@ -457,9 +452,7 @@ class CustomExchangeRatePanel(QWidget):
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(13)}px;"
         )
         layout.addWidget(left_name, 1)
-        value = DecimalAlignedRateLabel(display) if display_is_rate else ElidedLabel(display)
-        if not display_is_rate:
-            value.setMinimumWidth(theme_font_size(12))
+        value = RateValueLabel(display) if display_is_rate else ElidedLabel(display)
         value.setObjectName(f"customRateValue{index}")
         value.setAlignment(Qt.AlignCenter)
         value.setToolTip(value.text())
@@ -482,7 +475,6 @@ class CustomExchangeRatePanel(QWidget):
         delete = _RateDeleteButton(row)
         delete.setObjectName(f"customRateDelete{index}")
         delete.setProperty("rateDelete", True)
-        delete.setStyleSheet(icon_button_stylesheet(content="padding: 0;"))
         delete.setIcon(trash_icon(resolve_app_theme(POETORE_THEME).muted_text))
         delete.setIconSize(QSize(20, 20))
         delete.setFixedSize(32, 32)
@@ -490,7 +482,7 @@ class CustomExchangeRatePanel(QWidget):
         delete.setAccessibleName("このレートを削除")
         delete.clicked.connect(lambda _checked=False, i=index: self._remove(i))
         layout.addWidget(delete)
-        return row, value
+        return row, value, delete
 
     def _icon_label(self, item_id: str, side: str) -> QLabel:
         label = QLabel()
@@ -522,57 +514,44 @@ class CustomExchangeRatePanel(QWidget):
         self.store.remove(self.poe_version, index)
         self.render_rows()
 
+    def begin_refresh(self) -> object:
+        self._active_check = request = object()
+        self.refresh_button.setEnabled(False)
+        self._set_refresh_tooltip(self.league_getter(), "更新を確認中…")
+        return request
+
     def refresh(self, *, manual: bool = False) -> None:
         self._manual_check = self._manual_check or manual
-        self._sync_in_progress = True
-        self.status_label.setText("最新データを確認中…")
-        self.refresh_button.setEnabled(False)
+        request = self.begin_refresh()
         self.render_rows()
         league = self.league_getter()
         self.service.queue_sync(
             self.poe_version,
             league,
-            on_complete=lambda _result: self._signals.table_ready.emit(),
-            on_checked=lambda result: self._signals.checked.emit(result),
+            on_checked=lambda result: self._signals.checked.emit(request, result),
         )
 
-    def _table_ready(self) -> None:
-        self.render_rows()
+    def refresh_failed(self) -> None:
+        result = SyncCheckResult("failed", self.poe_version, self.league_getter(), None)
+        self._finish_refresh(result)
 
-    def _sync_checked(self, result) -> None:
-        self._sync_in_progress = False
-        self.refresh_button.setEnabled(True)
-        manual = self._manual_check
+    def _sync_checked(self, request: object, result: SyncCheckResult) -> None:
+        if request is self._active_check:
+            self._finish_refresh(result)
+
+    def _finish_refresh(self, result: SyncCheckResult) -> None:
+        self._active_check = None
+        self._last_check = (
+            result if result.status != "no_new_data" or self._manual_check else None
+        )
         self._manual_check = False
+        self.refresh_button.setEnabled(True)
         self.render_rows()
-        if result.status == "updated":
-            self.status_label.setText("最新の公式データへ更新しました")
-        elif result.status == "no_market_data":
-            self.status_label.setText(
-                "このリーグの取引データはまだありません（自動確認中）"
-            )
-        elif result.status == "no_new_data" and manual:
-            self.status_label.setText("新しい公式データはまだありません")
-        elif result.status == "failed":
-            has_cached = any(
-                self.value_cache.get(
-                    self.poe_version,
-                    self.league_getter(),
-                    pair.left_item_id,
-                    pair.right_item_id,
-                ) is not None
-                for pair in self.store.pairs(self.poe_version)
-            )
-            if not has_cached:
-                self.status_label.setText("公式データを取得できませんでした")
 
     def available_item_ids(self) -> frozenset[str]:
         return self.service.exchange_item_ids(
             self.poe_version, self.league_getter()
         )
-
-    def league_changed(self) -> None:
-        self.render_rows()
 
     def stop(self) -> None:
         self.check_timer.stop()

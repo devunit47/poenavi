@@ -385,7 +385,7 @@ def test_window_inventory_is_complete():
         "_UniqueRollSlider", "_BinaryToggle", "_ElidedScopeButton", "_CycleButton", "_AreaSegmentedControl",
         "_NumericFilterChip", "_RequiredNumericFilterChip", "_SparklineWidget", "_PoetoreTitleBar",
         "AppearanceSettingsWidget", "AppInfoWidget", "CustomCommandSettingsWidget",
-        "ElidedLabel", "DecimalAlignedRateLabel", "CustomExchangeRatePanel", "_RateDeleteButton",
+        "ElidedLabel", "RateValueLabel", "CustomExchangeRatePanel", "_RateDeleteButton",
         "_RegisteredPairRow", "_RegisteredPairsWidget", "RegionPreview", "ClickableImageLabel",
         "GemTrackerWidget", "HighAccuracyOcrPackGroup", "ClickableThumb", "MapThumbnailWidget",
         "MiniNaviLockButtonWindow", "_PoetoreModeTitleBar", "ToolbarButton", "_HideoutNotificationButton",

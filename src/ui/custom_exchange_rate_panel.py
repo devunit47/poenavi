@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QFrame,
@@ -77,124 +77,60 @@ class ElidedLabel(QLabel):
         hint.setWidth(getattr(self, "_preferred_width", hint.width()))
         return hint
 
+    def _display_text(self, width: int) -> str:
+        return self.fontMetrics().elidedText(self.text(), Qt.ElideRight, width)
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        text = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.width())
+        rect = self.contentsRect()
         painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.drawText(self.rect(), int(self.alignment()), text)
+        painter.drawText(rect, int(self.alignment()), self._display_text(rect.width()))
         painter.end()
 
 
-class DecimalAlignedRateLabel(QLabel):
-    """Center the equals sign and use the same decimal column across rows."""
-
-    HORIZONTAL_MARGIN = 2
+class RateValueLabel(ElidedLabel):
+    """Elide a rate at decimal digits or thousands separators."""
 
     def __init__(self, rate: str):
         super().__init__(f"1 ＝ {rate}")
-        self._integer, separator, fraction = rate.partition(".")
-        self._fraction = separator + fraction
-        self._integer_width = self._fraction_width = 0
+        self.setAlignment(Qt.AlignCenter)
+        self.setProperty("elideText", True)
 
-    def measured_columns(self) -> tuple[int, int]:
+    def compact_width(self) -> int:
         self.ensurePolished()
         metrics = self.fontMetrics()
-        return (
-            metrics.horizontalAdvance(self._integer),
-            metrics.size(Qt.TextSingleLine, self._fraction).width(),
+        return min(
+            metrics.size(Qt.TextSingleLine, self.text()).width(),
+            metrics.size(Qt.TextSingleLine, "1 ＝ 999,999.000000").width(),
         )
 
-    def set_column_widths(self, integer: int, fraction: int) -> None:
-        self._integer_width, self._fraction_width = integer, fraction
-        compact_width = self.fontMetrics().horizontalAdvance("1 ＝ 999,999.000000") + 4
-        self.setMinimumWidth(min(self.centered_width(), compact_width))
-
-    def minimumSizeHint(self) -> QSize:
-        hint = super().minimumSizeHint()
-        hint.setWidth(self.minimumWidth())
-        return hint
-
-    def _centered_width(self, quote_width: int) -> int:
+    def _display_text(self, width: int) -> str:
         metrics = self.fontMetrics()
-        half_width = max(metrics.horizontalAdvance("1"), quote_width) + (
-            metrics.horizontalAdvance(" ") + self.HORIZONTAL_MARGIN
-        )
-        return 2 * half_width + metrics.horizontalAdvance("＝")
 
-    def centered_width(self) -> int:
-        return self._centered_width(self._integer_width + self._fraction_width)
+        def fits(text: str) -> bool:
+            return metrics.size(Qt.TextSingleLine, text).width() <= width
 
-    def _column_rects(self) -> tuple[QRect, QRect, QRect, QRect]:
-        rect = self.contentsRect()
-        metrics = self.fontMetrics()
-        gap = metrics.horizontalAdvance(" ")
-        top, height = rect.top(), rect.height()
-        equals = QRect(0, top, metrics.horizontalAdvance("＝"), height)
-        equals.moveCenter(rect.center())
-        unit_width = metrics.horizontalAdvance("1")
-        unit = QRect(equals.left() - gap - unit_width, top, unit_width, height)
-        integer_left = equals.right() + 1 + gap
-        available = max(0, rect.right() + 1 - integer_left - self.HORIZONTAL_MARGIN)
-        integer_text_width = metrics.horizontalAdvance(self._integer)
-        fraction_width = metrics.size(Qt.TextSingleLine, self._fraction).width()
-        if integer_text_width + fraction_width <= available:
-            # Use the shared decimal anchor wherever both parts have room.
-            reserve = min(self._fraction_width, available - integer_text_width)
-            integer_width = min(self._integer_width, available - reserve)
-        elif (
-            self._fraction
-            and integer_text_width + metrics.size(Qt.TextSingleLine, "…").width() <= available
-        ):
-            # Use all remaining space for the fractional prefix and ellipsis.
-            integer_width = integer_text_width
-            fraction_width = available - integer_width
-        else:
-            fraction_width = 0
-            integer_width = min(self._integer_width, available)
-        integer = QRect(integer_left, top, integer_width, height)
-        fraction = QRect(integer.right() + 1, top, fraction_width, height)
-        return unit, equals, integer, fraction
-
-    def _display_integer(self, width: int, *, fraction_omitted: bool) -> str:
-        metrics = self.fontMetrics()
-        text = self._integer + ("…" if fraction_omitted else "")
-        if metrics.horizontalAdvance(text) <= width:
+        text = self.text()
+        if fits(text):
             return text
-        prefix = self._integer
-        while "," in prefix:
-            prefix = prefix.rsplit(",", 1)[0]
-            shortened = prefix + ",…"
-            if metrics.horizontalAdvance(shortened) <= width:
+
+        integer, separator, fraction = text.partition(".")
+        if separator:
+            # Keep as many fractional digits as fit alongside the ellipsis.
+            shortened = integer + "…"
+            for end in range(1, len(fraction)):
+                candidate = integer + separator + fraction[:end] + "…"
+                if not fits(candidate):
+                    break
+                shortened = candidate
+            if fits(shortened):
                 return shortened
-        return "…" if metrics.horizontalAdvance("…") <= width else ""
 
-    def _display_fraction(self, width: int) -> str:
-        metrics = self.fontMetrics()
-        if metrics.size(Qt.TextSingleLine, self._fraction).width() <= width:
-            return self._fraction
-        shortened = "…"
-        for end in range(2, len(self._fraction)):
-            # Include at least one digit when retaining the decimal point.
-            candidate = self._fraction[:end] + "…"
-            if metrics.size(Qt.TextSingleLine, candidate).width() > width:
-                break
-            shortened = candidate
-        return shortened
-
-    def paintEvent(self, event) -> None:
-        unit, equals, integer, fraction = self._column_rects()
-        painter = QPainter(self)
-        painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.setFont(self.font())
-        vertical = Qt.AlignVCenter
-        painter.drawText(unit, vertical | Qt.AlignRight, "1")
-        painter.drawText(equals, vertical | Qt.AlignHCenter, "＝")
-        fraction_omitted = bool(self._fraction) and fraction.width() == 0
-        integer_text = self._display_integer(integer.width(), fraction_omitted=fraction_omitted)
-        painter.drawText(integer, vertical | Qt.AlignRight, integer_text)
-        if fraction.width():
-            painter.drawText(fraction, vertical | Qt.AlignLeft, self._display_fraction(fraction.width()))
-        painter.end()
+        while "," in integer:
+            integer = integer.rsplit(",", 1)[0]
+            if fits(integer + ",…"):
+                return integer + ",…"
+        return "1 ＝ …" if fits("1 ＝ …") else "…"
 
 
 class _RateDeleteButton(ToolbarButton):
@@ -402,22 +338,15 @@ class CustomExchangeRatePanel(QWidget):
             self.row_widgets.append(row)
             value_labels.append(value)
 
-        rate_labels = [value for value in value_labels if isinstance(value, DecimalAlignedRateLabel)]
-        if rate_labels:
-            widths = [label.measured_columns() for label in rate_labels]
-            integer_width = max(integer for integer, _ in widths)
-            fraction_width = max(fraction for _, fraction in widths)
-            for label in rate_labels:
-                label.set_column_widths(integer_width, fraction_width)
-        self._centering_space = 0
         if value_labels:
-            # Give every row the same stretch budgets even when some values
-            # are showing longer status messages instead of numbers.
-            value_width = max(label.minimumWidth() for label in value_labels)
+            # With the same minimum and stretch, every row allocates the
+            # same width to the value column, including rows with status text.
+            value_width = max(
+                label.compact_width() if isinstance(label, RateValueLabel) else theme_font_size(12)
+                for label in value_labels
+            )
             for label in value_labels:
                 label.setMinimumWidth(value_width)
-            if rate_labels:
-                self._centering_space = max(0, rate_labels[0].centered_width() - value_width)
         self.card.setVisible(bool(pairs))
 
         self._render_refresh_status(league, latest_cached_at)
@@ -475,9 +404,6 @@ class CustomExchangeRatePanel(QWidget):
         if was_showing:
             QToolTip.showText(QCursor.pos(), tooltip, button)
 
-    def preferred_card_width(self) -> int:
-        return self.card.sizeHint().width() + self._centering_space
-
     def _make_row(
         self,
         index: int,
@@ -503,9 +429,7 @@ class CustomExchangeRatePanel(QWidget):
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(13)}px;"
         )
         layout.addWidget(left_name, 1)
-        value = DecimalAlignedRateLabel(display) if display_is_rate else ElidedLabel(display)
-        if not display_is_rate:
-            value.setMinimumWidth(theme_font_size(12))
+        value = RateValueLabel(display) if display_is_rate else ElidedLabel(display)
         value.setObjectName(f"customRateValue{index}")
         value.setAlignment(Qt.AlignCenter)
         value.setToolTip(value.text())

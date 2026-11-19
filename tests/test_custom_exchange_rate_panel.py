@@ -29,11 +29,11 @@ from src.ui.app_theme import POETORE_THEME
 from src.ui.custom_exchange_rate_panel import (
     RATE_CHECK_INTERVAL_MSEC,
     CustomExchangeRatePanel,
-    DecimalAlignedRateLabel,
     format_display_rate,
 )
 from src.ui.dialog_theme import UI_METRICS
 from src.utils.poe_version_data import POE1, POE2
+from tests.test_theme_painter_audit import inspect_paint
 
 
 @pytest.fixture(scope="module")
@@ -138,34 +138,29 @@ def test_rates_use_one_decimal_at_or_above_one_and_significant_digits_below_one(
     assert format_display_rate(value) == expected
 
 
-def test_rate_rows_center_equals_and_share_decimal_anchor(qapp, tmp_path):
+def test_rate_rows_center_full_text_in_shared_columns(qapp, tmp_path):
     ids = list(exchange_catalog_by_id(POE1))[:4]
-    pairs = [RatePair(ids[0], ids[2]), RatePair(ids[1], ids[3])]
-    results = {
-        (pairs[0].left_item_id, pairs[0].right_item_id): DirectPairPrice(
-            "available", pairs[0].left_item_id, pairs[0].right_item_id, 681, 720
-        ),
-        (pairs[1].left_item_id, pairs[1].right_item_id): DirectPairPrice(
-            "available", pairs[1].left_item_id, pairs[1].right_item_id, 7.398, 720
-        ),
-    }
+    pairs = [RatePair(ids[0], ids[2]), RatePair(ids[1], ids[3]), RatePair(ids[2], ids[0])]
+    results = {}
+    for pair, price in zip(pairs, (152.5, 0.0012341, None), strict=True):
+        left, right = pair.left_item_id, pair.right_item_id
+        status = "no_trades" if price is None else "available"
+        results[left, right] = DirectPairPrice(status, left, right, price, 720)
     panel, *_ = make_panel(qapp, tmp_path, pairs=pairs, service=FakeService(results))
     try:
-        values = [
-            panel.findChild(DecimalAlignedRateLabel, f"customRateValue{index}")
-            for index in range(2)
-        ]
-        assert [value.text() for value in values] == ["1 ＝ 681", "1 ＝ 7.4"]
-        equals_centers = []
-        decimal_anchors = []
-        for value in values:
-            unit, equals, integer, fraction = value._column_rects()
-            assert abs(equals.center().x() - value.contentsRect().center().x()) <= 1
-            assert unit.right() < equals.left() < integer.left()
-            assert integer.right() + 1 == fraction.left()
-            equals_centers.append(value.mapTo(panel, equals.center()).x())
-            decimal_anchors.append(value.mapTo(panel, fraction.topLeft()).x())
-        assert len(set(equals_centers)) == len(set(decimal_anchors)) == 1
+        for width in (800, 360, 800):
+            panel.resize(width, panel.height())
+            qapp.processEvents()
+            for column in ("LeftName", "Value", "RightName"):
+                labels = [
+                    row.findChild(QLabel, f"customRate{column}{index}")
+                    for index, row in enumerate(panel.row_widgets)
+                ]
+                assert len({(label.mapTo(panel, QPoint()).x(), label.width()) for label in labels}) == 1
+            for index, expected in enumerate(("1 ＝ 152.5", "1 ＝ 0.001234", "取引データなし")):
+                value = panel.row_widgets[index].findChild(QLabel, f"customRateValue{index}")
+                assert value.text() == value.toolTip() == expected
+                assert not inspect_paint(value, (expected,), centered=True)
         cached = panel.value_cache.get(
             POE1,
             "League",
@@ -173,7 +168,7 @@ def test_rate_rows_center_equals_and_share_decimal_anchor(qapp, tmp_path):
             pairs[1].right_item_id,
         )
         assert cached is not None
-        assert cached.price == 7.398
+        assert cached.price == 0.0012341
     finally:
         panel.stop()
         panel.close()

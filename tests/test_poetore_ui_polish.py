@@ -727,7 +727,7 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
     assert window._rate_scroll.horizontalScrollBar().maximum() == 0
     assert window._rate_scroll.verticalScrollBar().maximum() == 0
     assert not geometry_failures(window)
-    centers = set()
+    value_columns = set()
     for index, row in enumerate(window.rate_panel.row_widgets):
         for side in ("Left", "Right"):
             label = row.findChild(QLabel, f"customRate{side}Name{index}")
@@ -735,11 +735,9 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
             if not long_quotes:
                 assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
         value = row.findChild(QLabel, f"customRateValue{index}")
-        unit, equals, integer, fraction = value._column_rects()
-        assert all(value.rect().contains(column) for column in (unit, equals, integer, fraction))
-        assert abs(equals.center().x() - value.contentsRect().center().x()) <= 1
-        centers.add(value.mapTo(window, equals.center()).x())
-    assert len(centers) == 1
+        assert not inspect_paint(value, (value.text(),), centered=True)
+        value_columns.add((value.mapTo(window, QPoint()).x(), value.width()))
+    assert len(value_columns) == 1
 
 
 def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp_path, monkeypatch):
@@ -844,10 +842,10 @@ def test_main_rows_added_at_right_edge_keep_delete_reachable(qapp, tmp_path, mon
 @pytest.mark.parametrize(
     ("price", "wide_quote", "narrow_quote"),
     [
-        pytest.param(0.00001234, ("0", ".00001234"), ("0", ".00001…"), id="tiny"),
-        pytest.param(0.0057, ("0", ".0057"), ("0", ".0057"), id="subunit"),
-        pytest.param(100_000_000.1, ("100,000,000", ".1"), ("100,…",), id="large"),
-        pytest.param(197.2, ("197", ".2"), ("197", ".2"), id="normal"),
+        pytest.param(0.00001234, "0.00001234", "0.00001234", id="tiny"),
+        pytest.param(0.0057, "0.0057", "0.0057", id="subunit"),
+        pytest.param(100_000_000_000.1, "100,000,000,000.1", "100,000,000,…", id="large"),
+        pytest.param(197.2, "197.2", "197.2", id="normal"),
     ],
 )
 @pytest.mark.parametrize("narrow", [False, True])
@@ -870,9 +868,16 @@ def test_main_rate_paints_full_or_explicitly_elided_quote(
     settle(qapp, window)
 
     value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
-    assert value.toolTip() == "1 ＝ " + "".join(wide_quote)
-    quote = narrow_quote if narrow else wide_quote
-    assert not inspect_paint(value, ("1", "＝", *quote))
+    assert value.toolTip() == f"1 ＝ {wide_quote}"
+    if narrow:
+        window.resize(500, window.height())
+        assert_geometry_converges(qapp, window)
+        assert window.width() == 500
+        assert not inspect_paint(value, (f"1 ＝ {narrow_quote}",), centered=True)
+        window.resize(available.width(), window.height())
+        assert_geometry_converges(qapp, window)
+        assert window.width() == available.width()
+    assert not inspect_paint(value, (f"1 ＝ {wide_quote}",), centered=True)
 
 
 @pytest.mark.parametrize("preset", PRESETS)

@@ -1011,7 +1011,7 @@ class PoetoreModeWindow(QMainWindow):
         body_insets = 2 * UI_METRICS.page_margin
         rate_minimum = rate_layout.totalMinimumSize().width() + body_insets
         chrome_minimum = max(self.minimumWidth(), root.minimumSize().width())
-        preferred = max(self.width(), rate_minimum, self.rate_panel.preferred_card_width() + body_insets)
+        preferred = max(self.width(), rate_minimum, rate_layout.totalSizeHint().width() + body_insets)
         screen = self._screen_watcher.screen or self.screen()
         available = screen.availableGeometry() if screen is not None else None
         width_limit = self.maximumWidth()

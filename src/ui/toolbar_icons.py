@@ -18,6 +18,52 @@ def _finish(pixmap, painter) -> QIcon:
     return QIcon(pixmap)
 
 
+def line_icon_canvas(color):
+    pixmap, painter = _canvas()
+    painter.setPen(QPen(QColor(color), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    return pixmap, painter
+
+
+def finish_line_icon(pixmap, painter) -> QIcon:
+    icon = _finish(pixmap, painter)
+    disabled = QPixmap(pixmap.size())
+    disabled.setDevicePixelRatio(pixmap.devicePixelRatio())
+    disabled.fill(Qt.transparent)
+    with QPainter(disabled) as dim:
+        dim.setOpacity(0.45)
+        dim.drawPixmap(0, 0, pixmap)
+    icon.addPixmap(disabled, QIcon.Disabled)
+    return icon
+
+
+def list_add_icon(color) -> QIcon:
+    """Draw a list with a plus for managing the entries it contains."""
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawLine(QPointF(4, 6), QPointF(19, 6))
+    painter.drawLine(QPointF(4, 12), QPointF(11, 12))
+    painter.drawLine(QPointF(4, 18), QPointF(11, 18))
+    painter.drawLine(QPointF(14, 15), QPointF(21, 15))
+    painter.drawLine(QPointF(17.5, 11.5), QPointF(17.5, 18.5))
+    return finish_line_icon(pixmap, painter)
+
+
+def trash_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawLine(QPointF(4, 6.5), QPointF(20, 6.5))
+    handle = QPainterPath(QPointF(9, 6.5))
+    handle.lineTo(10, 3.5)
+    handle.lineTo(14, 3.5)
+    handle.lineTo(15, 6.5)
+    painter.drawPath(handle)
+    bin_body = QPainterPath(QPointF(6, 6.5))
+    bin_body.lineTo(7, 20.5)
+    bin_body.lineTo(17, 20.5)
+    bin_body.lineTo(18, 6.5)
+    painter.drawPath(bin_body)
+    painter.drawLine(QPointF(12, 10.5), QPointF(12, 16.5))
+    return finish_line_icon(pixmap, painter)
+
+
 def memo_icon(accent_color, panel_color, dark_color) -> QIcon:
     pixmap, painter = _canvas()
     accent, panel, dark = map(QColor, (accent_color, panel_color, dark_color))

@@ -2,8 +2,8 @@
 
 import threading
 
-from PySide6.QtCore import QObject, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygon
+from PySide6.QtCore import QObject, QPointF, QSize, Qt, Signal
+from PySide6.QtGui import QPainterPath
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -57,6 +57,7 @@ from src.ui.dialog_theme import (
     build_dialog_stylesheet,
 )
 from src.ui.settings_dialog import AutoHideHotkeyWidget, HotkeyButton
+from src.ui.toolbar_icons import finish_line_icon, line_icon_canvas
 from src.utils.feature_support import POETORE, is_feature_supported
 from src.utils.global_hotkeys import find_duplicate_hotkeys
 from src.utils.poe_version_data import POE1, POE2, POE_VERSION_ORDER, get_poe_label
@@ -67,25 +68,13 @@ class _LeagueSignals(QObject):
 
 
 def _duration_step_icon(direction, theme):
-    icon = QIcon()
-    points = {
-        "up": (QPoint(2, 11), QPoint(8, 5), QPoint(14, 11)),
-        "down": (QPoint(2, 5), QPoint(8, 11), QPoint(14, 5)),
-    }[direction]
-    for mode, color in (
-        (QIcon.Normal, theme.text),
-        (QIcon.Disabled, theme.disabled),
-    ):
-        pixmap = QPixmap(16, 16)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(color))
-        painter.drawPolygon(QPolygon(points))
-        painter.end()
-        icon.addPixmap(pixmap, mode)
-    return icon
+    pixmap, painter = line_icon_canvas(theme.muted_text)
+    edge_y, tip_y = (16, 8) if direction == "up" else (8, 16)
+    chevron = QPainterPath(QPointF(4, edge_y))
+    chevron.lineTo(12, tip_y)
+    chevron.lineTo(20, edge_y)
+    painter.drawPath(chevron)
+    return finish_line_icon(pixmap, painter)
 
 
 class PoetoreSettingsDialog(QDialog):
@@ -850,6 +839,7 @@ class PoetoreSettingsDialog(QDialog):
             ("down", -step_seconds),
         ):
             button = QPushButton()
+            button.setProperty("buttonRole", "icon")
             button.setFixedWidth(28)
             button.setAutoRepeat(True)
             button.setIcon(_duration_step_icon(direction, self.theme))

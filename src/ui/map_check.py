@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.ui.appearance import resolve_dialog_theme, theme_color, theme_font_size
 from src.poetore.clipboard import clipboard_change_token, read_item_clipboard
 from src.poetore.map_check import (
@@ -37,7 +38,9 @@ from src.poetore.window_position import (
     capture_placement_context,
     position_for_context_at_cursor_y,
 )
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, POETORE_DIALOG_THEME, apply_dialog_theme
+from src.ui.dialog_theme import (
+    POETORE_DIALOG_THEME, UI_METRICS, apply_dialog_theme, equalize_button_sizes, icon_button_stylesheet,
+)
 from src.utils.window_focus import (
     focus_window,
     get_foreground_window,
@@ -208,7 +211,7 @@ class MapCheckWindow(QDialog):
     MIN_HEIGHT = 180
     SCREEN_EDGE_MARGIN = 16
 
-    def __init__(self, config: dict, parent=None):
+    def __init__(self, config: dict, parent=None, *, app_mode=POENAVI_MODE):
         super().__init__(parent)
         self.config = normalized_map_check_config(config)
         self._font_size_name = str(config.get("_font_size", "medium")).casefold()
@@ -242,6 +245,9 @@ class MapCheckWindow(QDialog):
             self.profile_buttons.append(button)
         close = QPushButton("×")
         close.setFixedWidth(32)
+        if app_mode == POETORE_MODE:
+            close.setAccessibleName("閉じる")
+            close.setStyleSheet(icon_button_stylesheet())
         close.clicked.connect(self.close)
         header.addWidget(close)
         self.root.addLayout(header)

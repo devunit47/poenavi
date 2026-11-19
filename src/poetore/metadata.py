@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 import json
 import math
@@ -207,6 +207,38 @@ def normalize_stat_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+_ENGLISH_ANNOTATION = re.compile(
+    r"\(\s*[-+]?\d+(?:\.\d+)?\s*-\s*[-+]?\d+(?:\.\d+)?\s*\)"
+    r"|\s*\((?:implicit|crafted|enchant|fractured|veiled|local)\)", re.I,
+)
+_MATCH_CATEGORIES = {
+    "weapon": "WEAPON", "armour": "ARMOUR", "heist_equipment": "HEIST_EQUIPMENT",
+    "tincture": "Tincture", "sanctum_relic": "Sanctum Relic",
+}
+
+
+def _english_text(text: str) -> str:
+    return " ".join(_ENGLISH_ANNOTATION.sub("", text).casefold().split())
+
+
+def _english_match_key(text: str) -> str:
+    return normalize_stat_text(_english_text(text).replace(",", ""))
+
+
+@lru_cache(maxsize=1024)
+def _english_pattern(template: str) -> re.Pattern:
+    parts = re.split(r"[+-]?#", _english_text(template))
+    return re.compile(r"([-+]?\d[\d,]*(?:\.\d+)?)".join(map(re.escape, parts)))
+
+
+def english_template_values(text: str, template: str) -> tuple[float, ...] | None:
+    """番号や時間などの固定文言を照合し、#の表示値だけを取り出す。"""
+    match = _english_pattern(template).fullmatch(_english_text(text))
+    if match:
+        return tuple(float(value.replace(",", "")) for value in match.groups())
+    return None
+
+
 @dataclass(frozen=True)
 class TierRange:
     tier: int | None
@@ -240,6 +272,8 @@ class ModMetadata:
     tiers: tuple[TierRange, ...] = ()
     options: tuple[OptionValue, ...] = ()
     category_select: str | None = None
+    english: tuple[str, ...] = ()
+    english_negated: tuple[str, ...] = ()
 
     def search_bounds(self, value: float | None, roll_min: float | None = None,
                       roll_max: float | None = None, relaxation: float = 0.10
@@ -279,14 +313,26 @@ class MetadataIndex:
             for matcher in record.japanese:
                 self._by_match.setdefault((record.kind, normalize_stat_text(matcher)), []).append(record)
         self._by_option: dict[tuple[str, str], list[tuple[ModMetadata, OptionValue]]] = {}
+        self._by_english: dict[
+            tuple[str, str], list[tuple[ModMetadata, OptionValue | None, str, bool]]
+        ] = {}
         for record in self.records:
+            for templates, negated in ((record.english, False), (record.english_negated, True)):
+                for template in templates:
+                    key = (record.kind, _english_match_key(template))
+                    self._by_english.setdefault(key, []).append((record, None, template, negated))
             for option in record.options:
                 self._by_option.setdefault(
                     (record.kind, normalize_stat_text(option.japanese)), []
                 ).append((record, option))
+                if option.english:
+                    key = (record.kind, _english_match_key(option.english))
+                    self._by_english.setdefault(key, []).append(
+                        (record, option, option.english, record.negated)
+                    )
 
-    def match(self, text: str, kind: str) -> tuple[ModMetadata | None, float]:
-        record, _, confidence = self.match_with_option(text, kind)
+    def match(self, text: str, kind: str, *, allow_english: bool = True) -> tuple[ModMetadata | None, float]:
+        record, _, confidence = self.match_with_option(text, kind, allow_english=allow_english)
         return record, confidence
 
     def match_ref(self, ref: str, kind: str) -> tuple[ModMetadata | None, float]:
@@ -298,7 +344,7 @@ class MetadataIndex:
         return None, 0.0
 
     def match_with_option(
-        self, text: str, kind: str,
+        self, text: str, kind: str, *, allow_english: bool = True,
     ) -> tuple[ModMetadata | None, OptionValue | None, float]:
         key = ("explicit" if kind in {"prefix", "suffix"} else kind, normalize_stat_text(text))
         option_matches = self._by_option.get(key, ())
@@ -311,11 +357,13 @@ class MetadataIndex:
             return matches[0], None, 1.0
         if matches:
             return matches[0], None, 0.75
+        if allow_english:
+            return self.match_english(text, kind)
         return None, None, 0.0
 
     def match_for_item_category(
         self, text: str, kind: str, item_category: str,
-        generation: str | None = None,
+        generation: str | None = None, *, allow_english: bool = True,
     ) -> tuple[ModMetadata | None, OptionValue | None, float]:
         """アイテム種別・生成種別を使い、表示文が同じTrade statを解決する。"""
         key = ("explicit" if kind in {"prefix", "suffix"} else kind, normalize_stat_text(text))
@@ -330,13 +378,7 @@ class MetadataIndex:
             ]
             if len(mutated) == 1:
                 return mutated[0], None, 1.0
-        category = {
-            "weapon": "WEAPON",
-            "armour": "ARMOUR",
-            "heist_equipment": "HEIST_EQUIPMENT",
-            "tincture": "Tincture",
-            "sanctum_relic": "Sanctum Relic",
-        }.get(item_category)
+        category = _MATCH_CATEGORIES.get(item_category)
         selected = ([
             record for record in matches
             if record.category_select == category
@@ -346,7 +388,49 @@ class MetadataIndex:
         fallback = [record for record in matches if record.category_select == ""]
         if len(fallback) == 1:
             return fallback[0], None, 1.0
-        return self.match_with_option(text, kind)
+        result = self.match_with_option(text, kind, allow_english=False)
+        if result[0] is not None or not allow_english:
+            return result
+        return self.match_english(text, kind, item_category, generation)
+
+    def match_english(
+        self, text: str, kind: str, item_category: str = "",
+        generation: str | None = None,
+    ) -> tuple[ModMetadata | None, OptionValue | None, float]:
+        api_kind = "explicit" if kind in {"prefix", "suffix"} else kind
+        key = (api_kind, _english_match_key(text))
+        display_text = _english_text(text)
+        candidates = {}
+        for record, option, template, negated in self._by_english.get(key, ()):
+            if _english_pattern(template).fullmatch(display_text):
+                candidates[record.stat_id, option.value if option else None, negated] = (
+                    record, option, negated,
+                )
+        matches = list(candidates.values())
+        if item_category:
+            category = _MATCH_CATEGORIES.get(item_category)
+            scoped = [row for row in matches if category and row[0].category_select == category]
+            matches = scoped or [row for row in matches if not row[0].category_select]
+            fallback = [row for row in matches if row[0].category_select == ""]
+            matches = fallback or matches
+        if len(matches) > 1 and re.search(r"\(local\)", text, re.I):
+            matches = [row for row in matches if row[0].local]
+        if len(matches) > 1 and generation == "foulborn":
+            matches = [row for row in matches if any(
+                (tier.mod_id or "").casefold().startswith("mutatedunique")
+                for tier in row[0].tiers
+            )] or matches
+        if len(matches) > 1 and all(row[0].tiers for row in matches):
+            affix = generation or kind
+            matches = [row for row in matches if any(
+                tier.generation == affix for tier in row[0].tiers
+            )] or matches
+        if len(matches) == 1:
+            record, option, negated = matches[0]
+            if record.negated != negated:
+                record = replace(record, negated=negated)
+            return record, option, 1.0
+        return None, None, 0.0
 
     def match_directional_inverse(
         self, text: str, kind: str, item_category: str = "",
@@ -375,7 +459,7 @@ class MetadataIndex:
         for candidate in candidates:
             if item_category:
                 record, option, confidence = self.match_for_item_category(
-                    candidate, kind, item_category, generation,
+                    candidate, kind, item_category, generation, allow_english=False,
                 )
                 if record is not None and confidence == 1.0:
                     resolved.append((record, option))
@@ -417,6 +501,10 @@ class MetadataIndex:
                 local=bool(row.get("local", False)),
                 decimal=bool(row.get("decimal", False)),
                 tiers=tiers, options=options,
+                english=tuple(row["ref"] if template is None else template
+                              for template in row.get("english", ())),
+                english_negated=tuple(row["ref"] if template is None else template
+                                      for template in row.get("english_negated", ())),
                 category_select=("" if row.get("category_select") is None
                                  and "category_select" in row
                                  else row.get("category_select")),

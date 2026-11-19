@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from functools import lru_cache
+from functools import lru_cache, partial
 
 from .metadata import (
     default_metadata_index,
+    english_template_values,
     gem_metadata,
     multi_value_rule,
     normalize_stat_text,
@@ -458,11 +459,23 @@ def _is_added_damage_range_template(template: str) -> bool:
     return "#から#" in template and "ダメージ" in template and "反射する" not in template
 
 
-def _modifier_values(line: str, metadata) -> tuple[float, ...]:
+def _modifier_values(line: str, metadata, *, english: bool = False) -> tuple[float, ...]:
     """安全に意味が確定している公式テンプレートだけ値解釈へ利用する。"""
     if metadata:
-        template_values = _values_for_matched_template(line, metadata.japanese)
+        template_values = None
+        english_template = ""
+        if english:
+            templates = metadata.english_negated if metadata.negated else metadata.english
+            for template in templates:
+                template_values = english_template_values(line, template)
+                if template_values is not None:
+                    english_template = template
+                    break
+        else:
+            template_values = _values_for_matched_template(line, metadata.japanese)
         if template_values is not None:
+            if english and not template_values:
+                return ()
             rule = multi_value_rule(metadata.stat_id)
             if rule:
                 operation = rule.get("operation")
@@ -473,9 +486,20 @@ def _modifier_values(line: str, metadata) -> tuple[float, ...]:
                 if operation == "mean":
                     return (sum(template_values) / len(template_values),)
                 if operation == "index":
+                    if english:
+                        # 監査済みのindexルールは可変パーセント値を選ぶ。
+                        positions = [i for i, suffix in enumerate(english_template.split("#")[1:])
+                                     if suffix.startswith("%")]
+                        return (template_values[positions[0]],) if len(positions) == 1 else ()
                     return (template_values[int(rule["value_index"])],)
-                if operation == "half_second":
+                if operation == "half_second" and len(template_values) >= 2:
                     return (template_values[1] / 2,)
+            if english:
+                if len(template_values) == 2 and any(
+                    _is_added_damage_range_template(template) for template in metadata.japanese
+                ):
+                    return ((template_values[0] + template_values[1]) / 2,)
+                return template_values
             matching_templates = tuple(
                 template for template in metadata.japanese
                 if normalize_stat_text(template) == normalize_stat_text(line)
@@ -542,7 +566,7 @@ def _modifier_header_kind(line: str) -> str | None:
 
 
 def _combine_multiline_modifiers(
-    modifiers: list[ItemModifier],
+    modifiers: list[ItemModifier], item_category: str, allow_english: bool,
 ) -> list[ItemModifier]:
     """同じMod見出しに属する複数行を、公式の改行Stat単位へ戻す。"""
     result: list[ItemModifier] = []
@@ -581,8 +605,12 @@ def _combine_multiline_modifiers(
                 group = modifiers[index:index + size]
                 text = "\n".join(row.text for row in group)
                 metadata, option, confidence = metadata_index.match_with_option(
-                    text, first.kind,
+                    text, first.kind, allow_english=False,
                 )
+                if metadata is None and allow_english:
+                    metadata, option, confidence = metadata_index.match_english(
+                        text, first.kind, item_category, first.generation,
+                    )
                 if metadata is None:
                     continue
                 result.append(replace(
@@ -618,7 +646,7 @@ def _combine_multiline_modifiers(
             group = modifiers[index:index + size]
             text = "\n".join(row.text for row in group)
             metadata, option, confidence = metadata_index.match_with_option(
-                text, first.kind,
+                text, first.kind, allow_english=False,
             )
             if metadata is None:
                 aliased_text = text
@@ -626,16 +654,29 @@ def _combine_multiline_modifiers(
                     aliased_text = aliased_text.replace(source, replacement)
                 if aliased_text != text:
                     metadata, option, confidence = metadata_index.match_with_option(
-                        aliased_text, first.kind,
+                        aliased_text, first.kind, allow_english=False,
                     )
+            english_match = False
+            if metadata is None and allow_english:
+                metadata, option, confidence = metadata_index.match_english(
+                    text, first.kind, item_category, first.generation,
+                )
+                english_match = metadata is not None
             if metadata is None:
                 continue
             roll_mins = [row.roll_min for row in group if row.roll_min is not None]
             roll_maxes = [row.roll_max for row in group if row.roll_max is not None]
+            if english_match:
+                values = tuple(
+                    apply_roll_increase(value, first.roll_increase, decimal=metadata.decimal)
+                    for value in _modifier_values(text, metadata, english=True)
+                )
+            else:
+                values = tuple(value for row in group for value in row.values)
             result.append(replace(
                 first,
                 text=text,
-                values=tuple(value for row in group for value in row.values),
+                values=values,
                 ref=metadata.ref,
                 stat_id=metadata.stat_id,
                 confidence=confidence,
@@ -723,6 +764,7 @@ def _modifier_header_details(
 
 def _is_unique_flavour_section(
     section: list[str], rarity: str, item_category: str, has_modifiers: bool,
+    allow_english: bool,
 ) -> bool:
     """Unique末尾のフレーバーテキスト区画を検索Modから除外する。"""
     if rarity.casefold() not in {"unique", "ユニーク"} or not has_modifiers:
@@ -742,7 +784,9 @@ def _is_unique_flavour_section(
         return False
     # 通常コピーでは波括弧付き見出しがないため、公式Modへ解決できる区画は残す。
     return not any(
-        default_metadata_index().match_with_option(text, "explicit")[0]
+        default_metadata_index().match_for_item_category(
+            text, "explicit", item_category, allow_english=allow_english,
+        )[0]
         for text in candidates
     )
 
@@ -833,7 +877,7 @@ def _parse_mercenary_warrant_sections(
     return properties, tuple(modifiers)
 
 
-def parse_item_text(text: str) -> ParsedItem:
+def parse_item_text(text: str, *, english_mod_matching: bool = True) -> ParsedItem:
     """PoEの詳細コピー文を、価格検索に渡せる最小構造へ変換する。"""
     if not text or not text.strip():
         raise ItemParseError("アイテム文章が空です。")
@@ -841,6 +885,8 @@ def parse_item_text(text: str) -> ParsedItem:
     if not sections:
         raise ItemParseError("アイテム文章を読み取れませんでした。")
 
+    metadata_index = default_metadata_index()
+    match_option = partial(metadata_index.match_with_option, allow_english=False)
     header: dict[str, str] = {}
     name_lines: list[str] = []
     usability_warning_seen = False
@@ -849,6 +895,8 @@ def parse_item_text(text: str) -> ParsedItem:
         key = _LABELS.get(pair[0]) if pair else None
         if key:
             header[key] = pair[1]
+            if pair[0] in {"アイテムクラス", "レアリティ"}:
+                english_mod_matching = False
         elif _ITEM_USABILITY_WARNING.fullmatch(line.strip()):
             usability_warning_seen = True
         else:
@@ -949,7 +997,7 @@ def parse_item_text(text: str) -> ParsedItem:
         current_header_quality_affected = None
         current_header_roll_increase = None
         if reached_item_level and _is_unique_flavour_section(
-            section, rarity, item_category, bool(modifiers),
+            section, rarity, item_category, bool(modifiers), english_mod_matching,
         ):
             continue
         section_has_modifier_evidence = _section_has_modifier_evidence(section)
@@ -1061,11 +1109,12 @@ def parse_item_text(text: str) -> ParsedItem:
             metadata_text = (
                 current_header_name if kind == "veiled" and current_header_name else line
             )
-            metadata, option, confidence = default_metadata_index().match_for_item_category(
+            metadata, option, confidence = metadata_index.match_for_item_category(
                 metadata_text, kind, item_category,
                 current_header_generation if from_header else (
                     "foulborn" if is_mutated else None
                 ),
+                allow_english=False,
             )
             if metadata is None and (
                 "盾" in header.get("item_class", "")
@@ -1076,14 +1125,14 @@ def parse_item_text(text: str) -> ParsedItem:
                 )
                 if shield_alias:
                     metadata, option, confidence = (
-                        default_metadata_index().match_with_option(shield_alias, kind)
+                        match_option(shield_alias, kind)
                     )
             direction_inverted = False
             direction_alias_key = None
             if metadata is None:
                 direction_alias_key = normalize_stat_text(metadata_text)
                 metadata, option, confidence = (
-                    default_metadata_index().match_directional_inverse(
+                    metadata_index.match_directional_inverse(
                         metadata_text, kind, item_category,
                         current_header_generation if from_header else (
                             "foulborn" if is_mutated else kind
@@ -1096,7 +1145,7 @@ def parse_item_text(text: str) -> ParsedItem:
                     if metadata is None else None
                 )
                 if metadata is None and alias:
-                    metadata, option, confidence = default_metadata_index().match_with_option(
+                    metadata, option, confidence = match_option(
                         alias, kind,
                     )
                     direction_inverted = metadata is not None
@@ -1121,7 +1170,7 @@ def parse_item_text(text: str) -> ParsedItem:
                         f"{random_skill.group('skill')}"
                     )
                     metadata, option, confidence = (
-                        default_metadata_index().match_with_option(
+                        match_option(
                             api_matcher, kind,
                         )
                     )
@@ -1143,12 +1192,12 @@ def parse_item_text(text: str) -> ParsedItem:
                         f"{random_support.group('suffix')}"
                     )
                     metadata, option, confidence = (
-                        default_metadata_index().match_with_option(
+                        match_option(
                             api_matcher, kind,
                         )
                     )
             if metadata is None and stat_alias_key in _STAT_TEXT_ALIASES:
-                metadata, option, confidence = default_metadata_index().match_with_option(
+                metadata, option, confidence = match_option(
                     _STAT_TEXT_ALIASES[stat_alias_key], kind,
                 )
             if (
@@ -1159,13 +1208,22 @@ def parse_item_text(text: str) -> ParsedItem:
                 # Nightmare Mapの高度なModヘッダーはdesecrated生成だが、
                 # 公式Trade APIは対応Statをexplicit名前空間で公開している。
                 explicit_text = _STAT_TEXT_ALIASES.get(stat_alias_key, metadata_text)
-                metadata, option, confidence = default_metadata_index().match_with_option(
+                metadata, option, confidence = match_option(
                     explicit_text, "explicit",
                 )
             if metadata is None and kind == "veiled" and current_header_name:
-                metadata, confidence = default_metadata_index().match_ref(
+                metadata, confidence = metadata_index.match_ref(
                     current_header_name, kind,
                 )
+            english_match = False
+            if metadata is None and map_check_exact is None and english_mod_matching:
+                metadata, option, confidence = metadata_index.match_english(
+                    metadata_text, kind, item_category,
+                    current_header_generation if from_header else (
+                        "foulborn" if is_mutated else None
+                    ),
+                )
+                english_match = metadata is not None
             if (
                 metadata is None
                 and _PARENTHETICAL_LINE.fullmatch(line)
@@ -1181,7 +1239,7 @@ def parse_item_text(text: str) -> ParsedItem:
                                if tier.generation in {"prefix", "suffix"}}
                 if len(generations) == 1:
                     inferred_affix = generations.pop()
-            values = _modifier_values(line, metadata)
+            values = _modifier_values(line, metadata, english=english_match)
             if stat_alias_key in _STAT_VALUE_OVERRIDES:
                 values = _STAT_VALUE_OVERRIDES[stat_alias_key]
             value_index = _DIRECTIONAL_STAT_VALUE_INDEX.get(direction_alias_key)
@@ -1276,7 +1334,7 @@ def parse_item_text(text: str) -> ParsedItem:
             if foulborn_name:
                 name = foulborn_name.group(1).strip()
 
-    modifiers = _combine_multiline_modifiers(modifiers)
+    modifiers = _combine_multiline_modifiers(modifiers, item_category, english_mod_matching)
     return ParsedItem(
         item_class=header.get("item_class", ""), rarity=rarity, name=name,
         base_type=base_type, category=item_category,

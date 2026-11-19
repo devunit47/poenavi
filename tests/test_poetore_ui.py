@@ -4340,7 +4340,10 @@ def test_poe2_price_result_uses_extra_currency_icons(
         window.close()
 
 
-def test_currency_icon_price_column_reserves_30_percent_more_width(qapp):
+def test_currency_icon_price_column_reserves_30_percent_more_width(qapp, isolated_bundled_font):
+    from src.app_font import apply_bundled_ui_font
+
+    assert apply_bundled_ui_font(qapp)
     window = PoetoreWindow()
     try:
         listing = PriceListing(1234, "chaos")

@@ -18,7 +18,7 @@ def test_bundled_noto_sans_jp_is_the_pinned_google_fonts_file():
     assert hashlib.sha256(path.read_bytes()).hexdigest() == FONT_SHA256
 
 
-def test_apply_bundled_ui_font_registers_and_selects_noto_sans_jp(qapp):
+def test_apply_bundled_ui_font_registers_and_selects_noto_sans_jp(qapp, isolated_bundled_font):
     assert isinstance(qapp, QApplication)
     assert apply_bundled_ui_font(qapp) == EXPECTED_FAMILY
     assert qapp.font().family() == EXPECTED_FAMILY

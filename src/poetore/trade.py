@@ -4098,6 +4098,10 @@ def resolve_trade_stat_filters(
             indexed_candidates.extend(
                 entries_by_id.get((api_kind, modifier.stat_id), ())
             )
+            if not indexed_candidates and modifier.option_value is not None:
+                indexed_candidates.extend(entries_by_id.get(
+                    (api_kind, f"{modifier.stat_id}|{modifier.option_value}"), (),
+                ))
         candidates = []
         seen_positions = set()
         for position, entry in sorted(indexed_candidates, key=lambda row: row[0]):
@@ -4150,9 +4154,16 @@ def resolve_trade_stat_filters(
             maximum = None
             modifier_inverted = modifier.inverted
             if modifier.stat_id == str(entry["id"]):
-                metadata, _ = default_metadata_index().match(modifier.text, modifier.kind)
+                index = default_metadata_index()
+                metadata, _ = index.match(modifier.text, modifier.kind, allow_english=False)
+                if metadata is None:
+                    english, _, _ = index.match_english(
+                        modifier.text, modifier.kind, item.category, modifier.generation,
+                    )
+                    if english is not None and english.stat_id == modifier.stat_id:
+                        metadata = english
                 if metadata is None and modifier.ref:
-                    metadata, _ = default_metadata_index().match_ref(
+                    metadata, _ = index.match_ref(
                         modifier.ref, modifier.kind,
                     )
                 if metadata and not preferred_stat_id:

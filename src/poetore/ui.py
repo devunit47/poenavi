@@ -1169,6 +1169,7 @@ class PoetoreWindow(QWidget):
         self._pending_trade_conditions = None
         self._pending_capture_identity_text: str | None = None
         self._active_item_key: str | None = None
+        self._active_english_mod_matching = self._english_mod_matching_enabled()
         self._auto_search_queued = False
         self._unique_icon_manager = QNetworkAccessManager(self)
         self._unique_icon_manager.finished.connect(self._unique_icon_downloaded)
@@ -5568,7 +5569,9 @@ class PoetoreWindow(QWidget):
         if trace is not None:
             trace.mark("ui_parse_completed", modifiers=len(item.modifiers))
         is_new_item = item.raw_text != self._active_item_key
-        if is_new_item and not search_cycle_already_invalidated:
+        english_mod_matching = self._english_mod_matching_enabled()
+        matching_changed = english_mod_matching != self._active_english_mod_matching
+        if (is_new_item or matching_changed) and not search_cycle_already_invalidated:
             self._advance_search_generation()
         self._configure_trade_presets(item)
         preset = str(self.trade_preset_combo.currentData() or PRESET_FINISHED)
@@ -5649,6 +5652,10 @@ class PoetoreWindow(QWidget):
                 self._pending_capture_identity_text = None
             resolved_rows = self._resolved_trade_filters(item, preset, resolved_rows=rows)
 
+        if matching_changed:
+            self.mod_filter_tree.clear()
+            self._special_chip_item_key = None
+        self._active_english_mod_matching = english_mod_matching
         if is_new_item:
             self._active_item_key = item.raw_text
             self._has_searched_current_item = False
@@ -5710,7 +5717,7 @@ class PoetoreWindow(QWidget):
         self._update_disenchant_dust(item)
         if initial_filters is not None:
             self._populate_stat_filters(initial_filters)
-        if is_new_item:
+        if is_new_item or matching_changed:
             self._reset_mod_conditions_for_item()
         if self.poe_version == POE2:
             warnings = tuple(mod.text for mod in item.modifiers if not mod.stat_id)
@@ -5765,11 +5772,16 @@ class PoetoreWindow(QWidget):
         if trace is not None:
             trace.mark("ui_parse_applied")
 
+    def _english_mod_matching_enabled(self) -> bool:
+        return self.poe_version != POE2 and bool(
+            self._app_config.get("poetore", {}).get("english_mod_matching", True)
+        )
+
     def _parse_item_text(self, text: str):
         if self.poe_version == POE2:
             from .poe2.parser import parse_item_text as parse_poe2_item_text
             return parse_poe2_item_text(text)
-        return parse_item_text(text)
+        return parse_item_text(text, english_mod_matching=self._english_mod_matching_enabled())
 
     def _update_mod_warning(self, item):
         warnings = unresolved_modifier_warnings(
@@ -5803,6 +5815,7 @@ class PoetoreWindow(QWidget):
             getattr(self, "_parsed_item", None) is not None
             and self._parsed_item_source_text == current_text
             and self._parsed_item_poe_version == self.poe_version
+            and self._active_english_mod_matching == self._english_mod_matching_enabled()
         )
         if can_reuse_parsed_item:
             trace.mark("search_parse_reused")

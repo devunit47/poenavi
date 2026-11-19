@@ -247,8 +247,6 @@ class PoetoreSettingsDialog(QDialog):
         error_layout.addWidget(self.capture_error_notification_cb)
         basic_layout.addWidget(error_group)
 
-        self._refresh_version_specific_controls()
-
         common_group = QGroupBox("共通機能")
         common_layout = QVBoxLayout(common_group)
         self.stash_tab_scroll_cb = QCheckBox(
@@ -417,6 +415,10 @@ class PoetoreSettingsDialog(QDialog):
         league_note.setProperty("uiRole", "muted")
         league_note.setWordWrap(True)
         trade_layout.addWidget(league_note)
+        self.english_mod_matching_cb = QCheckBox("英語Modの照合")
+        self.english_mod_matching_cb.setChecked(bool(poetore.get("english_mod_matching", True)))
+        trade_layout.addWidget(self.english_mod_matching_cb)
+        self._refresh_version_specific_controls()
         basic_layout.addWidget(trade_group)
 
         display_group = QGroupBox("検索結果・マップチェック画面")
@@ -716,6 +718,7 @@ class PoetoreSettingsDialog(QDialog):
         self.monastery_hotkey.setVisible(monastery_visible)
         self.map_check_label.setVisible(monastery_visible)
         self.map_check_hotkey.setVisible(monastery_visible)
+        self.english_mod_matching_cb.setVisible(self.poe_version == POE1)
 
     def _refresh_app_mode_availability(self):
         supported = is_feature_supported(POETORE, self.poe_version)
@@ -769,6 +772,7 @@ class PoetoreSettingsDialog(QDialog):
         poetore = dict(self.current_config.get("poetore", {}))
         league_key = "league_poe2" if self.poe_version == POE2 else "league"
         poetore[league_key] = self._league_selection_value()
+        poetore["english_mod_matching"] = self.english_mod_matching_cb.isChecked()
         poetore["result_font_size"] = (
             self.result_font_size_combo.currentData() or "medium"
         )

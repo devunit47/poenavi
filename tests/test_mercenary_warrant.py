@@ -84,12 +84,13 @@ def test_builds_variant_identity_and_selected_skill_query(monkeypatch):
     item = parse_item_text(SAMPLE)
     monkeypatch.setattr(trade, "_stat_entries_cache", STAT_ENTRIES)
     monkeypatch.setattr(trade, "_stat_entry_indexes_cache", None)
-    monkeypatch.setattr(trade, "_jp_item_entries_cache", ({
+    japanese_entries = ({
         "type": "ChaosMinionWitchInstabilityNoble",
         "text": "傭兵の召喚状 (悪名高きリアニメーター)",
         "disc": "mercenary_warrant",
-    },))
-    monkeypatch.setattr(trade, "_item_entries_cache", ())
+    },)
+    monkeypatch.setattr(trade, "_jp_trade_item_entries", lambda: japanese_entries)
+    monkeypatch.setattr(trade, "_trade_item_entries", lambda: ())
     selected = tuple(
         replace(row, enabled=row.stat_id in {"mercenary.skill_52491", "mercenary.skill_21523"})
         for row in trade.resolve_trade_stat_filters(item)
@@ -107,8 +108,8 @@ def test_builds_variant_identity_and_selected_skill_query(monkeypatch):
 
 def test_rejects_unknown_build_variant(monkeypatch):
     item = parse_item_text(SAMPLE)
-    monkeypatch.setattr(trade, "_jp_item_entries_cache", ())
-    monkeypatch.setattr(trade, "_item_entries_cache", ())
+    monkeypatch.setattr(trade, "_jp_trade_item_entries", lambda: ())
+    monkeypatch.setattr(trade, "_trade_item_entries", lambda: ())
     with pytest.raises(ValueError, match="公式Tradeデータ"):
         trade.build_search_query(item)
 

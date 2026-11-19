@@ -5644,8 +5644,6 @@ class PoetoreWindow(QWidget):
                     self._update_item_header(item)
                     self.disenchant_dust_panel.hide()
                     self._set_price_status("検索条件を準備中…", in_progress=True)
-                    # Item flags and the preset are known while the catalog loads.
-                    self._configure_influence_chips(item)
                     return
             self._trade_base_type, self._trade_item_name, rows = prepared_poe1_conditions
             if resolve_capture_identity:
@@ -6556,11 +6554,12 @@ class PoetoreWindow(QWidget):
         visible = set(influences) if 1 <= len(influences) <= 2 else set()
         exact = preset == PRESET_BASE or uses_dedicated_exact_preset(item)
         for influence, button in self.influence_chips.items():
-            button.setVisible(influence in visible)
+            show_chip = influence in visible
+            if not show_chip and button.isHidden():
+                continue
+            button.setVisible(show_chip)
             eldritch = influence in {"eater", "exarch"}
-            self._set_influence_filter_enabled(
-                influence, influence in visible and (exact or eldritch),
-            )
+            self._set_influence_filter_enabled(influence, show_chip and (exact or eldritch))
 
     def _toggle_influence_filter(self, influence: str):
         self._set_influence_filter_enabled(

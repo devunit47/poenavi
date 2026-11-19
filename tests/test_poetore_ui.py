@@ -1121,7 +1121,7 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(
         window._capture_item_copy()
         assert started.wait(1)
         assert not window.price_button.isEnabled()
-        configure_influences.assert_called_once()
+        configure_influences.assert_not_called()
         window.search_current_item()
         assert not searches
     finally:
@@ -1129,6 +1129,7 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(
 
     qtbot.waitUntil(lambda: len(searches) == 1 and window.price_button.isEnabled())
     assert searches == [("Leather Cap", "Goldrim")]
+    configure_influences.assert_called_once()
     assert search_content_enabled == [False]
     assert window._obs_content.isEnabled()
     expected_catalogs = [f"{trade.JP_API_ROOT}/data/stats"]
@@ -1138,6 +1139,130 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(
     window._capture_item_copy()
     qtbot.waitUntil(lambda: len(searches) == 2 and window.price_button.isEnabled())
     assert [url for url, _ in calls] == expected_catalogs
+
+
+_POE1_ELDRITCH_BOOTS = (
+    "Item Class: Boots\nRarity: Rare\nVictory Tread\nSorcerer Boots\n"
+    "--------\nItem Level: 83\n--------\n+70 to maximum Life\n"
+    "--------\nSearing Exarch Item\nEater of Worlds Item"
+)
+
+
+def test_poe1_recapture_preserves_influence_selection_after_cancelling(qapp, qtbot, monkeypatch):
+    from src.poetore import trade
+
+    shaper_boots = (
+        "Item Class: Boots\nRarity: Normal\nTitan Greaves\n"
+        "--------\nItem Level: 83\n--------\nShaper Item"
+    )
+    clipboard = Mock(return_value=shaper_boots)
+    window = PoetoreWindow(app_config={"poe_version": POE1})
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_start_outside_click_listener", Mock())
+    monkeypatch.setattr(window, "_queue_poe_ninja_price", Mock())
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", clipboard)
+    monkeypatch.setattr(trade, "_stat_entries_cache", None)
+    monkeypatch.setattr(trade, "_stat_entry_indexes_cache", None)
+    started, release = threading.Event(), threading.Event()
+    workers = []
+    searches = []
+
+    def catalog(url):
+        assert url == f"{trade.JP_API_ROOT}/data/stats"
+        workers.append(threading.current_thread())
+        started.set()
+        assert release.wait(3)
+        return {"result": []}, {}
+
+    def search(item, _base, *, stat_filters, **_kwargs):
+        shaper = any(
+            row.stat_id == "pseudo.pseudo_has_shaper_influence" and row.enabled
+            for row in stat_filters
+        )
+        searches.append((item.name, shaper))
+        return PriceResult("Standard", str(len(searches)), 0, ())
+
+    monkeypatch.setattr(trade, "_request_json", catalog)
+    monkeypatch.setattr("src.poetore.ui.search_prices", search)
+
+    window._capture_item_copy()
+    qtbot.waitUntil(lambda: window._last_price_result is not None)
+    chip = window.influence_chips["shaper"]
+    assert chip.isVisible()
+    assert searches == [("Titan Greaves", True)]
+    qtbot.mouseClick(chip, Qt.LeftButton)
+    window.price_button.click()
+    qtbot.waitUntil(
+        lambda: len(searches) == 2 and window._last_price_result is not None
+    )
+    assert searches[-1] == ("Titan Greaves", False)
+
+    try:
+        clipboard.return_value = _POE1_ELDRITCH_BOOTS
+        window._capture_item_copy()
+        assert started.wait(1)
+        _, cancel = window._pending_trade_conditions
+        clipboard.return_value = shaper_boots
+        window._capture_item_copy()
+        assert cancel.is_set()
+        qtbot.waitUntil(lambda: window._last_price_result is not None)
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+
+    qapp.processEvents()
+    assert searches == [
+        ("Titan Greaves", True), ("Titan Greaves", False), ("Titan Greaves", False),
+    ]
+    assert chip.isVisible() and not chip.property("active")
+    assert window._obs_content.isEnabled()
+
+
+def test_poe1_cold_influenced_capture_keeps_empty_result_height(qapp, qtbot, monkeypatch):
+    from src.poetore import trade
+
+    window = PoetoreWindow(app_config={
+        "poe_version": POE1,
+        "poetore": {"result_positions": {"inventory": {"x_ratio": 0.5, "y_ratio": 0.5}}},
+    })
+    qtbot.addWidget(window)
+    window._placement_context = PlacementContext(QRect(0, 0, 1920, 1080), QPoint(1700, 270))
+    monkeypatch.setattr(window, "_start_outside_click_listener", Mock())
+    monkeypatch.setattr(window, "_queue_poe_ninja_price", Mock())
+    monkeypatch.setattr("src.poetore.ui.read_item_clipboard", Mock(return_value=_POE1_ELDRITCH_BOOTS))
+    monkeypatch.setattr(trade, "_stat_entries_cache", None)
+    monkeypatch.setattr(trade, "_stat_entry_indexes_cache", None)
+    started, release = threading.Event(), threading.Event()
+    empty_result = PriceResult("Standard", "empty", 0, ())
+
+    def catalog(url):
+        assert url == f"{trade.JP_API_ROOT}/data/stats"
+        started.set()
+        assert release.wait(3)
+        return {"result": []}, {}
+
+    monkeypatch.setattr(trade, "_request_json", catalog)
+    monkeypatch.setattr("src.poetore.ui.search_prices", Mock(return_value=empty_result))
+
+    try:
+        window._capture_item_copy()
+        assert started.wait(1)
+        qapp.processEvents()
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: window._last_price_result is empty_result)
+    qapp.processEvents()
+    assert window.influence_chips["eater"].isVisible()
+    assert window.influence_chips["exarch"].isVisible()
+    scrollbar = window._content_scroll.verticalScrollBar()
+    result_layout = (window.height(), scrollbar.maximum())
+
+    # A fresh layout pass after the same result should need no extra height.
+    window._adjust_window_height_to_mod_rows()
+    qapp.processEvents()
+    assert result_layout == (window.height(), scrollbar.maximum())
 
 
 def test_poe1_new_capture_cancels_next_catalog_request(qtbot, monkeypatch):

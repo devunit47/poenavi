@@ -5527,8 +5527,13 @@ class PoetoreWindow(QWidget):
     def _apply_prepared_trade_conditions(self, apply, result):
         pending = self._pending_trade_conditions
         if pending is not None and pending[0] is apply:
-            self._clear_pending_trade_conditions()
-            apply(result)
+            self._pending_trade_conditions = None
+            # Let the prepared search start before re-enabling the whole panel.
+            try:
+                apply(result)
+            finally:
+                if self._pending_trade_conditions is None:
+                    self._obs_content.setEnabled(True)
 
     def parse_current_text(
         self,
@@ -5618,17 +5623,6 @@ class PoetoreWindow(QWidget):
                         if search_after_parse:
                             self.search_current_item()
 
-                    self._clear_pending_trade_conditions()
-                    self._pending_trade_conditions = (apply, cancel)
-                    self._obs_content.setEnabled(False)
-                    if self._poe_ninja_item_key and self._poe_ninja_item_key[0] != item.raw_text:
-                        self._poe_ninja_item_key = None
-                        self._hide_poe_ninja_price()
-                        self._hide_related_items()
-                    self._update_item_header(item)
-                    self.disenchant_dust_panel.hide()
-                    self._set_price_status("検索条件を準備中…", in_progress=True)
-
                     def run():
                         try:
                             with trade_search_scope(cancel):
@@ -5639,7 +5633,19 @@ class PoetoreWindow(QWidget):
                             result = exc
                         self._trade_signals.conditions_ready.emit(apply, result)
 
+                    self._clear_pending_trade_conditions()
+                    self._pending_trade_conditions = (apply, cancel)
                     threading.Thread(target=run, daemon=True).start()
+                    self._obs_content.setEnabled(False)
+                    if self._poe_ninja_item_key and self._poe_ninja_item_key[0] != item.raw_text:
+                        self._poe_ninja_item_key = None
+                        self._hide_poe_ninja_price()
+                        self._hide_related_items()
+                    self._update_item_header(item)
+                    self.disenchant_dust_panel.hide()
+                    self._set_price_status("検索条件を準備中…", in_progress=True)
+                    # Item flags and the preset are known while the catalog loads.
+                    self._configure_influence_chips(item)
                     return
             self._trade_base_type, self._trade_item_name, rows = prepared_poe1_conditions
             if resolve_capture_identity:

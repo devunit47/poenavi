@@ -1064,13 +1064,18 @@ def test_poe1_capture_starts_trade_before_filter_ui_finishes(qapp):
         window.close()
 
 
-def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, monkeypatch):
+@pytest.mark.parametrize("english_identity", [False, True])
+def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(
+    qapp, qtbot, monkeypatch, english_identity,
+):
     from src.poetore import trade
 
     copied = (
         "アイテムクラス: 兜\nレアリティ: ユニーク\nゴールドリム\n革の帽子\n"
         "--------\nアイテムレベル: 68\n--------\n全ての元素耐性 +35%\n"
     )
+    if english_identity:
+        copied = copied.replace("ゴールドリム\n革の帽子", "Goldrim\nLeather Cap")
     window = PoetoreWindow(app_config={"poe_version": POE1})
     qtbot.addWidget(window)
     monkeypatch.setattr(trade, "_item_catalogs_cache", trade._TradeItemCatalogSnapshot())
@@ -1079,6 +1084,17 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, mon
     monkeypatch.setattr(window, "show_at_context", Mock())
     monkeypatch.setattr("src.poetore.ui.read_item_clipboard", lambda _clipboard: copied)
     monkeypatch.setattr("src.poetore.ui.unique_variants", lambda *_args: ())
+    configure_influences = Mock(wraps=window._configure_influence_chips)
+    monkeypatch.setattr(window, "_configure_influence_chips", configure_influences)
+    search_current_item = window.search_current_item
+    search_content_enabled = []
+
+    def start_search(**kwargs):
+        if kwargs.get("initial_filters") is not None:
+            search_content_enabled.append(window._obs_content.isEnabled())
+        return search_current_item(**kwargs)
+
+    monkeypatch.setattr(window, "search_current_item", start_search)
     started, release = threading.Event(), threading.Event()
     calls, searches = [], []
 
@@ -1105,6 +1121,7 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, mon
         window._capture_item_copy()
         assert started.wait(1)
         assert not window.price_button.isEnabled()
+        configure_influences.assert_called_once()
         window.search_current_item()
         assert not searches
     finally:
@@ -1112,10 +1129,15 @@ def test_poe1_cold_capture_loads_catalogs_off_gui_before_search(qapp, qtbot, mon
 
     qtbot.waitUntil(lambda: len(searches) == 1 and window.price_button.isEnabled())
     assert searches == [("Leather Cap", "Goldrim")]
-    assert len(calls) == 3
+    assert search_content_enabled == [False]
+    assert window._obs_content.isEnabled()
+    expected_catalogs = [f"{trade.JP_API_ROOT}/data/stats"]
+    if not english_identity:
+        expected_catalogs[:0] = [f"{root}/data/items" for root in (trade.JP_API_ROOT, trade.API_ROOT)]
+    assert [url for url, _ in calls] == expected_catalogs
     window._capture_item_copy()
     qtbot.waitUntil(lambda: len(searches) == 2 and window.price_button.isEnabled())
-    assert len(calls) == 3
+    assert [url for url, _ in calls] == expected_catalogs
 
 
 def test_poe1_new_capture_cancels_next_catalog_request(qtbot, monkeypatch):

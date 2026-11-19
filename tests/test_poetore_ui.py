@@ -643,18 +643,104 @@ def test_copy_polls_until_clipboard_generation_changes(qapp):
         window.close()
 
 
-def test_copy_uses_existing_capture_after_clipboard_timeout(qapp):
+def test_copy_uses_existing_capture_after_qt_clipboard_timeout(qapp):
     window = PoetoreWindow()
     window._clipboard_wait_generation = 1
     callback = Mock()
     try:
         with patch(
-            "src.poetore.ui.clipboard_change_token", return_value=("windows", 10),
+            "src.poetore.ui.clipboard_change_token", return_value=("qt", "same text"),
         ), patch.object(QTimer, "singleShot") as single_shot:
-            window._wait_for_clipboard_update(("windows", 10), callback, 1, 300)
+            window._wait_for_clipboard_update(("qt", "same text"), callback, 1, 300)
 
         callback.assert_called_once_with()
         single_shot.assert_not_called()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize(
+    ("poe_version", "item_class", "base_type", "search_target"),
+    [
+        (POE1, "Boots", "Mesh Boots", "src.poetore.ui.search_prices"),
+        (POE2, "Spears", "Soaring Spear", "src.poetore.poe2.trade.search_prices"),
+    ],
+    ids=["poe1", "poe2"],
+)
+@pytest.mark.parametrize(
+    ("clipboard_updated", "notify"),
+    [(False, True), (False, False), (True, True)],
+    ids=["timeout-notify", "timeout-silent", "same-text-recopy"],
+)
+def test_alt_d_capture_uses_windows_clipboard_sequence(
+    qtbot, poe_version, item_class, base_type, search_target, clipboard_updated, notify,
+):
+    window = PoetoreWindow(app_config={
+        "poe_version": poe_version,
+        "poetore": {"capture_error_notification_enabled": notify},
+    })
+    copied = f"Item Class: {item_class}\nRarity: Normal\n{base_type}\n--------\nItem Level: 68\n"
+    old_result = PriceResult(
+        "Standard", "old-query", 20, (PriceListing(1, "divine"),),
+        next_result_ids=("listing-11",), web_url="https://example.invalid/old-trade",
+    )
+    new_result = replace(old_result, query_id="new-query")
+    scheduled = []
+    dialog = Mock()
+    try:
+        with (
+            patch("pynput.keyboard.Controller"),
+            patch("src.poetore.ui.get_foreground_window", return_value=None),
+            patch("src.poetore.ui.read_item_clipboard", return_value=copied) as read_clipboard,
+            patch("src.poetore.ui.clipboard_change_token", return_value=("windows", 10)) as token,
+            patch("src.poetore.ui.english_trade_identity", return_value=(base_type, None)),
+            patch.object(window, "_resolved_trade_filters", return_value=()),
+            patch.object(window, "show_at_context"),
+            patch.object(window, "_build_capture_error_dialog", return_value=dialog) as build_dialog,
+            patch(search_target, return_value=new_result) as search,
+            patch.object(
+                QTimer, "singleShot",
+                side_effect=lambda delay, fn: scheduled.append((delay, fn)),
+            ),
+        ):
+            window.input_edit.setPlainText(copied)
+            window.parse_current_text()
+            window._show_price_result(old_result)
+            old_status = window.price_status.text()
+            old_item = window._parsed_item
+
+            window.capture_from_poe(capture_hotkey="alt+d")
+            window.capture_hotkey_released()
+            assert scheduled.pop(0)[0] == 250  # Hotkey release fallback.
+            for elapsed_ms in range(10, 301, 10):
+                if clipboard_updated and elapsed_ms == 300:
+                    token.return_value = ("windows", 11)
+                delay, poll = scheduled.pop(0)
+                assert delay == 10
+                poll()
+
+            if clipboard_updated:
+                qtbot.waitUntil(lambda: window._last_price_result is new_result)
+                read_clipboard.assert_called_once()
+                assert search.call_count == 1
+                assert search.call_args.args[0].base_type == base_type
+                build_dialog.assert_not_called()
+            else:
+                assert window._last_price_result is old_result
+                assert window.price_list.topLevelItemCount() == 1
+                assert window.price_status.text() == old_status
+                assert window._parsed_item is old_item
+                assert window.price_button.isEnabled()
+                assert window.trade_url_button.isEnabled()
+                assert window.additional_results_button.isHidden() == (poe_version == POE1)
+                assert window.additional_results_button.isEnabled() == (poe_version == POE2)
+                read_clipboard.assert_not_called()
+                search.assert_not_called()
+                if notify:
+                    build_dialog.assert_called_once_with()
+                    dialog.exec.assert_called_once_with()
+                else:
+                    build_dialog.assert_not_called()
     finally:
         window.close()
 

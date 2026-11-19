@@ -5103,7 +5103,11 @@ class PoetoreWindow(QWidget):
         if elapsed_ms >= 300:
             if trace is not None:
                 trace.mark("clipboard_change_timeout", wait_ms=elapsed_ms)
-            callback()
+            if previous_token[0] == "windows":
+                self._handle_capture_failure()
+            else:
+                # The Qt text token cannot detect copies of identical text.
+                callback()
             return
         delay_ms = min(10, 300 - elapsed_ms)
         QTimer.singleShot(
@@ -5170,6 +5174,12 @@ class PoetoreWindow(QWidget):
         poetore = poetore if isinstance(poetore, dict) else {}
         return bool(poetore.get("capture_error_notification_enabled", False))
 
+    def _handle_capture_failure(self, parse_error: str = ""):
+        self._last_capture_parse_error = parse_error
+        self._pending_performance_trace = None
+        if self._capture_error_notification_enabled():
+            self._build_capture_error_dialog().exec()
+
     def _capture_item_copy(self):
         trace = self._pending_performance_trace
         copied_text = read_item_clipboard(QApplication.clipboard())
@@ -5187,10 +5197,7 @@ class PoetoreWindow(QWidget):
         except (ItemParseError, ValueError) as error:
             if trace is not None:
                 trace.mark("clipboard_parse_failed")
-            self._last_capture_parse_error = str(error)
-            self._pending_performance_trace = None
-            if self._capture_error_notification_enabled():
-                self._build_capture_error_dialog().exec()
+            self._handle_capture_failure(str(error))
             return
         self._last_capture_parse_error = ""
         if trace is not None:

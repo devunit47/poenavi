@@ -48,13 +48,33 @@ def test_poennavi_toolbar_uses_custom_icons_and_has_no_poetore_button(qapp, monk
     monkeypatch.setattr(MainWindow, "_restore_progress_flags", lambda self: None)
     monkeypatch.setattr(MainWindow, "setup_ui", build_ui)
 
+    created = {}
+
+    def record(factory):
+        def build(**colors):
+            icon = factory(**colors)
+            created[factory.__name__] = icon
+            return icon
+        return build
+
+    for factory in (memo_icon, vendor_presets_icon, image_manager_icon, settings_icon):
+        monkeypatch.setattr(f"src.ui.main_window.{factory.__name__}", record(factory))
+
     window = MainWindow.__new__(MainWindow)
     try:
         with pytest.raises(UiBuilt):
             window.__init__()
 
-        for button in (window.memo_btn, window.vendor_search_btn, window.cheat_sheets_btn, window.settings_btn):
-            assert not button.icon().isNull(), button.toolTip()
+        expected = {
+            "memo_btn": "memo_icon",
+            "vendor_search_btn": "vendor_presets_icon",
+            "cheat_sheets_btn": "image_manager_icon",
+            "settings_btn": "settings_icon",
+        }
+        size = QSize(24, 24)
+        for attr, factory_name in expected.items():
+            actual = getattr(window, attr).icon().pixmap(size).toImage()
+            assert actual == created[factory_name].pixmap(size).toImage(), attr
         assert not hasattr(window, "poetore_btn")
     finally:
         window.deleteLater()

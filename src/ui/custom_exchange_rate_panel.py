@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QFrame,
@@ -80,9 +80,12 @@ class ElidedLabel(QLabel):
     def _display_text(self, width: int) -> str:
         return self.fontMetrics().elidedText(self.text(), Qt.ElideRight, width)
 
+    def _text_rect(self) -> QRect:
+        return self.contentsRect()
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        rect = self.contentsRect()
+        rect = self._text_rect()
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.drawText(rect, int(self.alignment()), self._display_text(rect.width()))
         painter.end()
@@ -93,8 +96,22 @@ class RateValueLabel(ElidedLabel):
 
     def __init__(self, rate: str):
         super().__init__(f"1 ＝ {rate}")
+        self._shared_text_width: int | None = None
         self.setAlignment(Qt.AlignCenter)
         self.setProperty("elideText", True)
+
+    def set_shared_text_width(self, width: int) -> None:
+        self._shared_text_width = width
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter | Qt.AlignAbsolute)
+        self.update()
+
+    def _text_rect(self) -> QRect:
+        rect = self.contentsRect()
+        if self._shared_text_width is not None and self._shared_text_width < rect.width():
+            left_margin = (rect.width() - self._shared_text_width) // 2
+            rect.translate(left_margin, 0)
+            rect.setWidth(self._shared_text_width)
+        return rect
 
     def compact_width(self) -> int:
         self.ensurePolished()
@@ -347,6 +364,12 @@ class CustomExchangeRatePanel(QWidget):
             )
             for label in value_labels:
                 label.setMinimumWidth(value_width)
+        rates = [label for label in value_labels if isinstance(label, RateValueLabel)]
+        if len(rates) > 1:
+            # Draw all numeric rows from the same start so their "1 ＝" prefixes align.
+            width = max(rate.sizeHint().width() for rate in rates)
+            for rate in rates:
+                rate.set_shared_text_width(width)
         self.card.setVisible(bool(pairs))
 
         self._render_refresh_status(league, latest_cached_at)

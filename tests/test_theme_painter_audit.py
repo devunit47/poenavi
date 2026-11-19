@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QLabel
 from tests.test_theme_geometry_audit import maximum_font, geometry_failures
 
 
-def inspect_paint(widget, expected_text=(), *, centered=False):
+def inspect_paint(widget, expected_text=(), *, centered=False, text_bounds=None):
     """Record real paint commands on an image of the widget's actual size.
 
     This measures what is painted, independently of implementation helpers.
@@ -34,6 +34,8 @@ def inspect_paint(widget, expected_text=(), *, centered=False):
             metrics = self.fontMetrics()
             bounds = metrics.boundingRect(rect.toRect(), int(flags), text)
             commands.append(text)
+            if text_bounds is not None:
+                text_bounds.append(bounds)
             if bounds.width() > rect.width() + .01 or bounds.height() > rect.height() + .01:
                 failures.append(f"{type(widget).__name__} {text!r}: text {bounds.size()}, drawing rect {rect.size()}")
             if not QRectF(widget.rect()).contains(rect):

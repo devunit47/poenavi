@@ -728,6 +728,7 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
     assert window._rate_scroll.verticalScrollBar().maximum() == 0
     assert not geometry_failures(window)
     value_columns = set()
+    prefix_starts = set()
     for index, row in enumerate(window.rate_panel.row_widgets):
         for side in ("Left", "Right"):
             label = row.findChild(QLabel, f"customRate{side}Name{index}")
@@ -735,9 +736,13 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
             if not long_quotes:
                 assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
         value = row.findChild(QLabel, f"customRateValue{index}")
-        assert not inspect_paint(value, (value.text(),), centered=True)
+        bounds = []
+        assert not inspect_paint(value, (value.text(),), text_bounds=bounds)
+        (text_rect,) = bounds
+        prefix_starts.add(value.mapTo(window, text_rect.topLeft()).x())
         value_columns.add((value.mapTo(window, QPoint()).x(), value.width()))
     assert len(value_columns) == 1
+    assert len(prefix_starts) == 1
 
 
 def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp_path, monkeypatch):

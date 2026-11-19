@@ -138,7 +138,7 @@ def test_rates_use_one_decimal_at_or_above_one_and_significant_digits_below_one(
     assert format_display_rate(value) == expected
 
 
-def test_rate_rows_center_full_text_in_shared_columns(qapp, tmp_path):
+def test_rate_rows_align_equals_in_shared_columns(qapp, tmp_path):
     ids = list(exchange_catalog_by_id(POE1))[:4]
     pairs = [RatePair(ids[0], ids[2]), RatePair(ids[1], ids[3]), RatePair(ids[2], ids[0])]
     results = {}
@@ -157,10 +157,16 @@ def test_rate_rows_center_full_text_in_shared_columns(qapp, tmp_path):
                     for index, row in enumerate(panel.row_widgets)
                 ]
                 assert len({(label.mapTo(panel, QPoint()).x(), label.width()) for label in labels}) == 1
+            prefix_starts = []
             for index, expected in enumerate(("1 ＝ 152.5", "1 ＝ 0.001234", "取引データなし")):
                 value = panel.row_widgets[index].findChild(QLabel, f"customRateValue{index}")
                 assert value.text() == value.toolTip() == expected
-                assert not inspect_paint(value, (expected,), centered=True)
+                bounds = []
+                assert not inspect_paint(value, (expected,), centered=index != 0, text_bounds=bounds)
+                if expected.startswith("1 ＝ "):
+                    (text_rect,) = bounds
+                    prefix_starts.append(value.mapTo(panel, text_rect.topLeft()).x())
+            assert prefix_starts[0] == prefix_starts[1]
         cached = panel.value_cache.get(
             POE1,
             "League",

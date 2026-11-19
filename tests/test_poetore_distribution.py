@@ -134,6 +134,7 @@ def test_recent_poetore_releases_use_poetore_scoped_tests():
         "tests/test_hideout_notification_controller.py",
         "tests/test_notification_audio.py",
         "tests/test_poe_process.py",
+        "tests/test_poetore_trade_concurrency.py",
         "tests/test_win32_suppressed_hotkey.py",
     ):
         assert test_file in script

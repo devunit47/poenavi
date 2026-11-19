@@ -6,7 +6,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -230,19 +230,14 @@ class PoeNinjaPriceService:
         self._poe2_fetcher = poe2_fetcher
         self._poe2_exchange_fetcher = poe2_exchange_fetcher
         self._clock = clock
-        self._cache: dict[str, tuple[float, dict]] = {}
-        self._stash_cache: dict[tuple[str, str], tuple[float, dict]] = {}
-        self._poe2_cache: dict[tuple[str, str], tuple[float, dict]] = {}
-        self._poe2_exchange_cache: dict[tuple[str, str], tuple[float, dict]] = {}
-        self._poe2_exchange_fetch_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._cache: dict[tuple[str, ...], tuple[float, dict]] = {}
+        self._inflight: dict[tuple[str, ...], Future[dict]] = {}
         self._lock = threading.Lock()
 
     def clear(self):
         with self._lock:
             self._cache.clear()
-            self._stash_cache.clear()
-            self._poe2_cache.clear()
-            self._poe2_exchange_cache.clear()
+            self._inflight.clear()
 
     def _poe2_unique_conversion_core(self, payload: dict, league: str) -> dict:
         """Return rates that can normalize a PoE2 unique price to Exalted."""
@@ -493,73 +488,60 @@ class PoeNinjaPriceService:
         )
 
     def _payload(self, league: str) -> dict:
-        with self._lock:
-            cached = self._cache.get(league)
-            now = self._clock()
-            if cached and now - cached[0] < CACHE_TTL_SECONDS:
-                return cached[1]
-            payload = self._fetcher(league)
-            if not isinstance(payload, dict):
-                raise ValueError("poe.ninjaの応答形式を認識できませんでした。")
-            self._cache[league] = (now, payload)
-            return payload
+        return self._cached_payload(
+            "dense", self._fetcher, "poe.ninjaの応答形式を認識できませんでした。", league,
+        )
 
     def _stash_payload(self, league: str, type_name: str) -> dict:
-        key = (league, type_name)
-        with self._lock:
-            cached = self._stash_cache.get(key)
-            now = self._clock()
-            if cached and now - cached[0] < CACHE_TTL_SECONDS:
-                return cached[1]
-            payload = self._stash_fetcher(league, type_name)
-            if not isinstance(payload, dict):
-                raise ValueError("poe.ninjaの現行価格応答を認識できませんでした。")
-            self._stash_cache[key] = (now, payload)
-            return payload
+        return self._cached_payload(
+            "stash", self._stash_fetcher, "poe.ninjaの現行価格応答を認識できませんでした。",
+            league, type_name,
+        )
 
     def _poe2_payload(self, league: str, type_name: str) -> dict:
-        key = (league, type_name)
-        with self._lock:
-            cached = self._poe2_cache.get(key)
-            now = self._clock()
-            if cached and now - cached[0] < CACHE_TTL_SECONDS:
-                return cached[1]
-            payload = self._poe2_fetcher(league, type_name)
-            if not isinstance(payload, dict):
-                raise ValueError("poe.ninja PoE2の応答形式を認識できませんでした。")
-            self._poe2_cache[key] = (now, payload)
-            return payload
+        return self._cached_payload(
+            "stash2", self._poe2_fetcher, "poe.ninja PoE2の応答形式を認識できませんでした。",
+            league, type_name,
+        )
 
     def _poe2_exchange_payload(self, league: str, type_name: str) -> dict:
-        key = (league, type_name)
+        return self._cached_payload(
+            "exchange2", self._poe2_exchange_fetcher,
+            "poe.ninja PoE2 Currency Exchangeの応答形式を認識できませんでした。",
+            league, type_name,
+        )
+
+    def _cached_payload(self, endpoint: str, fetch: Callable[..., dict], error: str, *parts: str) -> dict:
+        key = (endpoint, *parts)
         with self._lock:
-            cached = self._poe2_exchange_cache.get(key)
+            cached = self._cache.get(key)
             now = self._clock()
             if cached and now - cached[0] < CACHE_TTL_SECONDS:
                 return cached[1]
-            fetch_lock = self._poe2_exchange_fetch_locks.setdefault(
-                key, threading.Lock(),
-            )
-        # Coalesce a background prefetch and an early user scan for the same
-        # category without serializing unrelated categories.
-        with fetch_lock:
-            with self._lock:
-                cached = self._poe2_exchange_cache.get(key)
-                now = self._clock()
-                if cached and now - cached[0] < CACHE_TTL_SECONDS:
-                    return cached[1]
-            payload = self._poe2_exchange_fetcher(league, type_name)
+            pending = self._inflight.get(key)
+            if pending is None:
+                future = self._inflight[key] = Future()
+        if pending is not None:
+            return pending.result()
+
+        try:
+            payload = fetch(*parts)
             if not isinstance(payload, dict):
-                raise ValueError(
-                    "poe.ninja PoE2 Currency Exchangeの応答形式を認識できませんでした。"
-                )
+                raise ValueError(error)
             with self._lock:
-                cached = self._poe2_exchange_cache.get(key)
-                now = self._clock()
-                if cached and now - cached[0] < CACHE_TTL_SECONDS:
-                    return cached[1]
-                self._poe2_exchange_cache[key] = (now, payload)
-                return payload
+                # A clear during the fetch detaches this result from the cache.
+                if self._inflight.get(key) is future:
+                    timestamp = self._clock() if endpoint == "exchange2" else now
+                    self._cache[key] = (timestamp, payload)
+            future.set_result(payload)
+            return payload
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                if self._inflight.get(key) is future:
+                    del self._inflight[key]
 
 
 def _refresh_from_stash_overview(price: PoeNinjaPrice, payload: dict) -> PoeNinjaPrice:

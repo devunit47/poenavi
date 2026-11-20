@@ -230,20 +230,12 @@ class CustomExchangeRatePanel(QWidget):
         self.setStyleSheet(tooltip_style)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        self.title_label = QLabel("カレンシー交換レート")
-        self.title_label.setStyleSheet(
-            f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(15)}px; font-weight: bold;"
-        )
         if actions_layout is None:
             root.setSpacing(UI_METRICS.control_gap)
             actions_layout = QHBoxLayout()
             actions_layout.setSpacing(UI_METRICS.inline_gap)
-            actions_layout.addWidget(self.title_label)
             actions_layout.addStretch()
             root.addLayout(actions_layout)
-        else:
-            root.setSpacing(UI_METRICS.inline_gap)
-            root.addWidget(self.title_label)
         self.manage_button = ToolbarButton()
         self.manage_button.setObjectName("customRateManageButton")
         self.manage_button.setIcon(list_add_icon(theme.muted_text))

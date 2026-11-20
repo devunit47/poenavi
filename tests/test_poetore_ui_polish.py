@@ -85,10 +85,8 @@ def test_main_toolbar_groups_and_tab_order(qapp, tmp_path, version, width):
     assert refresh_rect.left() - manage_rect.right() - 1 == UI_METRICS.inline_gap
     assert manage_rect.left() - left_rects[-1].right() - 1 > UI_METRICS.inline_gap
 
-    heading = QRect(panel.title_label.mapTo(window, QPoint()), panel.title_label.size())
     card_top = panel.card.mapTo(window, QPoint()).y()
-    assert heading.top() - rects[0].bottom() - 1 == UI_METRICS.panel_padding
-    assert card_top - heading.bottom() - 1 == UI_METRICS.inline_gap
+    assert card_top - rects[0].bottom() - 1 == UI_METRICS.panel_padding
 
     def assert_tab_order(row_count):
         assert len(panel.row_widgets) == row_count
@@ -381,7 +379,7 @@ def test_main_rates_reflow_after_screen_move(
     qapp, qtbot, tmp_path, monkeypatch, transition, start_small,
 ):
     large = _Screen(QRect(0, 0, 1920, 1080))
-    small = _Screen(QRect(1920, 0, 800, 600))
+    small = _Screen(QRect(1920, 0, 800, 480))
     origin, destination = (small, large) if start_small else (large, small)
     handle = _WindowHandle(origin)
     monkeypatch.setattr(QApplication, "screenAt", lambda _point: handle.screen())
@@ -633,7 +631,7 @@ def test_main_update_action_states_keep_compact_height(qapp, tmp_path, monkeypat
 @pytest.mark.parametrize("preset", [*PRESETS, "custom"])
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
 def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request, preset, version):
-    available = QRect(0, 0, 800, 600)
+    available = QRect(0, 0, 800, 480)
     handle = _WindowHandle(_Screen(available))
     overrides = {"base_font_size": 24}
     if preset == "custom":

@@ -1,7 +1,8 @@
 from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
+from PySide6.QtGui import QHelpEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -453,6 +454,11 @@ def test_hideout_notification_action_tracks_controller_and_keeps_elapsed_time(tm
         button.click()
     message.assert_called_once()
     assert not button.isChecked()
+    pos = button.rect().center()
+    app.sendEvent(button, QHelpEvent(QEvent.ToolTip, pos, button.mapToGlobal(pos)))
+    popup = button.findChild(QLabel, "toolbarTooltip")
+    assert popup.isVisible()
+    assert popup.text() == button.toolTip()
 
     process = Mock()
     watcher = Mock()
@@ -465,6 +471,8 @@ def test_hideout_notification_action_tracks_controller_and_keeps_elapsed_time(tm
         button.click()
         assert controller.active and button.isChecked()
         assert button.toolTip() == "隠れ家滞在通知：ON（クリックで切替）"
+        assert popup.isVisible()
+        assert popup.text() == button.toolTip()
         assert button.accessibleName() == "隠れ家滞在通知：ON"
         assert button.icon().pixmap(button.iconSize()).toImage() != off_icon
         clock.return_value = 13.0

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QCursor, QIcon, QPainter
+from PySide6.QtGui import QIcon, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -82,6 +82,16 @@ class ElidedLabel(QLabel):
 
     def _text_rect(self) -> QRect:
         return self.contentsRect()
+
+    def event(self, event):
+        if event.type() == QEvent.ToolTip:
+            if self._display_text(self._text_rect().width()) != self.text():
+                QToolTip.showText(event.globalPos(), self.text(), self, self.rect())
+            else:
+                QToolTip.hideText()
+                event.ignore()
+            return True
+        return super().event(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -254,8 +264,6 @@ class CustomExchangeRatePanel(QWidget):
             lambda: self.refresh_callback(manual=True)
         )
         for button in (self.manage_button, self.refresh_button):
-            # The toolbar may be outside the panel's tooltip stylesheet.
-            button.setStyleSheet(button.styleSheet() + tooltip_style)
             actions_layout.addWidget(button)
 
         content = QWidget()
@@ -411,13 +419,8 @@ class CustomExchangeRatePanel(QWidget):
         )
         tooltip = f"{action}\n\n{description}\n\n{_OFFICIAL_DATA_HELP}"
         button = self.refresh_button
-        was_showing = (
-            button.underMouse() and QToolTip.isVisible() and QToolTip.text() == button.toolTip()
-        )
         button.setToolTip(tooltip)
         button.setAccessibleDescription(description)
-        if was_showing:
-            QToolTip.showText(QCursor.pos(), tooltip, button)
 
     def _make_row(
         self,
@@ -438,7 +441,6 @@ class CustomExchangeRatePanel(QWidget):
         left_name = ElidedLabel(self.catalog[left_id].japanese_name)
         left_name.set_rate_column_width(125)
         left_name.setObjectName(f"customRateLeftName{index}")
-        left_name.setToolTip(left_name.text())
         left_name.setAccessibleName(left_name.text())
         left_name.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(13)}px;"
@@ -447,7 +449,6 @@ class CustomExchangeRatePanel(QWidget):
         value = RateValueLabel(display) if display_is_rate else ElidedLabel(display)
         value.setObjectName(f"customRateValue{index}")
         value.setAlignment(Qt.AlignCenter)
-        value.setToolTip(value.text())
         value_font_size = 15 if display_is_rate else 12
         value.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).text}; font-size: {theme_font_size(value_font_size)}px; font-weight: bold;"
@@ -458,7 +459,6 @@ class CustomExchangeRatePanel(QWidget):
         right_name = ElidedLabel(self.catalog[right_id].japanese_name)
         right_name.set_rate_column_width(88)
         right_name.setObjectName(f"customRateRightName{index}")
-        right_name.setToolTip(right_name.text())
         right_name.setAccessibleName(right_name.text())
         right_name.setStyleSheet(
             f"color: {resolve_app_theme(POETORE_THEME).accent}; font-size: {theme_font_size(13)}px;"
@@ -480,7 +480,6 @@ class CustomExchangeRatePanel(QWidget):
         label = QLabel()
         label.setObjectName(f"customRateIcon-{side}-{item_id}")
         label.setFixedSize(28, 28)
-        label.setToolTip(self.catalog[item_id].japanese_name)
         item = self.catalog[item_id]
         future = self.icon_cache.request(
             item.icon_kind, item.icon_url, item.icon_filename,

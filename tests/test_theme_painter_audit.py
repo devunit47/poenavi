@@ -256,6 +256,7 @@ PAINTERS = {
     "_UniqueRollSlider": "test_unique_roll_painted_text_fits",
     "_SparklineWidget": "No text: only a baseline and a price-trend polyline.",
     "CheatSheetOverlay": "No painter text: frame only; child labels use the window audit.",
+    "_ToolbarTooltip": "No painter text: rounded background only; QLabel draws the text.",
 }
 
 
@@ -265,7 +266,7 @@ def test_custom_painter_inventory_is_complete():
         for cls in ast.walk(ast.parse(file.read_text(encoding="utf-8-sig"))):
             if isinstance(cls, ast.ClassDef) and any(isinstance(method, ast.FunctionDef) and method.name == "paintEvent" for method in cls.body):
                 found.add(cls.name)
-                if cls.name in ("_SparklineWidget", "CheatSheetOverlay", "_RateDeleteButton"):
+                if cls.name in ("_SparklineWidget", "CheatSheetOverlay", "_RateDeleteButton", "_ToolbarTooltip"):
                     method = next(method for method in cls.body if isinstance(method, ast.FunctionDef) and method.name == "paintEvent")
                     assert not any(isinstance(call, ast.Attribute) and call.attr in ("drawText", "addText") for call in ast.walk(method))
     assert found == PAINTERS.keys()

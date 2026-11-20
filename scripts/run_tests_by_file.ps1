@@ -18,10 +18,11 @@ if ($ShardIndex -gt $ShardCount) {
 $testFiles = @(Get-ChildItem tests/test_*.py -File | Sort-Object Name)
 if ($ShardCount -gt 1 -or $ListAssignments) {
     $durations = Get-Content -Raw (Join-Path $PSScriptRoot test_durations.json) | ConvertFrom-Json
-    $shardTotals = [decimal[]]::new($ShardCount)
+    # The timing data is recorded to hundredths of a second. Keep sums exact at ties.
+    $shardTotals = [long[]]::new($ShardCount)
     $estimatedFiles = foreach ($testFile in $testFiles) {
         $duration = $durations.PSObject.Properties[$testFile.Name]
-        $seconds = if ($null -eq $duration) { 2.0d } else { [decimal]$duration.Value }
+        $seconds = if ($null -eq $duration) { 2.0 } else { [double]$duration.Value }
         [pscustomobject]@{
             Name = $testFile.Name
             Path = $testFile.FullName
@@ -37,7 +38,7 @@ if ($ShardCount -gt 1 -or $ListAssignments) {
                 $lightestShard = $index
             }
         }
-        $shardTotals[$lightestShard] += $file.EstimatedSeconds
+        $shardTotals[$lightestShard] += [long]($file.EstimatedSeconds * 100)
         $file.ShardIndex = $lightestShard + 1
         $file
     }
@@ -46,7 +47,7 @@ if ($ShardCount -gt 1 -or $ListAssignments) {
         return
     }
     $testFiles = $assignments | Where-Object ShardIndex -eq $ShardIndex
-    $estimatedTotal = [Math]::Round($shardTotals[$ShardIndex - 1], 2)
+    $estimatedTotal = $shardTotals[$ShardIndex - 1] / 100
     Write-Host "Shard $ShardIndex/$ShardCount - $(@($testFiles).Count) files, estimated ${estimatedTotal}s"
     $testFiles = @($testFiles | ForEach-Object { $_.Path })
 } else {

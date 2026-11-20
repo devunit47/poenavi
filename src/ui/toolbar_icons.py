@@ -83,6 +83,17 @@ def chevron_icon(color, *, up=False, size=24) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
+def cycle_icon(color) -> QIcon:
+    """Two opposite chevrons indicate cycling through ordered choices."""
+    pixmap, painter = line_icon_canvas(color)
+    painter.setPen(QPen(QColor(color), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    for outer_y, center_y in ((10, 5), (14, 19)):
+        painter.drawPolyline(QPolygonF([
+            QPointF(6, outer_y), QPointF(12, center_y), QPointF(18, outer_y),
+        ]))
+    return finish_line_icon(pixmap, painter)
+
+
 def external_link_icon(color) -> QIcon:
     pixmap, painter = line_icon_canvas(color)
     painter.drawPolyline(QPolygonF([

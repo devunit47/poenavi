@@ -10,7 +10,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
+    QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
     QStyleOptionViewItem, QSystemTrayIcon, QWidget,
 )
 
@@ -30,6 +30,78 @@ from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
 from tests.test_theme_contrast_audit import contrast
 from tests.test_theme_geometry_audit import geometry_failures
 from tests.test_theme_painter_audit import inspect_paint
+
+
+@pytest.mark.parametrize("font_size", [13, 24])
+def test_trade_numeric_chips_fit_their_inputs_at_the_same_height(qapp, tmp_path, font_size):
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": font_size}}})
+    window = build_scenario("trade", tmp_path)
+    chips = (
+        window.item_level_tag, window.gem_level_tag, window.gem_quality_tag,
+        window.gem_socket_tag, window.links_tag, window.map_tier_chip,
+        window.unidentified_tier_chip, window.runemastered_tag,
+    )
+    window.item_level_tag.setValues(100, 100)
+    window.gem_quality_tag.setValues(100)
+    window.unidentified_tier_chip.setValue(99)
+    for chip in chips:
+        chip.show()
+    settle(qapp, window)
+
+    assert len({chip.height() for chip in chips}) == 1
+    minimum = window.item_level_edit
+    assert minimum.width() == window.item_level_max_edit.width() == window.gem_quality_edit.width()
+    assert minimum.width() > window.gem_level_edit.width()
+    assert window.gem_level_edit.width() > window.links_edit.width()
+    assert not geometry_failures(window)
+
+    toggle = window.item_level_toggle
+    window.activateWindow()
+    toggle.setFocus()
+    assert toggle.hasFocus()
+    toggle_with_focus = toggle.grab().toImage()
+    QTest.keyClick(toggle, Qt.Key_Tab)
+    assert minimum.hasFocus()
+    assert toggle.grab().toImage() != toggle_with_focus
+    editor_with_focus = minimum.grab().toImage()
+    QTest.keyClick(minimum, Qt.Key_Tab)
+    assert window.item_level_max_edit.hasFocus()
+    assert minimum.grab().toImage() != editor_with_focus
+
+
+def test_trade_fixed_chip_elides_at_flow_width(qapp, tmp_path):
+    window = build_scenario("trade", tmp_path)
+    chip = window.completion_reward_chip
+    text = "完了報酬：" + "長い名前のアイテム" * 12
+    chip.setText(text)
+    chip.show()
+    window.filter_chip_layout.setGeometry(QRect(0, 0, 190, 100))
+
+    assert chip.width() <= 190
+    assert chip._display_text(chip.contentsRect().width()).endswith("…")
+    assert chip.text() == chip.toolTip() == text
+
+
+def test_trade_logbook_areas_fit_the_narrow_panel(qapp, tmp_path):
+    from src.poetore.window_position import PlacementContext
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("trade", tmp_path, "poe1")
+    selector = window.logbook_area_selector
+    labels = tuple(f"エリア{index}：断たれた円環のドルイド" for index in range(1, 6))
+    selector.setLabels(labels)
+    window.logbook_area_container.show()
+    available = QRect(0, 0, 800, 600)
+    window.show_at_context(PlacementContext(available, available.center()), activate=False)
+    settle(qapp, window)
+
+    viewport = window._content_scroll.viewport()
+    for button, label in zip(selector._buttons, labels):
+        top_left = button.mapTo(window, QPoint()) - viewport.mapTo(window, QPoint())
+        assert 0 <= top_left.x() <= viewport.width() - button.width()
+        assert button.toolTip() == label
+    selector._buttons[-1].click()
+    assert selector._buttons[-1].isChecked()
 
 
 @pytest.fixture(autouse=True)
@@ -293,6 +365,38 @@ def test_trade_title_bar_uses_theme_ink_and_anchors_tooltips_above_buttons(qapp,
         qapp.sendEvent(button, QEvent(QEvent.Leave))
 
 
+def test_trade_numeric_chip_indicators_scale_with_font_and_display_size(qapp, tmp_path):
+    def indicator_size(checkbox):
+        option = QStyleOptionButton()
+        checkbox.initStyleOption(option)
+        return checkbox.style().subElementRect(QStyle.SE_CheckBoxIndicator, option, checkbox).size()
+
+    native_size = indicator_size(QCheckBox())
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    toggles = (
+        window.item_level_toggle, window.links_toggle, window.gem_level_toggle,
+        window.gem_quality_toggle, window.gem_socket_toggle, window.map_tier_chip.toggle,
+        window.runemastered_chip,
+    )
+    assert all(indicator_size(toggle) == native_size for toggle in toggles)
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    previous_size = native_size
+    for profile in ("small", "medium", "large"):
+        window._app_config.setdefault("poetore", {})["result_font_size"] = profile
+        window.apply_result_display_size()
+        size = indicator_size(toggles[0])
+        assert all(indicator_size(toggle) == size for toggle in toggles)
+        assert size.width() > previous_size.width()
+        assert size.height() > previous_size.height()
+        previous_size = size
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window.apply_result_display_size()
+    assert all(indicator_size(toggle) == native_size for toggle in toggles)
+
+
 def test_trade_title_bar_icons_scale_with_font_and_display_size(qapp, tmp_path):
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
     window = build_scenario("trade", tmp_path)
@@ -484,7 +588,7 @@ def test_main_rates_reflow_after_screen_move(
         assert window.height() == original_height
         qtbot.mouseRelease(window.title_bar, Qt.LeftButton, pos=QPoint(8, 8))
 
-    QTest.qWait(200)
+    qtbot.waitUntil(lambda: window.maximumHeight() == destination.geometry.height())
     assert_geometry_converges(qapp, window)
     assert destination.geometry.contains(window.frameGeometry()), window.frameGeometry()
     assert (scroll.verticalScrollBar().maximum() > 0) == (not start_small)
@@ -504,7 +608,7 @@ def test_main_rates_reflow_after_screen_move(
 
 @pytest.mark.parametrize("notification", ["available", "logical_dpi", "physical_dpi", "device_ratio"])
 def test_main_rates_reflow_when_current_screen_metrics_change(
-    qapp, tmp_path, monkeypatch, notification,
+    qapp, qtbot, tmp_path, monkeypatch, notification,
 ):
     screen = _Screen(QRect(0, 0, 1920, 1080))
     handle = _WindowHandle(screen)
@@ -529,8 +633,7 @@ def test_main_rates_reflow_when_current_screen_metrics_change(
         new_ratio = window.devicePixelRatioF() * 1.25
         monkeypatch.setattr(window, "devicePixelRatioF", lambda: new_ratio)
         qapp.sendEvent(window, QEvent(QEvent.DevicePixelRatioChange))
-    QTest.qWait(200)
-    assert screen.geometry.contains(window.frameGeometry())
+    qtbot.waitUntil(lambda: screen.geometry.contains(window.frameGeometry()))
     assert window.maximumHeight() == screen.geometry.height()
     assert window.width() == width
 
@@ -1368,7 +1471,7 @@ def test_trade_narrow_large_font_prioritizes_mod_names_and_keeps_range_on_tab_ro
         assert row.toolTip(1) in ("プレフィックス", "サフィックス")
         assert row.toolTip(3) == row.text(3)
     assert window.search_range_combo.mapTo(window, QPoint()).y() == window.trade_preset_combo.mapTo(window, QPoint()).y()
-    assert "Mod数値：-10%まで許容" in window.search_range_combo.toolTip()
+    assert "Mod数値：−10%まで" in window.search_range_combo.toolTip()
     assert window.search_range_combo.currentData() == 10
 
 
@@ -1431,7 +1534,7 @@ def test_trade_narrow_mod_name_wraps_before_eliding_and_restores_on_widening(qap
     if repeat == 1:
         assert tree.columnWidth(3) - 12 >= metrics.horizontalAdvance(text)
         assert tree.visualItemRect(row).height() == window._mod_row_height()
-    assert window.search_range_combo.currentText() == "Mod数値：-10%まで許容"
+    assert window.search_range_combo.currentText() == "Mod数値：−10%まで"
 
 
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
@@ -1447,7 +1550,7 @@ def test_trade_default_font_keeps_full_labels_and_single_line_rows(qapp, tmp_pat
     assert tree.topLevelItem(1).text(1) == "サフィックス"
     assert tree.columnWidth(2) == window._scaled_display_value(62)
     assert tree.visualItemRect(tree.topLevelItem(0)).height() == window._mod_row_height()
-    assert window.search_range_combo.currentText() == "Mod数値：-10%まで許容"
+    assert window.search_range_combo.currentText() == "Mod数値：−10%まで"
 
 
 @pytest.mark.parametrize("version", ["poe1", "poe2"])

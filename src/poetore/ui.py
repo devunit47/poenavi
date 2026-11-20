@@ -33,7 +33,7 @@ from src.ui.styles import Styles
 from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 from src.ui.custom_exchange_rate_panel import ElidedLabel
 from src.ui.toolbar_button import ToolbarButton
-from src.ui.toolbar_icons import checking_icon, chevron_icon, external_link_icon, reload_icon
+from src.ui.toolbar_icons import checking_icon, chevron_icon, cycle_icon, external_link_icon, reload_icon
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.utils.window_focus import (
     focus_window, get_foreground_window, is_path_of_exile_window,
@@ -642,19 +642,37 @@ class _ModDescriptionDelegate(QStyledItemDelegate):
         option.text = _wrapped_mod_text(option.text, option.font, width)
 
 
-class _ElidedScopeButton(QPushButton):
+class _ElidedButton(QPushButton):
+    def __init__(self, text: str, width_sample: str | None = None):
+        super().__init__(text)
+        self._width_sample = width_sample
+        self.setProperty("elideText", True)
+
     def sizeHint(self):
         hint = super().sizeHint()
-        return QSize(min(hint.width(), self.fontMetrics().horizontalAdvance("同一クラスすべて") + 20), hint.height())
+        if self._width_sample is None:
+            return hint
+        text_limit = self.fontMetrics().horizontalAdvance(self._width_sample)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        content = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
+        extras = self.width() - content.width()
+        if not self.icon().isNull():
+            extras += self.iconSize().width() + 4
+        hint.setWidth(min(hint.width(), text_limit + extras))
+        return hint
 
     def minimumSizeHint(self):
-        return QSize(0, self.sizeHint().height())
+        return QSize(self.minimumWidth(), self.sizeHint().height())
 
     def paintEvent(self, event):
         option = QStyleOptionButton()
         self.initStyleOption(option)
         content = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
-        option.text = self.fontMetrics().elidedText(option.text, Qt.ElideRight, content.width())
+        width = content.width()
+        if not option.icon.isNull():
+            width -= option.iconSize.width() + 4
+        option.text = self.fontMetrics().elidedText(option.text, Qt.ElideRight, width)
         painter = QStylePainter(self)
         painter.drawControl(QStyle.CE_PushButton, option)
 
@@ -752,6 +770,8 @@ class _FlowLayout(QLayout):
             if widget is not None and widget.isHidden():
                 continue
             hint = item.sizeHint()
+            if widget is not None and widget.property("elideText"):
+                hint.setWidth(min(hint.width(), max(widget.minimumWidth(), available.width())))
             next_x = x + hint.width()
             if line_height and next_x > available.right() + 1:
                 x = available.x()
@@ -783,8 +803,8 @@ class _BinaryToggle(QWidget):
         layout.setSpacing(0)
         self._buttons = []
         for index, (label, _) in enumerate(self._options):
-            button = _ElidedScopeButton(label) if elide else QPushButton(label)
-            button.setProperty("elideText", elide)
+            button = _ElidedButton(label, "同一クラスすべて") if elide else QPushButton(label)
+            button.setProperty("segmentEdge", "first" if index == 0 else "last")
             button.setObjectName("binaryToggle")
             button.setCheckable(True)
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -850,6 +870,10 @@ class _BinaryToggle(QWidget):
     def setSecondAvailable(self, available: bool):
         self._second_available = available
         self._buttons[1].setVisible(available)
+        first = self._buttons[0]
+        first.setProperty("segmentEdge", "first" if available else "single")
+        first.style().unpolish(first)
+        first.style().polish(first)
         self._empty_segment.setVisible(not available)
         if not available and self._current_index == 1:
             self.setCurrentIndex(0)
@@ -860,15 +884,30 @@ class _CycleButton(QPushButton):
 
     currentIndexChanged = Signal(int)
 
-    def __init__(self, options: tuple[tuple[str, object, bool], ...], parent=None):
+    def __init__(self, options: tuple[tuple[str, object, bool], ...], parent=None, *, help_text=""):
         super().__init__(parent)
         if not options:
             raise ValueError("options must not be empty")
         self._options = options
         self._current_index = 0
         self.setObjectName("cycleToggle")
+        self._help_text = help_text
         self.clicked.connect(self._advance)
+        self._sync_tooltip()
         self._sync_state()
+
+    def _sync_tooltip(self):
+        labels = [label for label, _, _ in self._options]
+        order = " → ".join((*labels, labels[0]))
+        help_text = self._help_text or "押すたびに検索条件を切り替えます。"
+        self.setToolTip(f"{help_text}\n切り替え順：{order}")
+
+    def refresh_icon(self):
+        ink = "#ff5757" if self.property("alert") else theme_color("text", "#E6ECEA")
+        size = self.fontInfo().pixelSize() + 2
+        self.setIconSize(QSize(size, size))
+        self.setIcon(cycle_icon(ink))
+
 
     def _advance(self):
         self.setCurrentIndex((self._current_index + 1) % len(self._options))
@@ -883,6 +922,7 @@ class _CycleButton(QPushButton):
         self.setProperty("alert", alert)
         self.style().unpolish(self)
         self.style().polish(self)
+        self.refresh_icon()
 
     def setCurrentIndex(self, index: int):
         index = int(index) % len(self._options)
@@ -913,6 +953,7 @@ class _CycleButton(QPushButton):
             raise ValueError("options must not be empty")
         self._options = options
         self._current_index = 0
+        self._sync_tooltip()
         self._sync_state()
 
 
@@ -933,13 +974,17 @@ class _AreaSegmentedControl(QWidget):
     def setLabels(self, labels):
         while self._buttons:
             self._buttons.pop().deleteLater()
-        for index, label in enumerate(tuple(labels)[:5]):
-            button = QPushButton(str(label))
+        labels = tuple(labels)[:5]
+        for index, label in enumerate(labels):
+            button = _ElidedButton(str(label))
             button.setObjectName("binaryToggle")
-            button.setCheckable(True)
-            button.setMinimumWidth(
-                button.fontMetrics().horizontalAdvance(str(label)) + 24
+            edge = "single" if len(labels) == 1 else (
+                "first" if index == 0 else "last" if index == len(labels) - 1 else "middle"
             )
+            button.setProperty("segmentEdge", edge)
+            button.setCheckable(True)
+            button.setToolTip(str(label))
+            button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False, value=index: self.setCurrentIndex(value))
             self._layout.addWidget(button)
             self._buttons.append(button)
@@ -961,110 +1006,174 @@ class _AreaSegmentedControl(QWidget):
         for index, button in enumerate(self._buttons):
             button.setChecked(index == self._current)
             button.ensurePolished()
-            button.setMinimumWidth(
-                button.fontMetrics().horizontalAdvance(button.text()) + 24
-            )
+            font = QFont(button.font())
+            font.setBold(True)
+            prefix = button.text().partition("：")[0]
+            button.setMinimumWidth(QFontMetrics(font).horizontalAdvance(prefix + "…") + 16)
 
 
-class _NumericFilterChip(QFrame):
+class _ReadOnlyFilterChip(ElidedLabel):
+    def __init__(self, text=""):
+        super().__init__()
+        self.setObjectName("readonlyFilterChip")
+        self.setProperty("elideText", True)
+        self.setTextFormat(Qt.PlainText)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setText(text)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        text_limit = self.fontMetrics().horizontalAdvance("全" * 18)
+        hint.setWidth(min(hint.width(), text_limit + self.width() - self.contentsRect().width()))
+        return hint
+
+    def minimumSizeHint(self):
+        return QSize(0, self.sizeHint().height())
+
+    def event(self, event):
+        # Use the full text and any source explanation as a regular tooltip.
+        return QLabel.event(self, event)
+
+    def paintEvent(self, event):
+        with QPainter(self) as painter:
+            self.drawFrame(painter)
+            rect = self.contentsRect()
+            painter.setPen(self.palette().color(self.foregroundRole()))
+            painter.drawText(rect, int(self.alignment()), self._display_text(rect.width()))
+
+
+class _FilterValueEdit(QLineEdit):
+    def __init__(self, minimum: int, maximum: int):
+        super().__init__()
+        self.setObjectName("numericFilterEdit")
+        self.setValidator(QIntValidator(minimum, maximum, self))
+        self.setProperty("wheelStepNumeric", True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def sizeHint(self):
+        self.ensurePolished()
+        metrics = self.fontMetrics()
+        widest_digit = max(metrics.horizontalAdvance(digit) for digit in "0123456789")
+        digits = len(str(self.validator().top()))
+        # Allow the frame, horizontal padding and QLineEdit's text inset.
+        return QSize(widest_digit * digits + 12, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+
+class _NumericChipFrame(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("numericFilterTag")
+        self.setProperty("active", True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 2, 5, 2)
+        layout.setSpacing(3)
+
+    def setActive(self, active: bool):
+        self.setProperty("active", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+def _numeric_chip_checkbox(label: str) -> QCheckBox:
+    checkbox = QCheckBox(label)
+    checkbox.setObjectName("numericFilterToggle")
+    return checkbox
+
+
+class _NumericFilterChip(_NumericChipFrame):
     """ON/OFFと最小値（必要なら最大値）を持つ共通検索チップ。"""
 
     def __init__(
         self, label: str, minimum: int, maximum: int, parent=None, suffix: str = "",
+        *, with_range: bool = True,
     ):
         super().__init__(parent)
-        self.setObjectName("numericFilterTag")
-        self._active = True
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 6, 2)
-        layout.setSpacing(1)
-        self.toggle = QPushButton()
-        self.toggle.setObjectName("numericFilterToggle")
-        self._label = label
-        self.toggle.clicked.connect(lambda: self.setActive(not self._active))
-        layout.addWidget(self.toggle)
-        self.minimum_edit = QLineEdit()
-        self.minimum_edit.setObjectName("numericFilterEdit")
-        self.minimum_edit.setValidator(QIntValidator(minimum, maximum, self.minimum_edit))
-        self.minimum_edit.setProperty("wheelStepNumeric", True)
-        self.minimum_edit.setAlignment(Qt.AlignCenter)
-        self.minimum_edit.setFixedWidth(30)
-        self.minimum_edit.textEdited.connect(lambda _text: self.setActive(True))
-        layout.addWidget(self.minimum_edit)
-        self.separator = QLabel("～")
-        self.maximum_edit = QLineEdit()
-        self.maximum_edit.setObjectName("numericFilterEdit")
-        self.maximum_edit.setValidator(QIntValidator(minimum, maximum, self.maximum_edit))
-        self.maximum_edit.setProperty("wheelStepNumeric", True)
-        self.maximum_edit.setAlignment(Qt.AlignCenter)
-        self.maximum_edit.setFixedWidth(30)
-        self.maximum_edit.textEdited.connect(lambda _text: self.setActive(True))
-        layout.addWidget(self.separator)
-        layout.addWidget(self.maximum_edit)
-        self.suffix_label = QLabel(suffix)
-        self.suffix_label.setVisible(bool(suffix))
-        layout.addWidget(self.suffix_label)
+        self.toggle = _numeric_chip_checkbox("")
+        self.toggle.toggled.connect(self.setActive)
+        self.layout().addWidget(self.toggle)
+        self.minimum_edit = _FilterValueEdit(minimum, maximum)
+        self.minimum_edit.textEdited.connect(self._enable)
+        self.layout().addWidget(self.minimum_edit)
+        self.maximum_edit = None
+        if with_range:
+            self.separator = QLabel("～")
+            self.maximum_edit = _FilterValueEdit(minimum, maximum)
+            self.maximum_edit.textEdited.connect(self._enable)
+            self.layout().addWidget(self.separator)
+            self.layout().addWidget(self.maximum_edit)
+        if suffix:
+            self.suffix_label = QLabel(suffix)
+            self.layout().addWidget(self.suffix_label)
+        self.setLabel(label)
         self.setRangeVisible(False)
+        self.setActive(True)
+
+    def _enable(self, _text: str):
         self.setActive(True)
 
     def setValues(self, minimum: float | None, maximum: float | None = None):
         self.minimum_edit.setText("" if minimum is None else f"{minimum:g}")
-        self.maximum_edit.setText("" if maximum is None else f"{maximum:g}")
-        self.setRangeVisible(maximum is not None)
+        if self.maximum_edit is not None:
+            self.maximum_edit.setText("" if maximum is None else f"{maximum:g}")
+            self.setRangeVisible(maximum is not None)
 
     def setLabel(self, label: str):
-        self._label = str(label)
-        self.setActive(self._active)
+        self.toggle.setText(f"{label}：")
+        self.toggle.setToolTip(f"{label}の検索条件を切り替えます。")
+        self.minimum_edit.setAccessibleName(f"{label}の最小値")
+        if self.maximum_edit is not None:
+            self.maximum_edit.setAccessibleName(f"{label}の最大値")
 
     def values(self) -> tuple[float | None, float | None]:
         minimum = self.minimum_edit.text().strip()
-        maximum = self.maximum_edit.text().strip() if not self.maximum_edit.isHidden() else ""
+        maximum = ""
+        if self.maximum_edit is not None and not self.maximum_edit.isHidden():
+            maximum = self.maximum_edit.text().strip()
         return (float(minimum) if minimum else None, float(maximum) if maximum else None)
 
     def setRangeVisible(self, visible: bool):
-        self.separator.setVisible(visible)
-        self.maximum_edit.setVisible(visible)
-        fit_theme_fixed_geometry(self)
+        if self.maximum_edit is not None:
+            self.separator.setVisible(visible)
+            self.maximum_edit.setVisible(visible)
 
     def setActive(self, active: bool):
-        self._active = bool(active)
-        self.setProperty("active", self._active)
-        self.toggle.setText(f"{'☑' if self._active else '☐'} {self._label}：")
+        active = bool(active)
+        blocked = self.toggle.blockSignals(True)
+        self.toggle.setChecked(active)
+        self.toggle.blockSignals(blocked)
         for editor in (self.minimum_edit, self.maximum_edit):
-            font = editor.font()
-            font.setStrikeOut(not self._active)
-            editor.setFont(font)
-        self.style().unpolish(self)
-        self.style().polish(self)
+            if editor is not None:
+                font = editor.font()
+                font.setStrikeOut(not active)
+                editor.setFont(font)
+        super().setActive(active)
 
     def isActive(self) -> bool:
-        return self._active
+        return self.toggle.isChecked()
 
 
-class _RequiredNumericFilterChip(QFrame):
+class _RequiredNumericFilterChip(_NumericChipFrame):
     """常に有効で、値だけを編集できる単一数値の検索チップ。"""
 
     def __init__(self, label: str, minimum: int, maximum: int, parent=None):
         super().__init__(parent)
-        self.setObjectName("numericFilterTag")
-        self.setProperty("active", True)
         self._minimum = minimum
         self._maximum = maximum
         self._last_valid_value = minimum
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 6, 2)
-        layout.setSpacing(1)
-        label_widget = QLabel(f"{label}：")
-        label_widget.setObjectName("numericFilterLabel")
-        layout.addWidget(label_widget)
-        self.value_edit = QLineEdit()
-        self.value_edit.setObjectName("numericFilterEdit")
-        self.value_edit.setValidator(QIntValidator(minimum, maximum, self.value_edit))
-        self.value_edit.setProperty("wheelStepNumeric", True)
-        self.value_edit.setAlignment(Qt.AlignCenter)
-        self.value_edit.setFixedWidth(30)
+        self.layout().addWidget(QLabel(f"{label}："))
+        self.value_edit = _FilterValueEdit(minimum, maximum)
+        self.value_edit.setAccessibleName(label)
         self.value_edit.editingFinished.connect(self._restore_valid_value)
-        layout.addWidget(self.value_edit)
+        self.layout().addWidget(self.value_edit)
 
     def setValue(self, value: int):
         self._last_valid_value = int(value)
@@ -1378,28 +1487,18 @@ class PoetoreWindow(QWidget):
         )
         self.chart_area_chip.toggled.connect(self._chart_area_changed)
         self.chart_area_chip.hide()
-        self.runemastered_tag = QFrame()
-        self.runemastered_tag.setObjectName("runemasteredTag")
-        self.runemastered_tag.setFixedWidth(126)
-        runemastered_layout = QHBoxLayout(self.runemastered_tag)
-        runemastered_layout.setContentsMargins(8, 2, 6, 2)
-        runemastered_layout.setSpacing(1)
-        self.runemastered_chip = QPushButton("☑ ルーンマスター")
-        self.runemastered_chip.setObjectName("runemasteredToggle")
-        self.runemastered_chip.setCheckable(True)
+        self.runemastered_tag = _NumericChipFrame()
+        self.runemastered_chip = _numeric_chip_checkbox("ルーンマスター版")
         self.runemastered_chip.setChecked(True)
-        self.runemastered_chip.setToolTip(
-            "ONならルーンマスター版、OFFなら通常版のベースを検索します。"
-        )
+        self.runemastered_chip.setToolTip("選択を外すと通常版を検索します。")
         self.runemastered_chip.toggled.connect(self._runemastered_changed)
-        runemastered_layout.addWidget(self.runemastered_chip)
+        self.runemastered_tag.layout().addWidget(self.runemastered_chip)
         self.runemastered_tag.hide()
         self.corrupted_combo = _CycleButton((
             ("コラプトのみ", "only", True),
-            ("非コラプトのみ", False, False),
-            ("コラプト品含む", True, False),
+            ("コラプトを除外", False, False),
+            ("コラプトを含む", True, False),
         ))
-        self.corrupted_combo.setToolTip("クリックするたびにコラプト条件を切り替えます")
         self.corrupted_combo.setCurrentIndex(1)
         item_scope_layout = QHBoxLayout()
         item_scope_layout.setContentsMargins(0, 0, 0, 0)
@@ -1504,9 +1603,9 @@ class PoetoreWindow(QWidget):
         self.search_range_combo.setObjectName("filterControl")
         for percent in (0, 5, 10, 15, 20, 30, 50):
             label = (
-                "Mod数値：完全一致"
+                "Mod数値：一致"
                 if percent == 0
-                else f"Mod数値：-{percent}%まで許容"
+                else f"Mod数値：−{percent}%まで"
             )
             self.search_range_combo.addItem(label, percent)
             self.search_range_combo.setItemData(self.search_range_combo.count() - 1, label, Qt.ToolTipRole)
@@ -1519,7 +1618,7 @@ class PoetoreWindow(QWidget):
         self.search_range_combo.setCurrentIndex(index if index >= 0 else 2)
         self.search_range_combo.setToolTip(
             "各Modの読取値を基準に、どこまで低い数値を検索に含めるか設定します。\n"
-            "例：読取値100・-10%まで許容 → 最小値90で検索\n"
+            "例：読取値100・−10%まで → 最小値90で検索\n"
             "ユニーク品はModの可変範囲を基準に調整します。"
         )
         self._search_range_help = self.search_range_combo.toolTip()
@@ -1528,22 +1627,17 @@ class PoetoreWindow(QWidget):
         top_options.addWidget(self.search_range_combo)
         top_options.setAlignment(self.search_range_combo, Qt.AlignRight)
         self.magic_rarity_toggle = _BinaryToggle(
-            ("非ユニーク", False), ("マジック完全一致", True),
+            ("非ユニーク", False), ("マジックのみ", True),
         )
         self.magic_rarity_toggle.setToolTip(
-            "マジックのベースアイテムだけに絞る場合は「マジック完全一致」を選択"
+            "マジックのベースアイテムだけに絞る場合は「マジックのみ」を選択します。"
         )
         self.magic_rarity_toggle.hide()
-        self.rarity_condition_chip = QPushButton()
-        self.rarity_condition_chip.setObjectName("readonlyFilterChip")
-        self.rarity_condition_chip.setEnabled(False)
+        self.rarity_condition_chip = _ReadOnlyFilterChip()
         self.rarity_condition_chip.hide()
         self.tablet_rarity_combo = _CycleButton((
-            ("非ユニーク", "nonunique", False),
-        ))
-        self.tablet_rarity_combo.setToolTip(
-            "クリックするたびに石板のレアリティ条件を切り替えます"
-        )
+            ("ユニークを除外", "nonunique", False),
+        ), help_text="押すたびに石板のレアリティ条件を切り替えます。")
         self.tablet_rarity_combo.hide()
 
         self.trade_status_combo = _TradeOptionComboBox("取引方式")
@@ -1596,7 +1690,7 @@ class PoetoreWindow(QWidget):
         self._update_trade_currency_tooltip()
 
         unique_options = QVBoxLayout()
-        self.unique_name_label = QLabel("未鑑定ユニーク候補:")
+        self.unique_name_label = QLabel("未鑑定ユニーク候補")
         self.unique_name_container = QWidget()
         self.unique_name_container.setObjectName("uniqueCandidateContainer")
         self.unique_name_layout = _FlowLayout(
@@ -1619,13 +1713,13 @@ class PoetoreWindow(QWidget):
         unique_options.addWidget(self.unique_name_label)
         unique_options.addWidget(self.unique_name_scroll)
         variant_options = QHBoxLayout()
-        self.unique_variant_label = QLabel("ユニークVariant:")
+        self.unique_variant_label = QLabel("ユニークVariant")
         self.unique_variant_combo = QComboBox()
         self.unique_variant_label.hide()
         self.unique_variant_combo.hide()
         variant_options.addWidget(self.unique_variant_label)
         variant_options.addWidget(self.unique_variant_combo)
-        self.virtual_augment_label = QLabel("Rune／Soul Core構成:")
+        self.virtual_augment_label = QLabel("Rune／Soul Core構成")
         self.virtual_augment_count_combo = QComboBox()
         self.virtual_augment_count_combo.setObjectName("filterControl")
         self.virtual_augment_count_combo.setToolTip(
@@ -1658,115 +1752,32 @@ class PoetoreWindow(QWidget):
         self.filter_chip_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.filter_chip_container.setProperty("themeLayoutManaged", True)
         self.filter_chip_layout = _FlowLayout(self.filter_chip_container, h_spacing=6, v_spacing=6)
-        self.item_level_tag = QFrame()
-        self.item_level_tag.setObjectName("itemLevelTag")
-        self.item_level_tag.setFixedWidth(92)
-        item_level_layout = QHBoxLayout(self.item_level_tag)
-        item_level_layout.setContentsMargins(8, 2, 6, 2)
-        item_level_layout.setSpacing(1)
-        self.item_level_toggle = QPushButton("☑ ilvl：")
-        self.item_level_toggle.setObjectName("itemLevelToggle")
-        self.item_level_toggle.setToolTip("クリックしてアイテムレベル条件を有効／無効にします")
-        self.item_level_toggle.clicked.connect(self._toggle_item_level_filter)
-        item_level_layout.addWidget(self.item_level_toggle)
-        self.item_level_edit = QLineEdit()
-        self.item_level_edit.setObjectName("itemLevelEdit")
-        self.item_level_edit.setValidator(QIntValidator(1, 100, self.item_level_edit))
-        self.item_level_edit.setProperty("wheelStepNumeric", True)
-        self.item_level_edit.setAlignment(Qt.AlignCenter)
-        self.item_level_edit.setFixedWidth(34)
+        self.item_level_tag = _NumericFilterChip("ilvl", 1, 100)
+        self.item_level_toggle = self.item_level_tag.toggle
+        self.item_level_edit = self.item_level_tag.minimum_edit
+        self.item_level_max_edit = self.item_level_tag.maximum_edit
         self.item_level_edit.setToolTip("検索対象の最小アイテムレベル（1～100）")
-        self.item_level_edit.textEdited.connect(self._enable_item_level_filter)
-        item_level_layout.addWidget(self.item_level_edit)
-        self.item_level_range_separator = QLabel("～")
-        self.item_level_range_separator.hide()
-        item_level_layout.addWidget(self.item_level_range_separator)
-        self.item_level_max_edit = QLineEdit()
-        self.item_level_max_edit.setObjectName("itemLevelMaxEdit")
-        self.item_level_max_edit.setValidator(QIntValidator(1, 100, self.item_level_max_edit))
-        self.item_level_max_edit.setProperty("wheelStepNumeric", True)
-        self.item_level_max_edit.setAlignment(Qt.AlignCenter)
-        self.item_level_max_edit.setFixedWidth(34)
         self.item_level_max_edit.setToolTip("検索対象の最大アイテムレベル（1～100）")
-        self.item_level_max_edit.textEdited.connect(self._enable_item_level_filter)
-        self.item_level_max_edit.hide()
-        item_level_layout.addWidget(self.item_level_max_edit)
         self.item_level_tag.hide()
-        self.gem_level_tag = QFrame()
-        self.gem_level_tag.setObjectName("gemLevelTag")
-        self.gem_level_tag.setFixedWidth(132)
-        gem_level_layout = QHBoxLayout(self.gem_level_tag)
-        gem_level_layout.setContentsMargins(8, 2, 6, 2)
-        gem_level_layout.setSpacing(1)
-        self.gem_level_toggle = QPushButton("☑ ジェムLv：")
-        self.gem_level_toggle.setObjectName("gemLevelToggle")
-        self.gem_level_toggle.clicked.connect(self._toggle_gem_level_filter)
-        gem_level_layout.addWidget(self.gem_level_toggle)
-        self.gem_level_edit = QLineEdit()
-        self.gem_level_edit.setObjectName("gemLevelEdit")
-        self.gem_level_edit.setValidator(QIntValidator(1, 40, self.gem_level_edit))
-        self.gem_level_edit.setProperty("wheelStepNumeric", True)
-        self.gem_level_edit.setAlignment(Qt.AlignCenter)
-        self.gem_level_edit.setFixedWidth(30)
-        self.gem_level_edit.textEdited.connect(self._enable_gem_level_filter)
-        gem_level_layout.addWidget(self.gem_level_edit)
+
+        self.gem_level_tag = _NumericFilterChip("ジェムLv", 1, 40, with_range=False)
+        self.gem_level_toggle = self.gem_level_tag.toggle
+        self.gem_level_edit = self.gem_level_tag.minimum_edit
         self.gem_level_tag.hide()
-        self.gem_quality_tag = QFrame()
-        self.gem_quality_tag.setObjectName("gemQualityTag")
-        self.gem_quality_tag.setFixedWidth(116)
-        gem_quality_layout = QHBoxLayout(self.gem_quality_tag)
-        gem_quality_layout.setContentsMargins(8, 2, 6, 2)
-        gem_quality_layout.setSpacing(1)
-        self.gem_quality_toggle = QPushButton("☑ 品質：")
-        self.gem_quality_toggle.setObjectName("gemQualityToggle")
-        self.gem_quality_toggle.clicked.connect(self._toggle_gem_quality_filter)
-        gem_quality_layout.addWidget(self.gem_quality_toggle)
-        self.gem_quality_edit = QLineEdit()
-        self.gem_quality_edit.setObjectName("gemQualityEdit")
-        self.gem_quality_edit.setValidator(QIntValidator(0, 100, self.gem_quality_edit))
-        self.gem_quality_edit.setProperty("wheelStepNumeric", True)
-        self.gem_quality_edit.setAlignment(Qt.AlignCenter)
-        self.gem_quality_edit.setFixedWidth(30)
-        self.gem_quality_edit.textEdited.connect(self._enable_gem_quality_filter)
-        gem_quality_layout.addWidget(self.gem_quality_edit)
+
+        self.gem_quality_tag = _NumericFilterChip("品質", 0, 100, with_range=False)
+        self.gem_quality_toggle = self.gem_quality_tag.toggle
+        self.gem_quality_edit = self.gem_quality_tag.minimum_edit
         self.gem_quality_tag.hide()
-        self.gem_socket_tag = QFrame()
-        self.gem_socket_tag.setObjectName("gemSocketTag")
-        self.gem_socket_tag.setFixedWidth(150)
-        gem_socket_layout = QHBoxLayout(self.gem_socket_tag)
-        gem_socket_layout.setContentsMargins(8, 2, 6, 2)
-        gem_socket_layout.setSpacing(1)
-        self.gem_socket_toggle = QPushButton("☑ Gem Socket：")
-        self.gem_socket_toggle.setObjectName("gemSocketToggle")
-        self.gem_socket_toggle.clicked.connect(self._toggle_gem_socket_filter)
-        gem_socket_layout.addWidget(self.gem_socket_toggle)
-        self.gem_socket_edit = QLineEdit()
-        self.gem_socket_edit.setObjectName("gemSocketEdit")
-        self.gem_socket_edit.setValidator(QIntValidator(1, 10, self.gem_socket_edit))
-        self.gem_socket_edit.setProperty("wheelStepNumeric", True)
-        self.gem_socket_edit.setAlignment(Qt.AlignCenter)
-        self.gem_socket_edit.setFixedWidth(24)
-        self.gem_socket_edit.textEdited.connect(self._enable_gem_socket_filter)
-        gem_socket_layout.addWidget(self.gem_socket_edit)
+
+        self.gem_socket_tag = _NumericFilterChip("Gem Socket", 1, 10, with_range=False)
+        self.gem_socket_toggle = self.gem_socket_tag.toggle
+        self.gem_socket_edit = self.gem_socket_tag.minimum_edit
         self.gem_socket_tag.hide()
-        self.links_tag = QFrame()
-        self.links_tag.setObjectName("linksTag")
-        self.links_tag.setFixedWidth(116)
-        links_layout = QHBoxLayout(self.links_tag)
-        links_layout.setContentsMargins(8, 2, 6, 2)
-        links_layout.setSpacing(1)
-        self.links_toggle = QPushButton("☑ リンク：")
-        self.links_toggle.setObjectName("linksToggle")
-        self.links_toggle.clicked.connect(self._toggle_links_filter)
-        links_layout.addWidget(self.links_toggle)
-        self.links_edit = QLineEdit()
-        self.links_edit.setObjectName("linksEdit")
-        self.links_edit.setValidator(QIntValidator(1, 6, self.links_edit))
-        self.links_edit.setProperty("wheelStepNumeric", True)
-        self.links_edit.setAlignment(Qt.AlignCenter)
-        self.links_edit.setFixedWidth(24)
-        self.links_edit.textEdited.connect(self._enable_links_filter)
-        links_layout.addWidget(self.links_edit)
+
+        self.links_tag = _NumericFilterChip("リンク数", 1, 6, with_range=False)
+        self.links_toggle = self.links_tag.toggle
+        self.links_edit = self.links_tag.minimum_edit
         self.links_tag.hide()
         self.influence_chips = {}
         self._influence_chip_enabled = {}
@@ -1788,40 +1799,29 @@ class PoetoreWindow(QWidget):
             "未鑑定Tier", 1, 99,
         )
         self.unidentified_tier_chip.setToolTip(
-            "コピー元のTierを初期値にして、検索するTierを変更できます"
+            "未鑑定品の検索Tierを指定します。初期値はコピー元のTierです。"
         )
         self.unidentified_tier_chip.hide()
-        self.viscera_slot_chip = QPushButton()
-        self.viscera_slot_chip.setObjectName("readonlyFilterChip")
-        self.viscera_slot_chip.setEnabled(False)
+        self.viscera_slot_chip = _ReadOnlyFilterChip()
         self.viscera_slot_chip.hide()
-        self.viscera_grade_chip = QPushButton()
-        self.viscera_grade_chip.setObjectName("readonlyFilterChip")
-        self.viscera_grade_chip.setEnabled(False)
+        self.viscera_grade_chip = _ReadOnlyFilterChip()
         self.viscera_grade_chip.hide()
         self.veiled_chip = _CycleButton(
-            (("同一Veiled Modあり", True, False), ("Veiled指定なし", False, False)),
+            (("同一Veiled Modのみ", True, False), ("Veiledを含む", False, False)),
         )
         self.veiled_chip.hide()
         self.foil_chip = _CycleButton(
-            (("Foil Unique", True, False), ("通常Unique", False, False)),
+            (("Foil Uniqueのみ", True, False), ("Foil Uniqueを除外", False, False)),
         )
         self.foil_chip.hide()
-        self.map_area_chip = QPushButton()
-        self.map_area_chip.setObjectName("readonlyFilterChip")
-        self.map_area_chip.setEnabled(False)
-        self.map_area_chip.setToolTip("コピー元から判定した検索対象のマップエリア")
+        self.map_area_chip = _ReadOnlyFilterChip()
         self.map_area_chip.hide()
         self.map_tier_chip = _NumericFilterChip("Tier", 1, 17)
-        self.map_tier_chip.setFixedWidth(116)
-        self.nightmare_map_chip = QPushButton("ナイトメア")
-        self.nightmare_map_chip.setObjectName("readonlyFilterChip")
-        self.nightmare_map_chip.setEnabled(False)
+        self.nightmare_map_chip = _ReadOnlyFilterChip("ナイトメア")
         self.nightmare_map_chip.hide()
         self.base_percentile_chip = _NumericFilterChip(
             "ベース防御値", 0, 100, suffix="%",
         )
-        self.base_percentile_chip.setFixedWidth(174)
         self.area_level_chip = _NumericFilterChip("Area Lv", 1, 100)
         self.heist_wings_chip = _NumericFilterChip("公開Wing", 1, 4)
         self.heist_job_chip = _NumericFilterChip("Job Lv", 1, 5)
@@ -1832,27 +1832,17 @@ class PoetoreWindow(QWidget):
             self.cluster_passives_chip,
         ):
             chip.hide()
-        self.blighted_chip = QPushButton()
-        self.blighted_chip.setObjectName("readonlyFilterChip")
+        self.blighted_chip = _ReadOnlyFilterChip()
         self.blighted_chip.hide()
-        self.completion_reward_chip = QPushButton()
-        self.completion_reward_chip.setObjectName("readonlyFilterChip")
+        self.completion_reward_chip = _ReadOnlyFilterChip()
         self.completion_reward_chip.hide()
-        self.gem_variant_chip = QPushButton()
-        self.gem_variant_chip.setObjectName("readonlyFilterChip")
-        self.gem_variant_chip.setEnabled(False)
+        self.gem_variant_chip = _ReadOnlyFilterChip()
         self.gem_variant_chip.hide()
-        self.heist_target_chip = QPushButton()
-        self.heist_target_chip.setObjectName("readonlyFilterChip")
-        self.heist_target_chip.setEnabled(False)
+        self.heist_target_chip = _ReadOnlyFilterChip()
         self.heist_target_chip.hide()
-        self.cluster_enchant_chip = QPushButton()
-        self.cluster_enchant_chip.setObjectName("readonlyFilterChip")
-        self.cluster_enchant_chip.setEnabled(False)
+        self.cluster_enchant_chip = _ReadOnlyFilterChip()
         self.cluster_enchant_chip.hide()
-        self.cluster_socket_chip = QPushButton()
-        self.cluster_socket_chip.setObjectName("readonlyFilterChip")
-        self.cluster_socket_chip.setEnabled(False)
+        self.cluster_socket_chip = _ReadOnlyFilterChip()
         self.cluster_socket_chip.hide()
         self.logbook_area_selector = _AreaSegmentedControl()
         self.logbook_area_selector.currentIndexChanged.connect(self._logbook_area_changed)
@@ -1865,19 +1855,18 @@ class PoetoreWindow(QWidget):
         logbook_area_layout.addStretch()
         self.logbook_area_container.hide()
         self.split_combo = _CycleButton(
-            (("スプリット品含む", True, False), ("非スプリット", False, False)),
+            (("スプリットを含む", True, False), ("スプリットを除外", False, False)),
         )
         self.split_combo.hide()
         self.mirrored_combo = _CycleButton(
-            (("ミラー品含む", True, False), ("ミラー品を除外", False, False)),
+            (("ミラーを含む", True, False), ("ミラーを除外", False, False)),
         )
         self.mirrored_combo.hide()
         self.sanctified_combo = _CycleButton((
-            ("聖別品のみ", "only", False),
-            ("非聖別品のみ", False, False),
-            ("聖別品含む", True, False),
+            ("聖別化のみ", "only", False),
+            ("聖別化を除外", False, False),
+            ("聖別化を含む", True, False),
         ))
-        self.sanctified_combo.setToolTip("クリックするたびに聖別化条件を切り替えます")
         self.sanctified_combo.hide()
         self._filter_chips = (
             ("map_area", self.map_area_chip),
@@ -2368,6 +2357,17 @@ class PoetoreWindow(QWidget):
         self._auto_search_queued = False
         self.search_current_item()
 
+    def _filter_chip_content_height(self):
+        font_size = _DISPLAY_SIZE_PROFILES[self._result_font_size]["font"]
+        font = QFont(theme_font_family("Noto Sans JP"))
+        font.setPixelSize(theme_font_size(font_size))
+        metrics = QFontMetrics(font)
+        # An alternate font can use taller fallback glyphs for Japanese text.
+        text_height = metrics.height()
+        if has_custom_theme_font():
+            text_height = max(text_height, metrics.boundingRect(QRect(), Qt.TextSingleLine, "条件").height())
+        return max(font_size + 3, text_height)
+
     def _apply_poetore_style(self):
         """情報はニュートラル面に載せ、選択・操作だけ青緑で示す。"""
         profile = _DISPLAY_SIZE_PROFILES[self._result_font_size]
@@ -2439,7 +2439,7 @@ class PoetoreWindow(QWidget):
                 background: {theme_rgba('control', 26, 31, 33, 225)};
                 color: {theme_color('text', '#E6ECEA')};
                 border: none;
-                border-radius: 3px;
+                border-radius: 4px;
                 padding: 5px 9px;
             }}
             QPushButton:hover {{ background: {theme_rgba('control', 37, 51, 47, 230)}; }}
@@ -2468,8 +2468,16 @@ class PoetoreWindow(QWidget):
             QPushButton#binaryToggle:hover {{
                 border-color: {theme_color('accent', '#65FFCA')};
             }}
-            QPushButton#binaryToggle:first-child {{ border-radius: 3px 0 0 3px; }}
-            QPushButton#binaryToggle:last-child {{ border-radius: 0 3px 3px 0; }}
+            QPushButton#binaryToggle[segmentEdge="first"],
+            QPushButton#binaryToggle[segmentEdge="single"] {{
+                border-top-left-radius: 4px;
+                border-bottom-left-radius: 4px;
+            }}
+            QPushButton#binaryToggle[segmentEdge="last"],
+            QPushButton#binaryToggle[segmentEdge="single"] {{
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }}
             QPushButton#binaryToggle:checked {{
                 background: {theme_rgba('accent_soft', 37, 122, 100, 225)};
                 border-color: {theme_color('accent', '#65FFCA')};
@@ -2484,6 +2492,13 @@ class PoetoreWindow(QWidget):
                 min-height: __FILTER_CHIP_MIN_HEIGHT__px;
                 font-weight: 700;
             }}
+            QPushButton#cycleToggle:hover, QPushButton#cycleToggle:focus {{
+                background: {theme_rgba('accent_soft', 28, 83, 73, 255)};
+                border-color: {theme_color('text', '#E6ECEA')};
+            }}
+            QPushButton#cycleToggle:pressed {{
+                background: {theme_color('control', '#1A1F21')};
+            }}
             QPushButton#cycleToggle[alert="true"] {{ color: #ff5757; }}
             QPushButton#influenceChip {{
                 background: {theme_rgba('control', 20, 20, 20, 180)};
@@ -2497,114 +2512,42 @@ class PoetoreWindow(QWidget):
                 color: {theme_color('text', '#E6ECEA')};
                 border: 1px solid {theme_color('accent', '#65FFCA')};
             }}
+            QLabel#readonlyFilterChip {{
+                background: {theme_rgba('surface', 20, 24, 26, 220)};
+                color: {theme_color('text', '#E6ECEA')};
+                border: 1px solid {theme_color('border', '#465154')};
+                border-radius: 4px;
+                padding: 3px 7px;
+                min-height: __FILTER_CHIP_MIN_HEIGHT__px;
+            }}
             QFrame#numericFilterTag {{
                 background: {theme_rgba('accent_soft', 28, 83, 73, 210)};
                 border: 1px solid {theme_color('accent', '#65FFCA')};
-                border-radius: 3px;
+                border-radius: 4px;
             }}
             QFrame#numericFilterTag[active="false"] {{
                 background: {theme_rgba('surface', 20, 20, 20, 180)};
-                border: none;
+                border-color: {theme_color('border', '#465154')};
             }}
-            QPushButton#numericFilterToggle, QLineEdit#numericFilterEdit {{
+            QCheckBox#numericFilterToggle, QLineEdit#numericFilterEdit {{
+                color: {theme_color('text', '#E6ECEA')};
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 0 3px;
+                min-height: __FILTER_CHIP_MIN_HEIGHT__px;
+            }}
+            QCheckBox#numericFilterToggle {{
                 background: transparent;
-                color: {theme_color('text', '#E6ECEA')};
-                border: none;
-                padding: 0;
+                spacing: 4px;
                 font-weight: 700;
             }}
-            QFrame#numericFilterTag[active="false"] QPushButton,
-            QFrame#numericFilterTag[active="false"] QLineEdit,
-            QFrame#numericFilterTag[active="false"] QLabel {{ color: {theme_color('muted_text', '#737D79')}; }}
-            QPushButton#readonlyFilterChip {{
-                background: {theme_rgba('accent_soft', 28, 83, 73, 210)};
-                color: {theme_color('text', '#E6ECEA')};
-                border: 1px solid {theme_color('accent', '#65FFCA')};
-                padding: 3px 7px;
-                font-weight: 700;
+            QLineEdit#numericFilterEdit {{
+                background: {theme_rgba('control', 26, 31, 33, 235)};
+                border-color: {theme_color('border', '#465154')};
             }}
-            QFrame#itemLevelTag {{
-                background: {theme_rgba('accent_soft', 28, 83, 73, 210)};
-                border: 1px solid {theme_color('accent', '#65FFCA')};
-                border-radius: 3px;
-            }}
-            QFrame#gemLevelTag {{
-                background: {theme_rgba('accent_soft', 28, 83, 73, 210)};
-                border: 1px solid {theme_color('accent', '#65FFCA')};
-                border-radius: 3px;
-            }}
-            QFrame#gemQualityTag, QFrame#runemasteredTag, QFrame#gemSocketTag {{
-                background: {theme_rgba('accent_soft', 28, 83, 73, 210)};
-                border: 1px solid {theme_color('accent', '#65FFCA')};
-                border-radius: 3px;
-            }}
-            QFrame#linksTag {{
-                background: {theme_rgba('accent_soft', 28, 83, 73, 210)};
-                border: 1px solid {theme_color('accent', '#65FFCA')};
-                border-radius: 3px;
-            }}
-            QFrame#itemLevelTag QLabel {{
-                color: {theme_color('text', '#E6ECEA')};
-                font-weight: 700;
-            }}
-            QPushButton#itemLevelToggle, QPushButton#gemLevelToggle, QPushButton#gemQualityToggle, QPushButton#runemasteredToggle, QPushButton#gemSocketToggle, QPushButton#linksToggle {{
-                background: transparent;
-                color: {theme_color('text', '#E6ECEA')};
-                border: none;
-                padding: 0;
-                font-weight: 700;
-            }}
-            QLineEdit#itemLevelEdit, QLineEdit#itemLevelMaxEdit, QLineEdit#gemLevelEdit, QLineEdit#gemQualityEdit, QLineEdit#gemSocketEdit, QLineEdit#linksEdit {{
-                background: transparent;
-                color: {theme_color('text', '#E6ECEA')};
-                border: none;
-                padding: 0;
-                min-height: 20px;
-                font-weight: 700;
-            }}
-            QLineEdit#itemLevelEdit:focus, QLineEdit#itemLevelMaxEdit:focus, QLineEdit#gemLevelEdit:focus, QLineEdit#gemQualityEdit:focus, QLineEdit#gemSocketEdit:focus, QLineEdit#linksEdit:focus {{
-                border: none;
-                color: {theme_color('text', '#D8E3DF')};
-            }}
-            QFrame#itemLevelTag[active="false"] {{
-                border: none;
-                background: {theme_rgba('surface', 20, 20, 20, 180)};
-            }}
-            QFrame#gemLevelTag[active="false"] {{
-                border: none;
-                background: {theme_rgba('surface', 20, 20, 20, 180)};
-            }}
-            QFrame#gemQualityTag[active="false"], QFrame#runemasteredTag[active="false"], QFrame#gemSocketTag[active="false"] {{
-                border: none;
-                background: {theme_rgba('surface', 20, 20, 20, 180)};
-            }}
-            QFrame#linksTag[active="false"] {{
-                border: none;
-                background: {theme_rgba('surface', 20, 20, 20, 180)};
-            }}
-            QFrame#itemLevelTag[active="false"] QPushButton,
-            QFrame#itemLevelTag[active="false"] QLineEdit,
-            QFrame#itemLevelTag[active="false"] QLabel {{
-                color: {theme_color('muted_text', '#737D79')};
-            }}
-            QFrame#gemLevelTag[active="false"] QPushButton,
-            QFrame#gemLevelTag[active="false"] QLineEdit {{
-                color: {theme_color('muted_text', '#737D79')};
-            }}
-            QFrame#gemQualityTag[active="false"] QPushButton,
-            QFrame#gemQualityTag[active="false"] QLineEdit {{
-                color: {theme_color('muted_text', '#737D79')};
-            }}
-            QFrame#runemasteredTag[active="false"] QPushButton {{
-                color: {theme_color('muted_text', '#737D79')};
-            }}
-            QFrame#gemSocketTag[active="false"] QPushButton,
-            QFrame#gemSocketTag[active="false"] QLineEdit {{
-                color: {theme_color('muted_text', '#766a79')};
-            }}
-            QFrame#linksTag[active="false"] QPushButton,
-            QFrame#linksTag[active="false"] QLineEdit {{
-                color: {theme_color('muted_text', '#737D79')};
+            QCheckBox#numericFilterToggle:hover, QCheckBox#numericFilterToggle:focus,
+            QLineEdit#numericFilterEdit:focus {{
+                border-color: {theme_color('accent', '#65FFCA')};
             }}
             QPushButton#primaryButton {{
                 background: {theme_rgba('accent_soft', 37, 122, 100, 225)};
@@ -2616,7 +2559,7 @@ class PoetoreWindow(QWidget):
                 background: {theme_rgba('control', 26, 31, 33, 235)};
                 color: {theme_color('text', '#D8E3DF')};
                 border: 1px solid transparent;
-                border-radius: 3px;
+                border-radius: 4px;
                 padding: 4px 6px;
                 min-height: 20px;
                 selection-background-color: {theme_rgba('accent_soft', 37, 122, 100, 220)};
@@ -2662,7 +2605,7 @@ class PoetoreWindow(QWidget):
                 alternate-background-color: {theme_rgba('surface', 25, 30, 32, 205)};
                 color: {theme_color('text', '#D5DDDA')};
                 border: none;
-                border-radius: 3px;
+                border-radius: 4px;
                 gridline-color: {theme_color('border', '#2A3033')};
                 outline: none;
             }}
@@ -2712,10 +2655,7 @@ class PoetoreWindow(QWidget):
             f"padding: {profile['button_v_padding']}px "
             f"{profile['button_h_padding']}px;",
         )
-        chip_font = QFont(theme_font_family("Noto Sans JP"))
-        chip_font.setPixelSize(theme_font_size(profile["font"]))
-        chip_content_height = max(profile["font"] + 3, QFontMetrics(chip_font).height())
-        style = style.replace("__FILTER_CHIP_MIN_HEIGHT__", str(chip_content_height))
+        style = style.replace("__FILTER_CHIP_MIN_HEIGHT__", str(self._filter_chip_content_height()))
         style = style.replace(
             "__COMPACT_ACTION_FONT__", str(theme_font_size(profile["mod_value_font"]))
         )
@@ -2914,7 +2854,7 @@ class PoetoreWindow(QWidget):
         tabs_width = self._top_options_layout.itemAt(0).sizeHint().width() if not self.trade_preset_combo.isHidden() else 0
         # Before any result layout exists, the viewport can still be 100px.
         compact = getattr(self, "_mod_rows_initialized", False) and tabs_width + 6 + full_width > available
-        labels = [("Mod：一致" if combo.itemData(i) == 0 else f"Mod：-{combo.itemData(i)}%")
+        labels = [("Mod：一致" if combo.itemData(i) == 0 else f"Mod：−{combo.itemData(i)}%")
                   if compact else full for i, full in enumerate(full_labels)]
         blocked = combo.blockSignals(True)
         try:
@@ -3063,21 +3003,26 @@ class PoetoreWindow(QWidget):
         equalize_button_sizes((self.price_button, self.trade_status_combo,
                                self.trade_currency_combo, self.listed_within_combo,
                                self.remember_trade_options_checkbox), equal_width=False)
-        # Qt/OSのスタイルによって、同じpaddingでもdisabledの読み取り専用
-        # チップと操作可能な状態チップのsizeHintがずれる。表示サイズごとの
-        # 基準高を明示し、Windowsを含む全環境で同じ行高に揃える。
-        filter_chip_height = profile["font"] + 11
-        chip_font = QFont(theme_font_family("Noto Sans JP"))
-        chip_font.setPixelSize(theme_font_size(profile["font"]))
-        filter_chip_height = max(filter_chip_height, QFontMetrics(chip_font).height() + 8)
-        for _name, chip in self._filter_chips:
-            if isinstance(chip, QPushButton) and chip.objectName() in {
-                "readonlyFilterChip", "cycleToggle",
-            }:
-                chip.setFixedHeight(filter_chip_height)
-        # テキストだけのRunemastered条件も、編集欄を持つ品質チップと
-        # 同じ行高に固定してFlow内の上下位置を揃える。
-        self.runemastered_tag.setFixedHeight(self.gem_quality_tag.sizeHint().height())
+        filter_chip_height = self._filter_chip_content_height() + 8
+        for chip in self.findChildren(_CycleButton):
+            chip.setFixedHeight(filter_chip_height)
+            chip.refresh_icon()
+        for chip in self.findChildren(_ReadOnlyFilterChip):
+            chip.setFixedHeight(filter_chip_height)
+        numeric_toggles = self.findChildren(QCheckBox, "numericFilterToggle")
+        indicator = numeric_toggles[0]
+        # 標準フォントでは従来の寸法を保ち、選択中のプロファイルの文字サイズ差を反映する。
+        font_delta = theme_font_size(profile["font"]) - profile["font"]
+        indicator_scale = 1 + font_delta / _DISPLAY_SIZE_PROFILES["medium"]["font"]
+        Styles.apply_checkbox_style(
+            indicator, match_native_indicator=True, indicator_only=True, indicator_scale=indicator_scale,
+        )
+        for toggle in numeric_toggles[1:]:
+            toggle.setStyleSheet(indicator.styleSheet())
+        equalize_button_sizes(
+            (*numeric_toggles, *self.findChildren(_FilterValueEdit)), equal_width=False,
+        )
+        self.logbook_area_selector._sync()
         # スタイルのmin-width適用後に固定し、レイアウトによる再拡張を防ぐ。
         search_button_width = profile["search_button_width"]
         if has_custom_theme_font():
@@ -3680,13 +3625,7 @@ class PoetoreWindow(QWidget):
         self._mark_search_dirty()
 
     def _refresh_runemastered_chip_style(self):
-        checked = self.runemastered_chip.isChecked()
-        self.runemastered_chip.setText(
-            "☑ ルーンマスター" if checked else "☐ ルーンマスター"
-        )
-        self.runemastered_tag.setProperty("active", checked)
-        self.runemastered_tag.style().unpolish(self.runemastered_tag)
-        self.runemastered_tag.style().polish(self.runemastered_tag)
+        self.runemastered_tag.setActive(self.runemastered_chip.isChecked())
 
     def _poe2_search_item(self, item):
         """Runemasteredチップの選択をTrade2のtypeへ反映する。"""
@@ -6254,11 +6193,11 @@ class PoetoreWindow(QWidget):
         self.trade_preset_combo.setCurrentIndex(0)
         if dedicated_exact:
             self.trade_preset_combo.setToolTip(
-                "このアイテム種別に必要な条件だけを使う専用検索です。"
+                "検索プリセット：このアイテム種別に必要な条件だけを使う専用検索です。"
             )
         else:
             self.trade_preset_combo.setToolTip(
-                "未完成でクラフト価値がある装備は、完成品とベースアイテムを切り替えて検索できます。"
+                "検索プリセット：完成品とクラフト用のベースアイテムを切り替えて検索します。"
             )
         has_choice = len(presets) > 1
         self.trade_preset_combo.setEnabled(has_choice)
@@ -6309,13 +6248,13 @@ class PoetoreWindow(QWidget):
                     "レア": "rare",
                 }.get(rarity, rarity)
                 rarity_label = {
-                    "normal": "ノーマル限定",
-                    "magic": "マジック限定",
-                    "rare": "レア限定",
+                    "normal": "ノーマルのみ",
+                    "magic": "マジックのみ",
+                    "rare": "レアのみ",
                 }[detected_rarity]
                 self.tablet_rarity_combo.setOptions((
                     (rarity_label, detected_rarity, False),
-                    ("非ユニーク", "nonunique", False),
+                    ("ユニークを除外", "nonunique", False),
                 ))
         else:
             self._tablet_rarity_item_key = None
@@ -6429,20 +6368,18 @@ class PoetoreWindow(QWidget):
             )
         )
         self.item_level_tag.setVisible(has_item_level)
-        self._set_item_level_filter_enabled(
+        self.item_level_tag.setActive(
             has_item_level and (
                 is_wombgift
                 or (preset_filter is not None and preset_filter.enabled)
             )
         )
         is_cluster = has_item_level and item.category == "cluster_jewel"
-        self.item_level_range_separator.setVisible(is_cluster)
-        self.item_level_max_edit.setVisible(is_cluster)
-        self.item_level_tag.setFixedWidth(157 if is_cluster else 104)
+        self.item_level_tag.setRangeVisible(is_cluster)
         if heist_optional:
             self.item_level_edit.clear()
             self.item_level_max_edit.clear()
-            self._set_item_level_filter_enabled(False)
+            self.item_level_tag.setActive(False)
         elif preset_filter is not None:
             self.item_level_edit.setText(f"{preset_filter.min_value:g}")
             self.item_level_max_edit.setText(
@@ -6452,35 +6389,13 @@ class PoetoreWindow(QWidget):
         else:
             self.item_level_edit.setText(str(item.item_level) if has_item_level else "")
             self.item_level_max_edit.clear()
-        fit_theme_fixed_geometry(self.item_level_tag)
 
     def _selected_item_level(self) -> int | None:
         return self._selected_item_level_range()[0]
 
-    def _toggle_item_level_filter(self):
-        self._set_item_level_filter_enabled(not getattr(self, "_item_level_filter_enabled", False))
-
-    def _enable_item_level_filter(self, _text: str = ""):
-        self._set_item_level_filter_enabled(True)
-
-    def _set_item_level_filter_enabled(self, enabled: bool):
-        self._item_level_filter_enabled = bool(enabled)
-        self.item_level_tag.setProperty("active", self._item_level_filter_enabled)
-        self.item_level_toggle.setText("☑ ilvl：" if self._item_level_filter_enabled else "☐ ilvl：")
-        for editor in (self.item_level_edit, self.item_level_max_edit):
-            font = editor.font()
-            font.setStrikeOut(not self._item_level_filter_enabled)
-            editor.setFont(font)
-        self.item_level_tag.style().unpolish(self.item_level_tag)
-        self.item_level_tag.style().polish(self.item_level_tag)
-        self.item_level_toggle.setToolTip(
-            "クリックしてアイテムレベル条件を無効にします"
-            if self._item_level_filter_enabled else
-            "クリックしてアイテムレベル条件を有効にします"
-        )
 
     def _selected_item_level_range(self) -> tuple[int | None, int | None]:
-        if self.item_level_tag.isHidden() or not getattr(self, "_item_level_filter_enabled", False):
+        if self.item_level_tag.isHidden() or not self.item_level_tag.isActive():
             return None, None
         minimum_text = self.item_level_edit.text().strip()
         maximum_text = self.item_level_max_edit.text().strip() if not self.item_level_max_edit.isHidden() else ""
@@ -6507,33 +6422,11 @@ class PoetoreWindow(QWidget):
         enabled = level is not None and (
             self.poe_version != POE2 or level >= 19
         )
-        self._set_gem_level_filter_enabled(enabled)
+        self.gem_level_tag.setActive(enabled)
 
-    def _toggle_gem_level_filter(self):
-        self._set_gem_level_filter_enabled(not getattr(self, "_gem_level_filter_enabled", False))
-
-    def _enable_gem_level_filter(self, _text: str = ""):
-        self._set_gem_level_filter_enabled(True)
-
-    def _set_gem_level_filter_enabled(self, enabled: bool):
-        self._gem_level_filter_enabled = bool(enabled)
-        self.gem_level_tag.setProperty("active", self._gem_level_filter_enabled)
-        self.gem_level_toggle.setText(
-            "☑ ジェムLv：" if self._gem_level_filter_enabled else "☐ ジェムLv："
-        )
-        font = self.gem_level_edit.font()
-        font.setStrikeOut(not self._gem_level_filter_enabled)
-        self.gem_level_edit.setFont(font)
-        self.gem_level_tag.style().unpolish(self.gem_level_tag)
-        self.gem_level_tag.style().polish(self.gem_level_tag)
-        self.gem_level_toggle.setToolTip(
-            "クリックしてジェムレベル条件を無効にします"
-            if self._gem_level_filter_enabled else
-            "クリックしてジェムレベル条件を有効にします"
-        )
 
     def _selected_gem_level(self) -> int | None:
-        if self.gem_level_tag.isHidden() or not getattr(self, "_gem_level_filter_enabled", False):
+        if self.gem_level_tag.isHidden() or not self.gem_level_tag.isActive():
             return None
         text = self.gem_level_edit.text().strip()
         return int(text) if text else None
@@ -6587,33 +6480,11 @@ class PoetoreWindow(QWidget):
             enabled = quality >= 10
         elif visible:
             enabled = quality > 20
-        self._set_gem_quality_filter_enabled(enabled)
+        self.gem_quality_tag.setActive(enabled)
 
-    def _toggle_gem_quality_filter(self):
-        self._set_gem_quality_filter_enabled(not getattr(self, "_gem_quality_filter_enabled", False))
-
-    def _enable_gem_quality_filter(self, _text: str = ""):
-        self._set_gem_quality_filter_enabled(True)
-
-    def _set_gem_quality_filter_enabled(self, enabled: bool):
-        self._gem_quality_filter_enabled = bool(enabled)
-        self.gem_quality_tag.setProperty("active", self._gem_quality_filter_enabled)
-        self.gem_quality_toggle.setText(
-            "☑ 品質：" if self._gem_quality_filter_enabled else "☐ 品質："
-        )
-        font = self.gem_quality_edit.font()
-        font.setStrikeOut(not self._gem_quality_filter_enabled)
-        self.gem_quality_edit.setFont(font)
-        self.gem_quality_tag.style().unpolish(self.gem_quality_tag)
-        self.gem_quality_tag.style().polish(self.gem_quality_tag)
-        self.gem_quality_toggle.setToolTip(
-            "クリックして品質条件を無効にします"
-            if self._gem_quality_filter_enabled else
-            "クリックして品質条件を有効にします"
-        )
 
     def _selected_quality(self) -> int | None:
-        if self.gem_quality_tag.isHidden() or not getattr(self, "_gem_quality_filter_enabled", False):
+        if self.gem_quality_tag.isHidden() or not self.gem_quality_tag.isActive():
             return None
         text = self.gem_quality_edit.text().strip()
         return int(text) if text else None
@@ -6629,32 +6500,11 @@ class PoetoreWindow(QWidget):
         visible = self.poe_version == POE2 and is_gem_category(item.category) and sockets > 0
         self.gem_socket_tag.setVisible(visible)
         self.gem_socket_edit.setText(str(sockets) if visible else "")
-        self._set_gem_socket_filter_enabled(visible and sockets >= 3)
+        self.gem_socket_tag.setActive(visible and sockets >= 3)
 
-    def _toggle_gem_socket_filter(self):
-        self._set_gem_socket_filter_enabled(
-            not getattr(self, "_gem_socket_filter_enabled", False)
-        )
-
-    def _enable_gem_socket_filter(self, _text: str = ""):
-        self._set_gem_socket_filter_enabled(True)
-
-    def _set_gem_socket_filter_enabled(self, enabled: bool):
-        self._gem_socket_filter_enabled = bool(enabled)
-        self.gem_socket_tag.setProperty("active", self._gem_socket_filter_enabled)
-        self.gem_socket_toggle.setText(
-            "☑ Gem Socket：" if self._gem_socket_filter_enabled else "☐ Gem Socket："
-        )
-        font = self.gem_socket_edit.font()
-        font.setStrikeOut(not self._gem_socket_filter_enabled)
-        self.gem_socket_edit.setFont(font)
-        self.gem_socket_tag.style().unpolish(self.gem_socket_tag)
-        self.gem_socket_tag.style().polish(self.gem_socket_tag)
 
     def _selected_gem_sockets(self) -> int | None:
-        if self.gem_socket_tag.isHidden() or not getattr(
-            self, "_gem_socket_filter_enabled", False
-        ):
+        if self.gem_socket_tag.isHidden() or not self.gem_socket_tag.isActive():
             return None
         text = self.gem_socket_edit.text().strip()
         return int(text) if text else None
@@ -6670,30 +6520,11 @@ class PoetoreWindow(QWidget):
         visible = linked >= 1 and item.category in {"weapon", "armour"}
         self.links_tag.setVisible(visible)
         self.links_edit.setText(str(linked) if visible else "")
-        self._set_links_filter_enabled(visible and linked in {5, 6})
+        self.links_tag.setActive(visible and linked in {5, 6})
 
-    def _toggle_links_filter(self):
-        self._set_links_filter_enabled(not getattr(self, "_links_filter_enabled", False))
-
-    def _enable_links_filter(self, _text: str = ""):
-        self._set_links_filter_enabled(True)
-
-    def _set_links_filter_enabled(self, enabled: bool):
-        self._links_filter_enabled = bool(enabled)
-        self.links_tag.setProperty("active", self._links_filter_enabled)
-        self.links_toggle.setText("☑ リンク：" if enabled else "☐ リンク：")
-        font = self.links_edit.font()
-        font.setStrikeOut(not enabled)
-        self.links_edit.setFont(font)
-        self.links_tag.style().unpolish(self.links_tag)
-        self.links_tag.style().polish(self.links_tag)
-        self.links_toggle.setToolTip(
-            "クリックしてリンク条件を無効にします" if enabled
-            else "クリックしてリンク条件を有効にします"
-        )
 
     def _selected_links(self) -> int | None:
-        if self.links_tag.isHidden() or not getattr(self, "_links_filter_enabled", False):
+        if self.links_tag.isHidden() or not self.links_tag.isActive():
             return None
         text = self.links_edit.text().strip()
         return int(text) if text else None
@@ -6821,6 +6652,10 @@ class PoetoreWindow(QWidget):
         ).strip()
         self.map_area_chip.setVisible(item.category == "map" and bool(map_area))
         self.map_area_chip.setText(f"マップ：{map_area}" if map_area else "")
+        if map_area:
+            self.map_area_chip.setToolTip(
+                f"{self.map_area_chip.text()}\nコピー元から検索対象のマップエリアを判定しました。"
+            )
 
         map_identity = " ".join(filter(None, (
             item.name, item.base_type, self._trade_base_type,
@@ -6864,7 +6699,9 @@ class PoetoreWindow(QWidget):
             self.heist_job_chip.setActive(job.enabled)
         target = by_id.get("property.heist_objective_value")
         self.heist_target_chip.setVisible(target is not None)
-        self.heist_target_chip.setText(target.text if target else "")
+        self.heist_target_chip.setText(
+            target.text.replace("依頼書目標: ", "依頼書目標：", 1) if target else ""
+        )
 
         passive = next((row for row in rows if row.ref == "Adds # Passive Skills"), None)
         self._cluster_passive_row = passive
@@ -6887,7 +6724,7 @@ class PoetoreWindow(QWidget):
         self.cluster_socket_chip.setVisible(socket_mod is not None)
         if socket_mod is not None:
             count = int(socket_mod.values[0]) if socket_mod.values else 0
-            self.cluster_socket_chip.setText(f"ジュエルソケット：{count}")
+            self.cluster_socket_chip.setText(f"ジュエルソケット数：{count}")
 
         blight = by_id.get("property.map_uberblighted") or by_id.get("property.map_blighted")
         self.blighted_chip.setVisible(blight is not None)
@@ -6896,7 +6733,9 @@ class PoetoreWindow(QWidget):
         if _is_valdo_map(item):
             reward = None
         self.completion_reward_chip.setVisible(reward is not None)
-        self.completion_reward_chip.setText(reward.text if reward else "")
+        self.completion_reward_chip.setText(
+            reward.text.replace("完了報酬: ", "完了報酬：", 1) if reward else ""
+        )
 
     def _selected_special_chip_filters(self) -> tuple[TradeStatFilter, ...]:
         rows = getattr(self, "_special_chip_rows", {})
@@ -6951,10 +6790,10 @@ class PoetoreWindow(QWidget):
                 continue
             faction = next((mod.text for mod in mods if mod.stat_id and
                             mod.stat_id.startswith("pseudo.pseudo_logbook_faction_")), None)
-            groups.append((group, faction or f"エリア{len(groups) + 1}"))
+            groups.append((group, faction))
         self._logbook_area_groups = tuple(groups[:5])
         self.logbook_area_selector.setLabels(
-            tuple(f"エリア{index + 1}：{label}" for index, (_group, label)
+            tuple(f"エリア{index + 1}：{label}" if label else f"エリア{index + 1}" for index, (_group, label)
                   in enumerate(self._logbook_area_groups))
         )
         self.logbook_area_container.setVisible(bool(self._logbook_area_groups))
@@ -7079,7 +6918,7 @@ class PoetoreWindow(QWidget):
             name = str(getattr(candidate, "name", candidate))
             display_name = str(getattr(candidate, "display_name", None) or name)
             icon_url = getattr(candidate, "icon_url", None)
-            button = QPushButton(display_name)
+            button = _ElidedButton(display_name, "全" * 18)
             button.setObjectName("uniqueCandidateButton")
             button.setCheckable(True)
             button.setProperty("uniqueName", name)
@@ -7100,7 +6939,7 @@ class PoetoreWindow(QWidget):
                 )
             )
             button.setStyleSheet(
-                f"QPushButton#uniqueCandidateButton {{ text-align: left; padding: 6px; border: 1px solid {theme_color('border', '#555')}; border-radius: 4px;}}QPushButton#uniqueCandidateButton:hover {{ border-color: {theme_color('accent', '#65FFCA')}; }}QPushButton#uniqueCandidateButton:checked {{ border: 2px solid {theme_color('accent', '#65FFCA')}; background: {theme_color('accent_soft', '#183B34')};}}"
+                f"QPushButton#uniqueCandidateButton {{ text-align: left; padding: 6px; border: 2px solid {theme_color('border', '#555')}; border-radius: 4px;}}QPushButton#uniqueCandidateButton:hover {{ border-color: {theme_color('accent', '#65FFCA')}; }}QPushButton#uniqueCandidateButton:checked {{ border: 2px solid {theme_color('accent', '#65FFCA')}; background: {theme_color('accent_soft', '#183B34')};}}"
             )
             self.unique_name_group.addButton(button)
             self.unique_name_layout.addWidget(button)

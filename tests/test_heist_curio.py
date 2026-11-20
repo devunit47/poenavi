@@ -625,12 +625,12 @@ def test_experimental_base_opens_existing_search_with_empty_optional_ilvl(qapp, 
         assert window._trade_base_type == "Devout Chainmail"
         assert not window.item_level_tag.isHidden()
         assert window.item_level_edit.text() == ""
-        assert not window._item_level_filter_enabled
+        assert not window.item_level_tag.isActive()
 
         window.item_level_edit.setText("83")
         window.item_level_edit.textEdited.emit("83")
         qapp.processEvents()
-        assert window._item_level_filter_enabled
+        assert window.item_level_tag.isActive()
         assert window._selected_item_level_range() == (83, None)
         window.search_current_item.assert_called_once_with()
     finally:

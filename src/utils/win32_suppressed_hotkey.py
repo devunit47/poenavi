@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import queue
+import sys
 import threading
 from ctypes import wintypes
 
@@ -35,6 +36,18 @@ MODIFIER_GROUPS = {
     "shift": {VK_SHIFT, VK_LSHIFT, VK_RSHIFT},
     "win": {VK_LWIN, VK_RWIN},
 }
+
+
+def pressed_modifiers() -> tuple[str, ...]:
+    """Read the current Windows modifier state outside the keyboard hook."""
+    if sys.platform != "win32":
+        return ()
+    get_key_state = ctypes.windll.user32.GetAsyncKeyState
+    return tuple(
+        name for name, keys in MODIFIER_GROUPS.items()
+        if any(get_key_state(key) & 0x8000 for key in keys)
+    )
+
 
 NAMED_VIRTUAL_KEYS = {
     "space": 0x20, "pageup": 0x21, "pagedown": 0x22,

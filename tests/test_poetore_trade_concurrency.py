@@ -10,6 +10,7 @@ import pytest
 import urllib3
 
 from src.poetore import trade
+from src.poetore.parser import parse_item_text
 
 
 @pytest.fixture(autouse=True)
@@ -637,6 +638,63 @@ def test_first_catalog_429_with_only_policy_and_retry_after_blocks_search(monkey
     now += 5
     assert trade._cached_request_json(search, {"query": {}}, prevent_queue=True)[0] == {"id": "resumed"}
     assert sent == [(items, 100.0), (search, 160.0)]
+
+
+@pytest.mark.parametrize("cancel_during_wait", [False, True])
+def test_first_armour_search_waits_for_startup_catalog_quota(monkeypatch, cancel_during_wait):
+    now = 100.0
+    sent = []
+    search = f"{trade.API_ROOT}/search/Standard"
+    headers = {"X-Rate-Limit-Policy": "shared", "X-Rate-Limit-Ip": "4:2:0"}
+    cancel = trade.TradeSearchCancellation()
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    def wait_for_quota(_changed, timeout):
+        if cancel_during_wait:
+            cancel.set()
+        else:
+            advance(timeout)
+
+    def request(_method, url, **_kwargs):
+        sent.append((url, now))
+        if url == search:
+            return response({"id": "first", "result": []}, headers={
+                **headers, "X-Rate-Limit-Ip-State": "4:2:0",
+            })
+        return response(headers={**headers, "X-Rate-Limit-Ip-State": f"{len(sent)}:2:0"})
+
+    item = parse_item_text(
+        "Item Class: Boots\nRarity: Normal\nMesh Boots\n--------\nItem Level: 68\n",
+    )
+    monkeypatch.setattr(trade, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(trade, "_wait_for_trade_quota_change", wait_for_quota)
+    monkeypatch.setattr(trade._trade_http_pool, "request", request)
+    monkeypatch.setattr(trade, "_localized_web_trade_type", lambda *_: "メッシュブーツ")
+    for url in (
+        f"{trade.API_ROOT}/data/items", f"{trade.JP_API_ROOT}/data/items",
+        f"{trade.API_ROOT}/data/stats", f"{trade.JP_API_ROOT}/data/stats",
+    ):
+        trade._request_json(url)
+        advance(0.1)
+
+    assert trade._trade_rate_limiter.estimate_wait("search") == pytest.approx(3.6)
+    with trade.trade_search_scope(cancel):
+        if cancel_during_wait:
+            with pytest.raises(trade.TradeSearchCancelled):
+                trade.search_prices(item, trade_base_type="Mesh Boots", league="Standard")
+            assert len(sent) == 4
+            return
+        result = trade.search_prices(item, trade_base_type="Mesh Boots", league="Standard")
+
+    assert result.query_id == "first"
+    assert sent[-1] == (search, 104.0)
+    with pytest.raises(trade.TradeApiError, match="通信間隔を調整中") as error:
+        trade._cached_request_json(search, {"query": {"type": "Other Base"}}, prevent_queue=True)
+    assert len(sent) == 5
+    assert error.value.diagnostic_message == str(error.value)
 
 
 @pytest.mark.parametrize("api_path", ["trade", "trade2"])

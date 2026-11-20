@@ -36,6 +36,7 @@ from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.utils.window_focus import (
     focus_window, get_foreground_window, is_path_of_exile_window,
 )
+from src.utils.win32_suppressed_hotkey import pressed_modifiers
 from src.utils.poe_version_data import POE1, POE2
 
 from .parser import ItemParseError, parse_item_text
@@ -122,6 +123,8 @@ class _TradeSignals(QObject):
 _CLIPBOARD_POLL_MS = 10
 _CLIPBOARD_TIMEOUT_MS = 300
 _WINDOWS_CLIPBOARD_GRACE_MS = 30
+_COPY_MODIFIER_POLL_MS = 10
+_COPY_MODIFIER_TIMEOUT_MS = 250
 
 
 _INFLUENCE_CHIPS = {
@@ -5084,7 +5087,7 @@ class PoetoreWindow(QWidget):
         return True
 
     def capture_hotkey_released(self):
-        """Start copying once every key in the configured capture hotkey is up."""
+        """Handle the release notification, which may precede modifier release."""
         if self._capture_auto_hide:
             self._auto_hide_hotkey_released = True
         generation = getattr(self, "_capture_release_generation", None)
@@ -5100,14 +5103,51 @@ class PoetoreWindow(QWidget):
         trace = self._pending_performance_trace
         if trace is not None:
             trace.mark("copy_triggered", source=source)
+        self._copy_after_modifier_release(generation)
+
+    def _copy_after_modifier_release(self, generation: int, waited_ms: int = 0):
+        if generation != self._capture_release_generation:
+            return
+        if not self._capture_auto_hide:
+            foreground = get_foreground_window()
+            target = self._poe_window_hwnd
+            modifiers = pressed_modifiers()
+            trace = self._pending_performance_trace
+            reason = None
+            if target is not None and foreground != target:
+                reason = "foreground_changed"
+            elif modifiers:
+                if waited_ms < _COPY_MODIFIER_TIMEOUT_MS:
+                    if waited_ms == 0 and trace is not None:
+                        trace.mark("copy_waiting_for_modifiers", modifiers_down=modifiers)
+                    QTimer.singleShot(
+                        _COPY_MODIFIER_POLL_MS,
+                        lambda: self._copy_after_modifier_release(
+                            generation, waited_ms + _COPY_MODIFIER_POLL_MS,
+                        ),
+                    )
+                    return
+                reason = "modifiers_held"
+            if reason is not None:
+                if trace is not None:
+                    trace.mark(
+                        "copy_aborted", reason=reason, modifiers_down=modifiers,
+                        modifier_wait_ms=waited_ms,
+                    )
+                self._handle_capture_failure()
+                return
         self._send_copy(self._capture_copy_keys, self._capture_item_copy)
 
-    def _send_copy(self, keys, callback):
+    def _send_copy(self, keys, callback, *, retry: bool = False):
         from src.utils.internal_key_input import internal_key_input
 
         trace = self._pending_performance_trace
         if trace is not None:
-            trace.mark("copy_keys_started")
+            trace.mark(
+                "copy_keys_started", retry=retry,
+                poe_foreground=is_path_of_exile_window(get_foreground_window()),
+                modifiers_down=pressed_modifiers(),
+            )
         previous_token = clipboard_change_token(QApplication.clipboard())
         with internal_key_input(
             cooldown_seconds=0 if self._capture_auto_hide else 0.12,
@@ -5119,15 +5159,19 @@ class PoetoreWindow(QWidget):
         if trace is not None:
             trace.mark(
                 "copy_keys_sent",
+                retry=retry,
+                clipboard_token_kind=previous_token[0],
                 clipboard_poll_ms=_CLIPBOARD_POLL_MS,
                 callback_timeout_ms=_CLIPBOARD_TIMEOUT_MS,
                 windows_clipboard_grace_ms=_WINDOWS_CLIPBOARD_GRACE_MS,
             )
         generation = getattr(self, "_clipboard_wait_generation", 0) + 1
         self._clipboard_wait_generation = generation
-        self._wait_for_clipboard_update(previous_token, callback, generation, 0)
+        self._wait_for_clipboard_update(previous_token, callback, generation, 0, retry=retry)
 
-    def _wait_for_clipboard_update(self, previous_token, callback, generation, elapsed_ms):
+    def _wait_for_clipboard_update(
+        self, previous_token, callback, generation, elapsed_ms, *, retry: bool = False,
+    ):
         """Continue as soon as Ctrl+C rewrites the clipboard, with a safe timeout."""
         if generation != getattr(self, "_clipboard_wait_generation", None):
             return
@@ -5135,7 +5179,7 @@ class PoetoreWindow(QWidget):
         trace = self._pending_performance_trace
         if current_token != previous_token:
             if trace is not None:
-                trace.mark("clipboard_change_detected", wait_ms=elapsed_ms)
+                trace.mark("clipboard_change_detected", wait_ms=elapsed_ms, retry=retry)
             callback()
             return
         has_windows_sequence = previous_token[0] == "windows"
@@ -5143,9 +5187,20 @@ class PoetoreWindow(QWidget):
         if has_windows_sequence:
             timeout_ms += _WINDOWS_CLIPBOARD_GRACE_MS
         if elapsed_ms >= timeout_ms:
+            target = getattr(self, "_poe_window_hwnd", None)
+            retry_copy = (
+                has_windows_sequence and not retry and not self._capture_auto_hide
+                and target is not None and get_foreground_window() == target
+                and QCursor.pos() == self._auto_hide_origin and not pressed_modifiers()
+            )
             if trace is not None:
-                trace.mark("clipboard_change_timeout", wait_ms=elapsed_ms)
-            if has_windows_sequence:
+                trace.mark(
+                    "clipboard_change_timeout", wait_ms=elapsed_ms, retry=retry,
+                    retry_scheduled=retry_copy,
+                )
+            if retry_copy:
+                self._send_copy(self._capture_copy_keys, callback, retry=True)
+            elif has_windows_sequence:
                 self._handle_capture_failure()
             else:
                 # The Qt text token cannot detect copies of identical text.
@@ -5155,7 +5210,7 @@ class PoetoreWindow(QWidget):
         QTimer.singleShot(
             delay_ms,
             lambda: self._wait_for_clipboard_update(
-                previous_token, callback, generation, elapsed_ms + delay_ms,
+                previous_token, callback, generation, elapsed_ms + delay_ms, retry=retry,
             ),
         )
 
@@ -6060,7 +6115,10 @@ class PoetoreWindow(QWidget):
                         ),
                     )
             except (TradeApiError, ValueError) as exc:
-                trace.mark("search_failed", error_type=type(exc).__name__)
+                trace.mark(
+                    "search_failed", error_type=type(exc).__name__,
+                    error_message=getattr(exc, "diagnostic_message", None) or "価格検索に失敗しました。",
+                )
                 self._trade_signals.failed.emit(str(exc), search_generation)
             else:
                 trace.mark("search_result_signal_emitted")

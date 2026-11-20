@@ -25,6 +25,12 @@ from src.utils.poe_version_data import POE1, POE2
 from src.utils.win32_suppressed_hotkey import HotkeyEventProcessor, VK_MENU
 
 
+@pytest.fixture(autouse=True)
+def isolate_native_capture_modifiers(monkeypatch):
+    """Widget tests supply key events without reading the desktop keyboard."""
+    monkeypatch.setattr("src.poetore.ui.pressed_modifiers", lambda: ())
+
+
 def test_obs_streaming_mode_keeps_one_window_and_collapses_instead_of_closing(qapp):
     config = {"poetore": {"obs_streaming": {
         "enabled": True, "title_bar_opacity": 35, "geometry": {},
@@ -606,6 +612,87 @@ def test_capture_copy_timeout_preserves_previous_250ms_fallback(qapp):
         send_copy.assert_called_once_with(window._capture_copy_keys, window._capture_item_copy)
     finally:
         window.close()
+
+
+def test_alt_d_waits_for_physical_alt_after_trigger_release(qtbot, monkeypatch):
+    window = PoetoreWindow()
+    qtbot.addWidget(window)
+    scheduled = []
+    keyboard = Mock()
+    alt_held = True
+    sequence = 10
+
+    def press_key(key):
+        nonlocal sequence
+        if key == "c" and not alt_held:
+            sequence += 1
+
+    keyboard.press.side_effect = press_key
+    monkeypatch.setattr("src.poetore.ui.pressed_modifiers", lambda: ("alt",) if alt_held else ())
+    monkeypatch.setattr("pynput.keyboard.Controller", lambda: keyboard)
+    monkeypatch.setattr("src.poetore.ui.get_foreground_window", lambda: 11)
+    monkeypatch.setattr("src.poetore.ui.is_path_of_exile_window", lambda hwnd: hwnd == 11)
+    monkeypatch.setattr("src.poetore.ui.clipboard_change_token", lambda _: ("windows", sequence))
+    monkeypatch.setattr(QTimer, "singleShot", lambda delay, fn: scheduled.append((delay, fn)))
+    captured = Mock()
+    monkeypatch.setattr(window, "_capture_item_copy", captured)
+
+    window.capture_from_poe(capture_hotkey="alt+d")
+    window.capture_hotkey_released()
+    keyboard.press.assert_not_called()
+    alt_held = False
+    delay, on_release_poll = scheduled[-1]
+    assert delay == 10
+    on_release_poll()
+    captured.assert_called_once_with()
+    scheduled[0][1]()  # The original 250ms fallback must be inert.
+    assert keyboard.press.call_count == 2
+
+
+@pytest.mark.parametrize("outcome", ["copied", "timed_out", "focus_changed"])
+def test_alt_d_retries_a_missed_copy_once(qtbot, monkeypatch, outcome):
+    window = PoetoreWindow()
+    qtbot.addWidget(window)
+    scheduled = []
+    keyboard = Mock()
+    copy_count = 0
+    sequence = 10
+    cursor = QPoint(500, 400)
+    foreground = 11
+    trace = Mock()
+
+    def press_key(key):
+        nonlocal copy_count, sequence
+        if key == "c":
+            copy_count += 1
+            if copy_count == 2 and outcome == "copied":
+                sequence += 1
+
+    keyboard.press.side_effect = press_key
+    monkeypatch.setattr("pynput.keyboard.Controller", lambda: keyboard)
+    monkeypatch.setattr("src.poetore.ui.get_foreground_window", lambda: foreground)
+    monkeypatch.setattr("src.poetore.ui.is_path_of_exile_window", lambda hwnd: hwnd == 11)
+    monkeypatch.setattr("src.poetore.ui.QCursor.pos", lambda: cursor)
+    monkeypatch.setattr("src.poetore.ui.clipboard_change_token", lambda _: ("windows", sequence))
+    monkeypatch.setattr(QTimer, "singleShot", lambda delay, fn: scheduled.append((delay, fn)))
+    captured, failed = Mock(), Mock()
+    monkeypatch.setattr(window, "_capture_item_copy", captured)
+    monkeypatch.setattr(window, "_handle_capture_failure", failed)
+
+    window.capture_from_poe(trace, capture_hotkey="alt+d")
+    window.capture_hotkey_released()
+    if outcome == "focus_changed":
+        foreground = 22
+    while scheduled:
+        scheduled.pop(0)[1]()
+
+    assert copy_count == (1 if outcome == "focus_changed" else 2)
+    assert captured.call_count == int(outcome == "copied")
+    assert failed.call_count == int(outcome != "copied")
+    trace.mark.assert_any_call(
+        "clipboard_change_timeout", wait_ms=330, retry=False,
+        retry_scheduled=outcome != "focus_changed",
+    )
 
 
 def test_copy_continues_immediately_when_clipboard_generation_changes(qapp):

@@ -51,6 +51,8 @@ TRADE_CACHE_TTL = 300.0
 TRADE_CACHE_MAX_ENTRIES = 128
 TRADE_REQUEST_TIMEOUT_SECONDS = 20
 TRADE_READ_TIMEOUT_MAX_ATTEMPTS = 2
+_TRADE_QUEUE_REJECT_SECONDS = 1.5
+_TRADE_STARTUP_QUEUE_SECONDS = 5.0
 TRADE_CURRENCY_OPTIONS = {
     "any": None,
     "chaos": "chaos",
@@ -375,7 +377,9 @@ _RELATIONAL_SOURCE_REFS = {
 
 
 class TradeApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, diagnostic_message: str | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic_message = diagnostic_message
 
 
 class TradeSearchCancelled(Exception):
@@ -533,6 +537,7 @@ class _TradeRateLimiter:
         self._traffic = traffic
         self._policy_names: dict[str, str] = {}
         self._unmapped: dict[str, _TradeLimitState] = {}
+        self._observed_operations: set[str] = set()
 
     def reset(self) -> None:
         with self._traffic.lock:
@@ -540,6 +545,7 @@ class _TradeRateLimiter:
                 self._traffic.policies.pop(name, None)
             self._policy_names.clear()
             self._unmapped.clear()
+            self._observed_operations.clear()
             for key in tuple(self._traffic.unnamed_policies):
                 if key[0] is self:
                     del self._traffic.unnamed_policies[key]
@@ -570,17 +576,33 @@ class _TradeRateLimiter:
 
     def estimate_wait(self, endpoint: str, count: int = 1) -> float:
         with self._traffic.lock:
-            now = time.monotonic()
-            states = tuple(self._possible_policies(endpoint, self._policy(endpoint)))
-            restriction = max(
-                0.0, self._traffic.unnamed_restriction - now,
-                *(state.restricted_until - now for state, _ in states),
+            return self._estimate_wait(endpoint, count)[0]
+
+    def queue_wait(self, endpoint: str) -> tuple[float, bool]:
+        with self._traffic.lock:
+            wait, restriction = self._estimate_wait(endpoint, 1)
+            # Before the first price response, catalog/league traffic may
+            # temporarily fill a policy that the unmapped search could share.
+            startup_metadata_only = (
+                endpoint.rsplit(":", 1)[-1] == "search"
+                and bool(self._observed_operations)
+                and self._observed_operations <= {"data", "leagues"}
+                and not restriction
             )
-            wait = restriction
-            for state, _ in states:
-                for rule in state.rules:
-                    wait = max(wait, rule.wait_seconds(now, rule.maximum, count=count, start=restriction))
-            return wait
+            return wait, startup_metadata_only
+
+    def _estimate_wait(self, endpoint: str, count: int) -> tuple[float, float]:
+        now = time.monotonic()
+        states = tuple(self._possible_policies(endpoint, self._policy(endpoint)))
+        restriction = max(
+            0.0, self._traffic.unnamed_restriction - now,
+            *(state.restricted_until - now for state, _ in states),
+        )
+        wait = restriction
+        for state, _ in states:
+            for rule in state.rules:
+                wait = max(wait, rule.wait_seconds(now, rule.maximum, count=count, start=restriction))
+        return wait, restriction
 
     def try_reserve(self, endpoint: str) -> _TradeReservation | float | None:
         traffic = self._traffic
@@ -685,6 +707,7 @@ class _TradeRateLimiter:
         traffic = self._traffic
         with traffic.lock:
             now = time.monotonic() if received_at is None else received_at
+            self._observed_operations.add(endpoint.removeprefix("jp:").partition("/")[0])
             if policy_name:
                 policy = traffic.policies.setdefault(policy_name, _TradeLimitState([]))
                 self._policy_names[endpoint] = policy_name
@@ -781,16 +804,32 @@ def _rate_limit_context(url: str) -> tuple[_TradeRateLimiter | None, str | None]
 
 
 def _prevent_trade_queue(url: str | None = None) -> None:
-    limiter, policy = (_trade_rate_limiter, "search") if url is None else _rate_limit_context(url)
-    if limiter is None or policy is None:
+    limiter, endpoint = (_trade_rate_limiter, "search") if url is None else _rate_limit_context(url)
+    if limiter is None or endpoint is None:
         return
-    wait_seconds = limiter.estimate_wait(policy)
-    # Awakenedと同じく、長い待ちになる新規検索は予約せず即座に返す。
-    if wait_seconds >= 1.5:
-        raise TradeApiError(
-            f"PoE Trade APIの通信間隔を調整中です。"
-            f"約{max(1, round(wait_seconds))}秒後に、もう一度検索してください。"
-        )
+    deadline = time.monotonic() + _TRADE_STARTUP_QUEUE_SECONDS
+    deferred = False
+    while True:
+        _raise_if_trade_cancelled()
+        changed = limiter._traffic.changed
+        wait_seconds, startup = limiter.queue_wait(endpoint)
+        if wait_seconds < _TRADE_QUEUE_REJECT_SECONDS:
+            return
+        if not startup or wait_seconds > deadline - time.monotonic():
+            message = (
+                "PoE Trade APIの通信間隔を調整中です。"
+                f"約{max(1, round(wait_seconds))}秒後に、もう一度検索してください。"
+            )
+            raise TradeApiError(message, diagnostic_message=message)
+        if not deferred:
+            record_trade_api_event(
+                "startup_search_deferred", endpoint=endpoint,
+                estimated_wait_ms=round(wait_seconds * 1000),
+            )
+            deferred = True
+        # Wait before requesting a slot. The send path still rechecks the
+        # policy and reserves quota under its lock.
+        _wait_for_trade_quota_change(changed, wait_seconds)
 
 
 def default_trade_currency(item: ParsedItem) -> str:
@@ -1282,7 +1321,8 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
                 continue
             _trade_log(f"request failed: {method} {url} error={exc!r}")
             raise TradeApiError(
-                f"PoE Trade APIへの接続に失敗しました: {exc}"
+                f"PoE Trade APIへの接続に失敗しました: {exc}",
+                diagnostic_message=f"PoE Trade APIへの接続に失敗しました ({type(exc).__name__})。",
             ) from exc
         received_at = time.monotonic()
         response_elapsed = received_at - started
@@ -1309,10 +1349,8 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
             retry_note = f" 約{retry_minutes}分後に、もう一度検索してください。"
         else:
             retry_note = " しばらく時間を置いてから、もう一度検索してください。"
-        raise TradeApiError(
-            "検索回数が多いため、PoE Trade APIの利用制限に達しました。"
-            f"{retry_note}"
-        )
+        message = "検索回数が多いため、PoE Trade APIの利用制限に達しました。" + retry_note
+        raise TradeApiError(message, diagnostic_message=message)
     if response.status >= 400:
         try:
             error_payload = json.loads(body)
@@ -1329,10 +1367,8 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
             status=response.status, outcome="http_error",
         )
         detail = f"（{api_message}）" if api_message else ""
-        raise TradeApiError(
-            f"PoE Trade APIが検索条件を受理しませんでした: "
-            f"HTTP {response.status}{detail}"
-        )
+        message = f"PoE Trade APIが検索条件を受理しませんでした: HTTP {response.status}"
+        raise TradeApiError(message + detail, diagnostic_message=message)
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -1342,7 +1378,8 @@ def _request_json(url: str, payload: dict | None = None) -> tuple[dict, object]:
             status=response.status, outcome="invalid_json",
         )
         _trade_log(f"request failed: {method} {url} invalid JSON")
-        raise TradeApiError(f"PoE Trade APIから不正な応答を受信しました: {exc}") from exc
+        message = "PoE Trade APIから不正な応答を受信しました"
+        raise TradeApiError(f"{message}: {exc}", diagnostic_message=f"{message}。") from exc
     _trade_request_diagnostic(
         stage=stage, method=method, mod_filters=mod_filters,
         attempt=response_attempt, elapsed=response_elapsed,
@@ -5180,10 +5217,11 @@ def _require_english_search_identity(payload: dict) -> None:
         query_name.get("option", "") if isinstance(query_name, dict) else query_name
     )
     if _contains_japanese_text(query_type_text) or _contains_japanese_text(query_name_text):
-        raise TradeApiError(
+        message = (
             "英語のアイテム名またはベースタイプを取得できませんでした。"
             "アイテムへカーソルを合わせ、Alt+Dでもう一度読み取ってください。"
         )
+        raise TradeApiError(message, diagnostic_message=message)
 
 
 def search_prices(
@@ -5277,7 +5315,8 @@ def search_prices(
     _trade_log(f"search response: query_id={query_id!r} candidates={len(ids)}")
     if not query_id:
         _trade_log("search failed: response did not contain a query ID")
-        raise TradeApiError("検索IDを取得できませんでした。")
+        message = "検索IDを取得できませんでした。"
+        raise TradeApiError(message, diagnostic_message=message)
     raw_listings: list[PriceListing] = []
     fetch_cached = False
     fetched_count = 0

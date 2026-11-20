@@ -2810,7 +2810,7 @@ def test_filter_kind_column_is_japanese_and_marks_foulborn_generation(qapp):
         assert [
             window.mod_filter_tree.topLevelItem(index).text(1)
             for index in range(window.mod_filter_tree.topLevelItemCount())
-        ] == ["明示", "ファウルボーン", "疑似", "マップ"]
+            ] == ["疑似", "明示", "ファウルボーン", "マップ"]
     finally:
         window.close()
 
@@ -4803,7 +4803,6 @@ def test_mod_filter_kind_uses_same_compact_font_as_value_editors(
             row, _MOD_COLUMN_MIN
         ).findChild(QLineEdit)
         assert row.font(_MOD_COLUMN_KIND).pixelSize() == expected_font_size
-        assert row.foreground(_MOD_COLUMN_KIND).color().name() == "#98a39f"
         assert (
             f"font-size: {expected_font_size}px"
             in minimum_editor.styleSheet()
@@ -5028,8 +5027,9 @@ def test_poe2_finished_filter_keeps_special_origin_visible_after_normalization(q
         window.close()
 
 
-def test_poe2_filter_ui_shows_affixes_and_property_first(qapp):
-    window = PoetoreWindow(app_config={"poe_version": POE2})
+@pytest.mark.parametrize("poe_version", [POE1, POE2])
+def test_filter_ui_groups_rows_stably_without_reordering_search_conditions(qapp, poe_version):
+    window = PoetoreWindow(app_config={"poe_version": poe_version})
     try:
         filters = (
             TradeStatFilter("property.physical_dps", "物理DPS", 100, "property", True),
@@ -5041,14 +5041,109 @@ def test_poe2_filter_ui_shows_affixes_and_property_first(qapp):
                 "explicit.stat_2", "アタックスピード増加", 10, "explicit", True,
                 affix="suffix",
             ),
-            TradeStatFilter("rune.stat_3", "ルーン効果", 5, "augment", True),
+            TradeStatFilter("crafted.stat_3", "クラフト効果", 5, "crafted", True),
+            TradeStatFilter("implicit.stat_4", "暗黙Mod", 20, "implicit", True),
+            TradeStatFilter(
+                "pseudo.pseudo_total_life", "最大ライフ合計", 80, "pseudo", True,
+                affix="prefix", generation="explicit", source_texts=("最大ライフ +80",),
+            ),
+            TradeStatFilter(
+                "explicit.stat_5", "明示Mod", 5, "explicit", True,
+                affix="prefix", provenance_tags=("fractured",),
+            ),
+            TradeStatFilter("explicit.stat_6", "追加ライフ", 20, "prefix", False),
         )
         window._populate_stat_filters(filters)
-        labels = [
-            window.mod_filter_tree.topLevelItem(index).text(_MOD_COLUMN_KIND)
+        rows = [
+            window.mod_filter_tree.topLevelItem(index)
             for index in range(window.mod_filter_tree.topLevelItemCount())
         ]
-        assert labels == ["アイテム特性", "プレフィックス", "サフィックス", "特殊"]
+        assert [row.data(0, Qt.UserRole) for row in rows] == [
+            filters[index].stat_id for index in (4, 5, 1, 7, 2, 0, 3, 6)
+        ]
+        assert [row.text(_MOD_COLUMN_KIND) for row in rows] == [
+            "暗黙", "疑似", "プレフィックス", "プレフィックス", "サフィックス",
+            "アイテム特性", "クラフト", "フラクチャー",
+        ]
+        colors = [row.foreground(_MOD_COLUMN_KIND).color().name() for row in rows]
+        assert len(set(colors)) == 5
+        assert colors[2] == colors[3]
+        assert colors[5] == colors[6] == colors[7]
+        assert window._selected_stat_filters() == filters
+
+        tree = window.mod_filter_tree
+        tree.expandItem(rows[1])
+        tree.doItemsLayout()
+
+        def group_starts(items):
+            return [tree._starts_mod_group(tree.indexFromItem(row)) for row in items]
+
+        assert group_starts(rows) == [False, True, True, False, True, True, False, False]
+        assert group_starts([rows[1].child(0)]) == [False]
+
+        # The first visible row of a group can change when candidates are hidden.
+        rows[0].setHidden(True)
+        rows[2].setHidden(True)
+        tree.doItemsLayout()
+        assert group_starts([rows[1], rows[3]]) == [False, True]
+
+        for row in rows[:5]:
+            row.setHidden(True)
+        tree.doItemsLayout()
+        assert group_starts(rows[5:]) == [False, False, False]
+    finally:
+        window.close()
+
+
+_ALL_ELEMENTAL_RESISTANCE_RING = """アイテムクラス: 指輪
+レアリティ: レア
+死体の線輪
+アメジストの指輪
+--------
+装備要求:
+レベル: 52
+--------
+アイテムレベル: 85
+--------
+{ 暗黙モッド — 混沌, 耐性 }
+混沌耐性 +19(13-19)%
+--------
+{ プレフィックスモッド「オパール色をした」 (ティア: 7) — マナ }
+最大マナ +48(45-49)
+{ プレフィックスモッド「放射する」 (ティア: 7) — 防御, エナジーシールド }
+最大エナジーシールド +19(16-19)
+{ サフィックスモッド 「虹の」 (ティア: 1) — 元素, 耐性 }
+全ての元素耐性 +16(15-16)%
+{ サフィックスモッド 「追放の」 (ティア: 2) — 混沌, 耐性 }
+混沌耐性 +27(26-30)%
+{ サフィックスモッド 「光輝の」 (ティア: 1) — アタック }
+グローバル命中力が18(16-20)%増加する
+光半径が22(21-30)%増加する
+"""
+
+
+def test_poe1_all_elemental_resistance_ring_shows_total_in_pseudo_group(qapp):
+    window = PoetoreWindow(app_config={
+        "poe_version": POE1, "poetore": {"search_stat_range": 10},
+    })
+    try:
+        item = parse_item_text(_ALL_ELEMENTAL_RESISTANCE_RING)
+        window._populate_stat_filters(window._resolved_trade_filters(item, PRESET_FINISHED))
+        tree = window.mod_filter_tree
+        rows = [tree.topLevelItem(index) for index in range(tree.topLevelItemCount())]
+        by_id = {row.data(0, Qt.UserRole): row for row in rows}
+        elemental = by_id["pseudo.pseudo_total_elemental_resistance"]
+        chaos = by_id["pseudo.pseudo_total_chaos_resistance"]
+        assert rows[0].text(_MOD_COLUMN_KIND) == "暗黙"
+        assert elemental.text(_MOD_COLUMN_KIND) == chaos.text(_MOD_COLUMN_KIND) == "疑似"
+        assert max(rows.index(elemental), rows.index(chaos)) < next(
+            index for index, row in enumerate(rows) if row.text(_MOD_COLUMN_KIND) == "プレフィックス"
+        )
+        assert elemental.text(2) == ""
+        assert tree.itemWidget(elemental, 2) is None
+        for row, read_value, minimum in ((elemental, 48, "43"), (chaos, 46, "41")):
+            assert row.data(0, Qt.UserRole + 4).read_value == read_value
+            assert tree.itemWidget(row, _MOD_COLUMN_MIN).findChild(QLineEdit).text() == minimum
     finally:
         window.close()
 

@@ -588,7 +588,7 @@ def test_main_rates_reflow_after_screen_move(
         assert window.height() == original_height
         qtbot.mouseRelease(window.title_bar, Qt.LeftButton, pos=QPoint(8, 8))
 
-    QTest.qWait(200)
+    qtbot.waitUntil(lambda: window.maximumHeight() == destination.geometry.height())
     assert_geometry_converges(qapp, window)
     assert destination.geometry.contains(window.frameGeometry()), window.frameGeometry()
     assert (scroll.verticalScrollBar().maximum() > 0) == (not start_small)
@@ -608,7 +608,7 @@ def test_main_rates_reflow_after_screen_move(
 
 @pytest.mark.parametrize("notification", ["available", "logical_dpi", "physical_dpi", "device_ratio"])
 def test_main_rates_reflow_when_current_screen_metrics_change(
-    qapp, tmp_path, monkeypatch, notification,
+    qapp, qtbot, tmp_path, monkeypatch, notification,
 ):
     screen = _Screen(QRect(0, 0, 1920, 1080))
     handle = _WindowHandle(screen)
@@ -633,8 +633,7 @@ def test_main_rates_reflow_when_current_screen_metrics_change(
         new_ratio = window.devicePixelRatioF() * 1.25
         monkeypatch.setattr(window, "devicePixelRatioF", lambda: new_ratio)
         qapp.sendEvent(window, QEvent(QEvent.DevicePixelRatioChange))
-    QTest.qWait(200)
-    assert screen.geometry.contains(window.frameGeometry())
+    qtbot.waitUntil(lambda: screen.geometry.contains(window.frameGeometry()))
     assert window.maximumHeight() == screen.geometry.height()
     assert window.width() == width
 

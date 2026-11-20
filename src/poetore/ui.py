@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from src.ui.appearance import (
     fit_theme_fixed_geometry, has_custom_theme_font, suspend_theme_fixed_geometry, theme_color,
-    theme_font_family, theme_font_size, theme_rgba,
+    theme_font_family, theme_font_size, theme_qcolor, theme_rgba,
 )
 from src.ui.styles import Styles
 from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
@@ -463,7 +463,17 @@ _FILTER_KIND_LABELS = {
     "mercenary": "傭兵",
 }
 
-def _filter_kind_label(stat_filter: TradeStatFilter) -> str:
+_FILTER_KIND_STYLES = {
+    "implicit": (0, "#8BC9F4"),
+    "pseudo": (1, "#CBB1F3"),
+    "prefix": (2, "#8AD5BF"),
+    "suffix": (3, "#E5BE87"),
+}
+_MOD_FILTER_SOURCE_ORDER = Qt.UserRole + 6
+_MOD_FILTER_GROUP = Qt.UserRole + 7
+
+
+def _filter_kind_display(stat_filter: TradeStatFilter) -> tuple[str, str]:
     provenance_labels = tuple(
         _FILTER_KIND_LABELS[provenance]
         for provenance in stat_filter.provenance_tags
@@ -473,7 +483,8 @@ def _filter_kind_label(stat_filter: TradeStatFilter) -> str:
         }
     )
     kind = (
-        stat_filter.generation
+        "pseudo" if stat_filter.kind == "pseudo"
+        else stat_filter.generation
         if stat_filter.generation in _FILTER_KIND_LABELS
         else stat_filter.affix
         if stat_filter.affix in {"prefix", "suffix"}
@@ -481,13 +492,10 @@ def _filter_kind_label(stat_filter: TradeStatFilter) -> str:
     )
     kind_label = _FILTER_KIND_LABELS.get(kind, "特殊")
     if provenance_labels:
-        labels = (
-            (kind_label, *provenance_labels)
-            if kind not in {"explicit", "implicit", "prefix", "suffix"}
-            else provenance_labels
-        )
-        return "／".join(dict.fromkeys(labels))
-    return kind_label
+        if kind in {"explicit", "implicit", "prefix", "suffix"}:
+            return "special", "／".join(dict.fromkeys(provenance_labels))
+        kind_label = "／".join(dict.fromkeys((kind_label, *provenance_labels)))
+    return kind, kind_label
 
 
 def _replace_filters_with_special_chips(
@@ -598,6 +606,27 @@ def _wrapped_mod_text(text: str, font: QFont, width: int) -> str:
     first = encoded[:split].decode("utf-16-le").rstrip()
     rest = encoded[split:].decode("utf-16-le").replace("\u2028", " ")
     return first + "\n" + (metrics.elidedText(rest, Qt.ElideRight, width) if len(lines) > 2 else rest)
+
+
+class _ModFilterTree(QTreeWidget):
+    def _starts_mod_group(self, index):
+        group = index.data(_MOD_FILTER_GROUP)
+        if group is None:
+            return False
+        previous = self.indexAbove(index)
+        # Expanded source details belong to the group of their parent row.
+        parent = previous.parent()
+        if parent.isValid():
+            previous = parent
+        previous_group = previous.data(_MOD_FILTER_GROUP)
+        return previous_group is not None and previous_group != group
+
+    def drawRow(self, painter, option, index):
+        super().drawRow(painter, option, index)
+        if self._starts_mod_group(index):
+            divider = QRect(option.rect)
+            divider.setHeight(2)
+            painter.fillRect(divider, theme_qcolor("muted_text", 152, 163, 159, 112))
 
 
 class _ModDescriptionDelegate(QStyledItemDelegate):
@@ -1920,7 +1949,7 @@ class PoetoreWindow(QWidget):
         debug_layout.addWidget(self.input_edit)
         debug_layout.addWidget(self.result_tree)
         content_layout.addWidget(self._debug_parse_area)
-        self.mod_filter_tree = QTreeWidget()
+        self.mod_filter_tree = _ModFilterTree()
         self.mod_filter_tree.setHeaderLabels([
             "", "種別", "ティア", "検索条件", "最小", "最大",
         ])
@@ -2698,7 +2727,6 @@ class PoetoreWindow(QWidget):
             theme_font_size(_DISPLAY_SIZE_PROFILES[self._result_font_size]["mod_value_font"])
         )
         row.setFont(_MOD_COLUMN_KIND, font)
-        row.setForeground(_MOD_COLUMN_KIND, QBrush(QColor(theme_color("muted_text", "#98A39F"))))
 
     def _fit_mod_kind_column(self):
         if self.poe_version != POE2:
@@ -6974,8 +7002,13 @@ class PoetoreWindow(QWidget):
 
     def _selected_stat_filters(self) -> tuple[TradeStatFilter, ...]:
         filters = []
-        for index in range(self.mod_filter_tree.topLevelItemCount()):
-            row = self.mod_filter_tree.topLevelItem(index)
+        rows = [
+            self.mod_filter_tree.topLevelItem(index)
+            for index in range(self.mod_filter_tree.topLevelItemCount())
+        ]
+        # Keep the resolver order when reading edited conditions back for search.
+        rows.sort(key=lambda row: row.data(0, _MOD_FILTER_SOURCE_ORDER) or 0)
+        for row in rows:
             checkbox_container = self.mod_filter_tree.itemWidget(
                 row, _MOD_COLUMN_CHECK
             )
@@ -7035,7 +7068,14 @@ class PoetoreWindow(QWidget):
         self.mercenary_supports_toggle.setChecked(False)
         self.mercenary_supports_toggle.setVisible(has_mercenary_supports)
         self.mercenary_supports_actions_widget.setVisible(has_mercenary_supports)
-        for stat_filter in filters:
+        other_style = (len(_FILTER_KIND_STYLES), theme_color("muted_text", "#98A39F"))
+        display_rows = []
+        for index, stat_filter in enumerate(filters):
+            kind, label = _filter_kind_display(stat_filter)
+            priority, color = _FILTER_KIND_STYLES.get(kind, other_style)
+            display_rows.append((priority, index, stat_filter, label, color))
+        display_rows.sort(key=lambda entry: entry[0])
+        for priority, index, stat_filter, kind_label, kind_color in display_rows:
             if stat_filter.stat_id in {"property.item_level", "property.gem_level"}:
                 continue
             if (stat_filter.stat_id == "property.quality"
@@ -7087,7 +7127,7 @@ class PoetoreWindow(QWidget):
                 else ()
             )
             row = QTreeWidgetItem([
-                "", _filter_kind_label(stat_filter),
+                "", kind_label,
                 "" if badge_tiers else tier_text,
                 stat_filter.text, "", "",
             ])
@@ -7097,8 +7137,11 @@ class PoetoreWindow(QWidget):
             row.setData(0, Qt.UserRole + 3, stat_filter.inverted)
             row.setData(0, Qt.UserRole + 4, stat_filter)
             row.setData(0, Qt.UserRole + 5, stat_filter.enabled)
+            row.setData(0, _MOD_FILTER_SOURCE_ORDER, index)
+            row.setData(0, _MOD_FILTER_GROUP, priority)
             row.setToolTip(_MOD_COLUMN_TEXT, mod_tooltip)
-            row.setToolTip(_MOD_COLUMN_KIND, row.text(_MOD_COLUMN_KIND))
+            row.setToolTip(_MOD_COLUMN_KIND, kind_label)
+            row.setForeground(_MOD_COLUMN_KIND, QBrush(QColor(kind_color)))
             row.setSizeHint(
                 _MOD_COLUMN_TEXT,
                 QSize(0, self._mod_row_height()),

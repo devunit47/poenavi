@@ -649,6 +649,29 @@ def test_alt_d_waits_for_physical_alt_after_trigger_release(qtbot, monkeypatch):
     assert keyboard.press.call_count == 2
 
 
+def test_alt_d_still_copies_when_alt_stays_held(qtbot, monkeypatch):
+    window = PoetoreWindow()
+    qtbot.addWidget(window)
+    scheduled = []
+    keyboard = Mock()
+    monkeypatch.setattr("src.poetore.ui.pressed_modifiers", lambda: ("alt",))
+    monkeypatch.setattr("pynput.keyboard.Controller", lambda: keyboard)
+    monkeypatch.setattr("src.poetore.ui.get_foreground_window", lambda: 11)
+    monkeypatch.setattr("src.poetore.ui.is_path_of_exile_window", lambda hwnd: hwnd == 11)
+    monkeypatch.setattr(QTimer, "singleShot", lambda delay, fn: scheduled.append((delay, fn)))
+    send_copy, failed = Mock(), Mock()
+    monkeypatch.setattr(window, "_send_copy", send_copy)
+    monkeypatch.setattr(window, "_handle_capture_failure", failed)
+
+    window.capture_from_poe(capture_hotkey="alt+d")
+    window.capture_hotkey_released()
+    while scheduled and not send_copy.called:
+        scheduled.pop()[1]()
+
+    send_copy.assert_called_once_with(window._capture_copy_keys, window._capture_item_copy)
+    failed.assert_not_called()
+
+
 @pytest.mark.parametrize("outcome", ["copied", "timed_out", "focus_changed"])
 def test_alt_d_retries_a_missed_copy_once(qtbot, monkeypatch, outcome):
     window = PoetoreWindow()

@@ -5127,7 +5127,13 @@ class PoetoreWindow(QWidget):
                         ),
                     )
                     return
-                reason = "modifiers_held"
+                # Players often keep Alt held to inspect mods; copying with it
+                # held worked before, so fall back to sending instead of failing.
+                if trace is not None:
+                    trace.mark(
+                        "copy_modifier_wait_timeout", modifiers_down=modifiers,
+                        modifier_wait_ms=waited_ms,
+                    )
             if reason is not None:
                 if trace is not None:
                     trace.mark(

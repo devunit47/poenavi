@@ -3,7 +3,8 @@ from concurrent.futures import Future
 from copy import deepcopy
 
 import pytest
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
+from PySide6.QtGui import QHelpEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolTip
 
@@ -160,7 +161,8 @@ def test_rate_rows_align_equals_in_shared_columns(qapp, tmp_path):
             prefix_starts = []
             for index, expected in enumerate(("1 ＝ 152.5", "1 ＝ 0.001234", "取引データなし")):
                 value = panel.row_widgets[index].findChild(QLabel, f"customRateValue{index}")
-                assert value.text() == value.toolTip() == expected
+                assert value.text() == expected
+                assert value.toolTip() == ""
                 bounds = []
                 assert not inspect_paint(value, (expected,), centered=index != 0, text_bounds=bounds)
                 if expected.startswith("1 ＝ "):
@@ -356,7 +358,7 @@ def test_refresh_progress_and_failure_without_cache(qapp, qtbot, tmp_path):
         assert_refresh_status(panel, "更新を確認中…", checking=True)
         loading_value = panel.row_widgets[0].findChild(QLabel, "customRateValue0")
         assert loading_value.text() == "最新データ取得中…"
-        assert loading_value.toolTip() == "最新データ取得中…"
+        assert loading_value.toolTip() == ""
         assert "font-size: 12px" in loading_value.styleSheet()
         assert loading_value.sizeHint().width() <= loading_value.width()
         assert not panel.refresh_button.isEnabled()
@@ -367,11 +369,19 @@ def test_refresh_progress_and_failure_without_cache(qapp, qtbot, tmp_path):
         assert QTest.qWaitForWindowActive(panel)
         handle = panel.windowHandle()
         QTest.mouseMove(handle, panel.manage_button.geometry().center())
-        QTest.mouseMove(handle, panel.refresh_button.geometry().center())
+        button = panel.refresh_button
+        QTest.mouseMove(handle, button.geometry().center())
+
+        def tooltip_visible():
+            popup = button.findChild(QLabel, "toolbarTooltip")
+            return popup is not None and popup.isVisible()
+
         qtbot.waitUntil(
-            lambda: QToolTip.isVisible() and QToolTip.text() == panel.refresh_button.toolTip(),
+            tooltip_visible,
             timeout=2000,
         )
+        popup = button.findChild(QLabel, "toolbarTooltip")
+        assert popup.text() == button.toolTip()
 
         callback = service.queued[-1][2]
         callback(SyncCheckResult("failed", POE1, "League", None))
@@ -381,15 +391,14 @@ def test_refresh_progress_and_failure_without_cache(qapp, qtbot, tmp_path):
             "取引データを取得できませんでした。",
             "しばらくしてから再度お試しください。",
         )
-        assert QToolTip.isVisible()
-        assert QToolTip.text() == panel.refresh_button.toolTip()
+        assert popup.isVisible()
+        assert popup.text() == button.toolTip()
         failed_value = panel.row_widgets[0].findChild(QLabel, "customRateValue0")
         assert failed_value.text() == "最新データを取得できません"
-        assert failed_value.toolTip() == "最新データを取得できません"
+        assert failed_value.toolTip() == ""
         assert panel.refresh_button.isEnabled()
         assert panel.check_timer.interval() == RATE_CHECK_INTERVAL_MSEC
     finally:
-        QToolTip.hideText()
         panel.stop()
         panel.close()
 
@@ -524,13 +533,28 @@ def test_tooltips_use_high_contrast_dark_theme(qapp, tmp_path):
         panel.close()
 
 
-def test_long_names_keep_full_tooltip(qapp, tmp_path):
+def test_row_tooltips_only_reveal_elided_text(qapp, tmp_path):
     panel, *_ = make_panel(qapp, tmp_path)
     try:
-        label = panel.findChild(QLabel, "customRateLeftName0")
-        assert label.toolTip() == label.text()
-        assert label.width() == 125
+        row = panel.row_widgets[0]
+        for label in row.findChildren(QLabel):
+            assert label.toolTip() == ""
+
+        label = row.findChild(QLabel, "customRateLeftName0")
+        assert label.accessibleName() == label.text()
+        assert label._display_text(label.width()) == label.text()
+        pos = label.rect().center()
+        qapp.sendEvent(label, QHelpEvent(QEvent.ToolTip, pos, label.mapToGlobal(pos)))
+        assert not QToolTip.isVisible()
+
+        label.setFixedWidth(label.fontMetrics().horizontalAdvance("…") + 1)
+        assert label._display_text(label.width()).endswith("…")
+        pos = label.rect().center()
+        qapp.sendEvent(label, QHelpEvent(QEvent.ToolTip, pos, label.mapToGlobal(pos)))
+        assert QToolTip.isVisible()
+        assert QToolTip.text() == label.text()
     finally:
+        QToolTip.hideText()
         panel.stop()
         panel.close()
 

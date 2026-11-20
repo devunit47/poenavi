@@ -730,7 +730,7 @@ def test_main_rates_fit_small_screen(qapp, tmp_path, monkeypatch, size, version,
     for index, row in enumerate(window.rate_panel.row_widgets):
         for side in ("Left", "Right"):
             label = row.findChild(QLabel, f"customRate{side}Name{index}")
-            assert label.toolTip() == label.text()
+            assert label.toolTip() == "" and label.accessibleName() == label.text()
             if not long_quotes:
                 assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
         value = row.findChild(QLabel, f"customRateValue{index}")
@@ -765,7 +765,7 @@ def test_main_large_rate_keeps_window_and_controls_within_small_screen(qapp, tmp
 
     assert len(window.rate_panel.row_widgets) == MAX_RATE_PAIRS
     value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
-    assert "100,000,000.1" in value.toolTip()
+    assert "100,000,000.1" in value.text() and value.toolTip() == ""
     assert window.width() <= screen.geometry.width()
     for button in (window.title_bar.close_button, window.title_bar.minimize_button, window.rate_panel.manage_button):
         assert button.isVisible()
@@ -871,7 +871,7 @@ def test_main_rate_paints_full_or_explicitly_elided_quote(
     settle(qapp, window)
 
     value = window.rate_panel.row_widgets[0].findChild(QLabel, "customRateValue0")
-    assert value.toolTip() == f"1 ＝ {wide_quote}"
+    assert value.text() == f"1 ＝ {wide_quote}" and value.toolTip() == ""
     if narrow:
         window.resize(500, window.height())
         assert_geometry_converges(qapp, window)

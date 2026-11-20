@@ -73,6 +73,14 @@ def reload_icon(color) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
+def chevron_down_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawPolyline(QPolygonF([
+        QPointF(5, 9), QPointF(12, 15), QPointF(19, 9),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
 def update_check_icon(color) -> QIcon:
     """A magnifier with a check mark for checking the app version."""
     pixmap, painter = line_icon_canvas(color)

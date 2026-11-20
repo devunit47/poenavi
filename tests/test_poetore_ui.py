@@ -20,6 +20,7 @@ from src.poetore.ui import (
     _UniqueRollSlider, _auto_mod_layout_sizes, _replace_filters_with_special_chips, prepare_poetore_window,
     show_poetore_window, _price_currency_icon_filename,
 )
+from src.ui.toolbar_button import ToolbarButton
 from src.utils.global_hotkeys import ForegroundSuppressedHotkeyService
 from src.utils.poe_version_data import POE1, POE2
 from src.utils.win32_suppressed_hotkey import HotkeyEventProcessor, VK_MENU
@@ -88,10 +89,11 @@ def test_obs_streaming_mode_keeps_one_window_and_collapses_instead_of_closing(qa
         assert window.poetore_close_button.isVisible()
         assert int(window.winId()) == obs_window_id
 
-        window._dismiss_result()
+        QTest.mouseClick(window.poetore_close_button, Qt.LeftButton)
         qapp.processEvents()
         assert window.isVisible()
-        assert window.height() < expanded_height
+        assert window.height() == 30
+        assert int(window.winId()) == obs_window_id
         assert window.windowOpacity() == pytest.approx(0.35, abs=0.005)
         assert saved
     finally:
@@ -291,7 +293,8 @@ def test_poetore_result_display_size_scales_window_and_controls(
         assert window.minimumWidth() == minimum_width
         assert f"font-size: {font_px}px" in window.styleSheet()
         assert window.trade_league_combo.width() == round(238 * font_px / 12)
-        assert window.league_refresh_button.width() == round(62 * font_px / 12)
+        assert window.league_refresh_button.size() == window.league_popup_button.size()
+        assert window.league_refresh_button.width() >= round(28 * font_px / 12)
         assert window.mod_filter_tree.minimumHeight() > 0
         assert window.price_list.minimumHeight() > 0
     finally:
@@ -2365,24 +2368,48 @@ def test_poetore_combo_popups_are_treated_as_inside_panel(qapp, combo_name):
         window.close()
 
 
-def test_poetore_title_bar_keeps_close_button(qapp):
-    window = PoetoreWindow()
+def test_poetore_title_bar_buttons_open_leagues_and_return_focus_to_poe(qapp):
+    config = {"poe_version": POE2}
+    window = PoetoreWindow(app_config=config, save_config=lambda _config: None)
     try:
-        assert window.trade_league_combo.parentWidget() is window._title_bar._expanded_controls
-        assert window._title_bar._expanded_controls.parentWidget().objectName() == "poetoreTitleBar"
-        assert window.trade_league_combo.width() == 278
-        assert window.league_popup_button.text() == "▼"
-        assert window.league_popup_button.toolTip() == "リーグ一覧を開く"
-        assert window.league_refresh_button.text() == "再取得"
-        assert window.league_refresh_button.toolTip() == "公式サイトからリーグ一覧を再取得"
-        assert window.league_refresh_button.parentWidget() is window._title_bar._expanded_controls
-        close_buttons = [
-            button for button in window.findChildren(QPushButton)
-            if button.toolTip() == "閉じる" and button.text() == "×"
-        ]
-        assert len(close_buttons) == 1
+        combo = window.trade_league_combo
+        assert combo.parentWidget() is window._title_bar._expanded_controls
+        buttons = (
+            window.league_popup_button, window.league_refresh_button, window.poetore_close_button,
+        )
+        popup, refresh, close = buttons
+        for button, label in zip(buttons, ("リーグ一覧を開く", "リーグ一覧を更新", "閉じる")):
+            assert isinstance(button, ToolbarButton)
+            assert button.parentWidget() is combo.parentWidget()
+            assert button.toolTip() == button.accessibleName() == label
+            assert button.focusPolicy() == Qt.TabFocus
+        for button in (popup, refresh):
+            assert button.text() == "" and not button.icon().isNull()
+        assert close.text() == "×"
+
         window.show()
-        close_buttons[0].click()
+        qapp.processEvents()
+        combo.setFocus(Qt.TabFocusReason)
+        for current, following in zip((combo, popup, refresh), buttons):
+            QTest.keyClick(current, Qt.Key_Tab)
+            assert following.hasFocus()
+        QTest.keyClick(close, Qt.Key_Backtab)
+        assert refresh.hasFocus()
+
+        QTest.mouseClick(popup, Qt.LeftButton)
+        view = combo.view()
+        assert view.isVisible()
+        row = combo.model().index(1, 0)
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualRect(row).center())
+        qapp.processEvents()
+        assert window.isVisible() and not view.isVisible()
+        assert config["poetore"]["league_poe2"] == combo.itemData(1)
+
+        window._poe_window_hwnd = 1234
+        with patch("src.poetore.ui.focus_window") as focus:
+            QTest.mouseClick(close, Qt.LeftButton)
+            qapp.processEvents()
+        focus.assert_called_once_with(1234)
         assert not window.isVisible()
     finally:
         window.close()
@@ -3414,31 +3441,60 @@ def test_poetore_league_choices_include_sc_hc_and_persist(qapp):
         window.close()
 
 
-def test_poe2_title_bar_refresh_button_forces_a_fresh_league_request(qapp, monkeypatch):
+@pytest.mark.parametrize("fails", [False, True])
+def test_poe2_title_bar_refresh_button_forces_a_fresh_league_request(qapp, monkeypatch, fails):
     requested = []
+    pending = []
 
-    class ImmediateThread:
+    class DeferredThread:
         def __init__(self, *, target, daemon):
             self.target = target
 
         def start(self):
-            self.target()
+            pending.append(self.target)
 
-    monkeypatch.setattr("src.poetore.ui.threading.Thread", ImmediateThread)
-    monkeypatch.setattr(
-        "src.poetore.poe2.trade.available_pc_leagues",
-        lambda *, force_refresh=False: (
-            requested.append(force_refresh) or (TradeLeague("Fresh League"),)
-        ),
-    )
-    window = PoetoreWindow(app_config={"poe_version": "poe2"})
+    def fetch_leagues(*, force_refresh=False):
+        requested.append(force_refresh)
+        if fails:
+            raise OSError("league request failed")
+        return (TradeLeague("Fresh League"),)
+
+    monkeypatch.setattr("src.poetore.ui.threading.Thread", DeferredThread)
+    monkeypatch.setattr("src.poetore.poe2.trade.available_pc_leagues", fetch_leagues)
+    config = {"poe_version": POE2}
+    window = PoetoreWindow(app_config=config, save_config=lambda _config: None)
     try:
-        window.league_refresh_button.click()
+        window.show()
+        qapp.processEvents()
+        private_league = "My League (PL99999)"
+        editor = window.trade_league_combo.lineEdit()
+        QTest.mouseClick(editor, Qt.LeftButton)
+        editor.selectAll()
+        QTest.keyClicks(editor, private_league)
+        assert editor.hasFocus()
+
+        button = window.league_refresh_button
+        size = button.size()
+        idle_icon = button.icon().pixmap(button.iconSize()).toImage()
+        QTest.mouseClick(button, Qt.LeftButton)
+        assert not button.isEnabled()
+        assert button.toolTip() == button.accessibleName() == "リーグ一覧を取得中…"
+        assert button.size() == size
+        assert button.icon().pixmap(button.iconSize()).toImage() != idle_icon
+
+        button.click()
+        assert len(pending) == 1
+        pending[0]()
 
         assert requested == [True]
-        assert window.trade_league_combo.itemText(0) == "自動（現行SC: Fresh League）"
-        assert window.league_refresh_button.isEnabled()
-        assert window.league_refresh_button.text() == "再取得"
+        expected = "Forbidden Rites" if fails else "Fresh League"
+        assert window.trade_league_combo.itemText(0) == f"自動（現行SC: {expected}）"
+        assert config["poetore"]["league_poe2"] == private_league
+        assert window.trade_league_combo.currentText() == private_league
+        assert button.isEnabled()
+        assert button.toolTip() == button.accessibleName() == "リーグ一覧を更新"
+        assert button.size() == size
+        assert button.icon().pixmap(button.iconSize()).toImage() == idle_icon
     finally:
         window.close()
 

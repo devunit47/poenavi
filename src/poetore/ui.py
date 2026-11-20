@@ -30,8 +30,10 @@ from src.ui.appearance import (
     theme_font_family, theme_font_size, theme_rgba,
 )
 from src.ui.styles import Styles
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 from src.ui.custom_exchange_rate_panel import ElidedLabel
+from src.ui.toolbar_button import ToolbarButton
+from src.ui.toolbar_icons import checking_icon, chevron_down_icon, reload_icon
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.utils.window_focus import (
     focus_window, get_foreground_window, is_path_of_exile_window,
@@ -1073,7 +1075,7 @@ class _PoetoreTitleBar(QWidget):
         self._expanded_controls = QWidget(self)
         controls_layout = QHBoxLayout(self._expanded_controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(0)
+        controls_layout.setSpacing(UI_METRICS.inline_gap)
         layout.addWidget(self._expanded_controls, 1)
         window.divine_rate_button = QPushButton("⇄ …", self._expanded_controls)
         window.divine_rate_button.setObjectName("divineRateButton")
@@ -1087,29 +1089,26 @@ class _PoetoreTitleBar(QWidget):
         controls_layout.addWidget(window.divine_rate_button)
         controls_layout.addStretch()
         controls_layout.addWidget(window.trade_league_combo)
-        window.league_popup_button = QPushButton("▼", self._expanded_controls)
+        window.league_popup_button = ToolbarButton(parent=self._expanded_controls, border_width=0)
         window.league_popup_button.setObjectName("leaguePopupButton")
         window.league_popup_button.setToolTip("リーグ一覧を開く")
         window.league_popup_button.setAccessibleName(window.league_popup_button.toolTip())
-        window.league_popup_button.setStyleSheet(icon_button_stylesheet(border_width=0))
-        window.league_popup_button.setFixedSize(28, 28)
+        window.league_popup_button.setIconSize(QSize(20, 20))
         window.league_popup_button.clicked.connect(window.trade_league_combo.showPopup)
         controls_layout.addWidget(window.league_popup_button)
-        controls_layout.addSpacing(4)
-        window.league_refresh_button = QPushButton("再取得", self._expanded_controls)
+        window.league_refresh_button = ToolbarButton(parent=self._expanded_controls, border_width=0)
         window.league_refresh_button.setObjectName("leagueRefreshButton")
-        window.league_refresh_button.setToolTip("公式サイトからリーグ一覧を再取得")
-        window.league_refresh_button.setFixedSize(62, 28)
+        window.league_refresh_button.setIconSize(QSize(20, 20))
         window.league_refresh_button.clicked.connect(
             lambda: window.refresh_trade_leagues(force_refresh=True)
         )
         controls_layout.addWidget(window.league_refresh_button)
-        controls_layout.addSpacing(4)
-        window.poetore_close_button = QPushButton("×", self._expanded_controls)
+        glyph_style = f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;"
+        window.poetore_close_button = ToolbarButton(
+            "×", self._expanded_controls, border_width=0, content=glyph_style,
+        )
         window.poetore_close_button.setToolTip("閉じる")
         window.poetore_close_button.setAccessibleName(window.poetore_close_button.toolTip())
-        window.poetore_close_button.setStyleSheet(icon_button_stylesheet(border_width=0))
-        window.poetore_close_button.setFixedSize(28, 28)
         window.poetore_close_button.clicked.connect(window._close_and_return_to_poe)
         controls_layout.addWidget(window.poetore_close_button)
 
@@ -2355,21 +2354,6 @@ class PoetoreWindow(QWidget):
             }}
             QMenu#divineRateMenu::item {{ padding: 4px 18px 4px 10px; }}
             QMenu#divineRateMenu::item:selected {{ background: {theme_rgba('accent_soft', 101, 255, 202, 45)}; }}
-            QPushButton#leaguePopupButton {{
-                padding: 0;
-                font-size: 11px;
-            }}
-            QPushButton#leagueRefreshButton {{
-                color: {theme_color('text', '#D8E3DF')};
-                background: {theme_color('surface', '#202629')};
-                border: 1px solid {theme_color('border', '#3A4245')};
-                border-radius: 4px;
-                padding: 0 6px;
-                font-size: 11px;
-            }}
-            QPushButton#leagueRefreshButton:hover,
-            QPushButton#leagueRefreshButton:focus {{ border-color: {theme_color('accent', '#65FFCA')}; }}
-            QPushButton#leagueRefreshButton:disabled {{ color: {theme_color('disabled', '#66706D')}; }}
             QLabel#itemName {{
                 color: {theme_color('text', '#D8E3DF')};
                 font-size: 15px;
@@ -2667,6 +2651,8 @@ class PoetoreWindow(QWidget):
             "__COMPACT_ACTION_FONT__", str(theme_font_size(profile["mod_value_font"]))
         )
         self.setStyleSheet(style)
+        self.league_popup_button.setIcon(chevron_down_icon(theme_color('muted_text', '#98A39F')))
+        self._sync_league_refresh_button()
 
     def _display_scale(self) -> float:
         return _DISPLAY_SIZE_PROFILES[self._result_font_size]["font"] / 12
@@ -2951,15 +2937,6 @@ class PoetoreWindow(QWidget):
             not self.related_items_panel.isHidden()
         )
         self.trade_league_combo.setFixedWidth(self._scaled_display_value(238))
-        self.league_popup_button.setFixedSize(
-            self._scaled_display_value(28), self._scaled_display_value(28)
-        )
-        self.league_refresh_button.setFixedSize(
-            self._scaled_display_value(62), self._scaled_display_value(28)
-        )
-        self.poetore_close_button.setFixedSize(
-            self._scaled_display_value(28), self._scaled_display_value(28)
-        )
         self.poe_ninja_currency_icon.setFixedSize(
             self._scaled_display_value(28), self._scaled_display_value(28)
         )
@@ -2994,13 +2971,11 @@ class PoetoreWindow(QWidget):
             equalize_button_sizes(toggle._buttons, expanding=True)
         for button in self.base_scope_toggle._buttons:
             button.setMinimumWidth(0)
-        equalize_button_sizes((self.league_popup_button, self.poetore_close_button),
-                              minimum_width=self._scaled_display_value(UI_METRICS.overlay_control_height),
-                              minimum_height=self._scaled_display_value(UI_METRICS.overlay_control_height))
-        equalize_button_sizes((self.league_popup_button, self.poetore_close_button,
-                               self.league_refresh_button, self.trade_league_combo),
-                              minimum_height=self._scaled_display_value(UI_METRICS.overlay_control_height),
-                              equal_width=False)
+        title_bar_buttons = (self.league_popup_button, self.league_refresh_button, self.poetore_close_button)
+        control_size = self._scaled_display_value(UI_METRICS.overlay_control_height)
+        equalize_button_sizes(title_bar_buttons, minimum_width=control_size, minimum_height=control_size)
+        equalize_button_sizes((*title_bar_buttons, self.trade_league_combo),
+                              minimum_height=control_size, equal_width=False)
         equalize_button_sizes((self.mod_conditions_toggle, self.clear_mod_conditions_button,
                                self.hidden_mods_toggle, self.mod_sources_toggle))
         equalize_button_sizes((self.price_button, self.trade_status_combo,
@@ -3794,12 +3769,25 @@ class PoetoreWindow(QWidget):
             self._widget_belongs_to_panel(widget)
         )
 
+    def _sync_league_refresh_button(self):
+        button = self.league_refresh_button
+        color = theme_color('muted_text', '#98A39F')
+        if self._league_refresh_started:
+            label = "リーグ一覧を取得中…"
+            icon = checking_icon(color)
+        else:
+            label = "リーグ一覧を更新"
+            icon = reload_icon(color)
+        button.setEnabled(not self._league_refresh_started)
+        button.setIcon(icon)
+        button.setToolTip(label)
+        button.setAccessibleName(label)
+
     def refresh_trade_leagues(self, *, force_refresh: bool = False):
         if self._league_refresh_started:
             return
         self._league_refresh_started = True
-        self.league_refresh_button.setEnabled(False)
-        self.league_refresh_button.setText("取得中…")
+        self._sync_league_refresh_button()
 
         def run():
             try:
@@ -3820,8 +3808,7 @@ class PoetoreWindow(QWidget):
 
     def _show_trade_leagues(self, leagues):
         self._league_refresh_started = False
-        self.league_refresh_button.setEnabled(True)
-        self.league_refresh_button.setText("再取得")
+        self._sync_league_refresh_button()
         saved = self._saved_trade_league()
         if self.poe_version == POE2:
             from .poe2.trade import default_pc_league as poe2_default_pc_league

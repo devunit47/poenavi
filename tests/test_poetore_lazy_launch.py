@@ -19,15 +19,26 @@ class PoetoreLazyLaunchTest(unittest.TestCase):
         )
         self.assertEqual(result.stdout.strip(), "False")
 
-    def test_open_poetore_delegates_to_lazy_entrypoint(self):
+    def test_poe2_prepare_and_open_delegate_to_lazy_entrypoints(self):
         window = MainWindow.__new__(MainWindow)
-        with patch("src.poetore.ui.show_poetore_window") as show_window:
+        window.poe_version = POE2
+        window.config = {"poe_version": POE2}
+        with (
+            patch("src.poetore.ui.prepare_poetore_window") as prepare_window,
+            patch("src.poetore.ui.show_poetore_window") as show_window,
+        ):
+            MainWindow._prepare_poetore_window(window)
             MainWindow.open_poetore(window)
+        prepare_window.assert_called_once_with(window)
         show_window.assert_called_once_with(window)
 
-    def test_capture_poetore_item_starts_capture(self):
+    def test_poe2_capture_poetore_item_starts_capture(self):
         window = MainWindow.__new__(MainWindow)
-        window.config = {"hotkeys": {"poetore_capture": "ctrl+shift+p"}}
+        window.poe_version = POE2
+        window.config = {
+            "poe_version": POE2,
+            "hotkeys": {"poetore_capture": "ctrl+shift+p"},
+        }
         poetore_window = Mock()
         trace = Mock()
         with patch(
@@ -67,21 +78,6 @@ class PoetoreLazyLaunchTest(unittest.TestCase):
         poetore_window.capture_from_poe.assert_called_once_with(
             trace, auto_hide=True, capture_hotkey="ctrl+d",
         )
-
-    def test_poe2_opens_prepares_and_captures_poetore(self):
-        window = MainWindow.__new__(MainWindow)
-        window.poe_version = POE2
-        window.config = {"poe_version": POE2}
-
-        with patch("src.poetore.ui.show_poetore_window") as show_window, patch(
-            "src.poetore.ui.prepare_poetore_window"
-        ) as prepare_window:
-            MainWindow.open_poetore(window)
-            MainWindow._prepare_poetore_window(window)
-            MainWindow.capture_poetore_item(window)
-
-        self.assertEqual(show_window.call_count, 2)
-        prepare_window.assert_called_once_with(window)
 
 
 if __name__ == "__main__":

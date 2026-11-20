@@ -1093,12 +1093,10 @@ class _PoetoreTitleBar(QWidget):
         window.league_popup_button.setObjectName("leaguePopupButton")
         window.league_popup_button.setToolTip("リーグ一覧を開く")
         window.league_popup_button.setAccessibleName(window.league_popup_button.toolTip())
-        window.league_popup_button.setIconSize(QSize(20, 20))
         window.league_popup_button.clicked.connect(window.trade_league_combo.showPopup)
         controls_layout.addWidget(window.league_popup_button)
         window.league_refresh_button = ToolbarButton(parent=self._expanded_controls, border_width=0)
         window.league_refresh_button.setObjectName("leagueRefreshButton")
-        window.league_refresh_button.setIconSize(QSize(20, 20))
         window.league_refresh_button.clicked.connect(
             lambda: window.refresh_trade_leagues(force_refresh=True)
         )
@@ -2651,7 +2649,13 @@ class PoetoreWindow(QWidget):
             "__COMPACT_ACTION_FONT__", str(theme_font_size(profile["mod_value_font"]))
         )
         self.setStyleSheet(style)
-        self.league_popup_button.setIcon(chevron_down_icon(theme_color('muted_text', '#98A39F')))
+        # Keep the 20px icon box at the default font and follow the profile's font adjustment.
+        title_icon_size = 20 + theme_font_size(font) - font
+        size = QSize(title_icon_size, title_icon_size)
+        self.league_popup_button.setIconSize(size)
+        self.league_refresh_button.setIconSize(size)
+        ink = theme_color('muted_text', '#98A39F')
+        self.league_popup_button.setIcon(chevron_down_icon(ink, size=title_icon_size))
         self._sync_league_refresh_button()
 
     def _display_scale(self) -> float:
@@ -3772,12 +3776,13 @@ class PoetoreWindow(QWidget):
     def _sync_league_refresh_button(self):
         button = self.league_refresh_button
         color = theme_color('muted_text', '#98A39F')
+        size = button.iconSize().width()
         if self._league_refresh_started:
             label = "リーグ一覧を取得中…"
-            icon = checking_icon(color)
+            icon = checking_icon(color, size=size)
         else:
             label = "リーグ一覧を更新"
-            icon = reload_icon(color)
+            icon = reload_icon(color, size=size)
         button.setEnabled(not self._league_refresh_started)
         button.setIcon(icon)
         button.setToolTip(label)

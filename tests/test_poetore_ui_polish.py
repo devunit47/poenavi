@@ -287,6 +287,41 @@ def test_trade_title_bar_uses_theme_ink_and_anchors_tooltips_above_buttons(qapp,
         qapp.sendEvent(button, QEvent(QEvent.Leave))
 
 
+def test_trade_title_bar_icons_scale_with_font_and_display_size(qapp, tmp_path):
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    buttons = (window.league_popup_button, window.league_refresh_button)
+    assert [button.iconSize().width() for button in buttons] == [20, 20]
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    widths = []
+    for profile in ("small", "medium", "large"):
+        window._app_config.setdefault("poetore", {})["result_font_size"] = profile
+        window.apply_result_display_size()
+        settle(qapp, window)
+        icon_size = buttons[0].iconSize()
+        assert icon_size.width() > 24
+        widths.append(icon_size.width())
+        for button in buttons:
+            assert button.iconSize() == icon_size
+            assert icon_size.width() < button.width()
+            assert button.icon().actualSize(icon_size) == icon_size
+            pixmap = button.icon().pixmap(icon_size, 2)
+            assert pixmap.devicePixelRatio() == 2
+            assert pixmap.size() == icon_size * 2
+    assert widths[0] < widths[1] < widths[2]
+
+    window._league_refresh_started = True
+    window._sync_league_refresh_button()
+    refresh = window.league_refresh_button
+    assert not refresh.isEnabled()
+    assert refresh.icon().actualSize(refresh.iconSize(), QIcon.Disabled) == refresh.iconSize()
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window.apply_result_display_size()
+    assert [button.iconSize().width() for button in buttons] == [20, 20]
+
+
 def test_main_icon_focus_ring_appears_for_tab_and_clears_for_mouse(qapp, tmp_path):
     window = build_scenario("main", tmp_path)
     settle(qapp, window)

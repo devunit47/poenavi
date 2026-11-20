@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QLayout,
     QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QMenu, QScrollArea, QSizeGrip, QSizePolicy, QStyle, QStyledItemDelegate,
-    QStyleOptionButton, QStyleOptionViewItem, QStylePainter,
+    QStyleOptionButton, QStyleOptionComboBox, QStyleOptionViewItem, QStylePainter,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     QPlainTextEdit,
     QHeaderView, QWidgetAction,
@@ -30,8 +30,10 @@ from src.ui.appearance import (
     theme_font_family, theme_font_size, theme_qcolor, theme_rgba,
 )
 from src.ui.styles import Styles
-from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes, icon_button_stylesheet
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 from src.ui.custom_exchange_rate_panel import ElidedLabel
+from src.ui.toolbar_button import ToolbarButton
+from src.ui.toolbar_icons import checking_icon, chevron_icon, external_link_icon, reload_icon
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.utils.window_focus import (
     focus_window, get_foreground_window, is_path_of_exile_window,
@@ -184,6 +186,10 @@ _UNIQUE_CANDIDATE_VIEWPORT_HEIGHT = (
     + _UNIQUE_CANDIDATE_ROW_SPACING * (_UNIQUE_CANDIDATE_VISIBLE_ROWS - 1)
 )
 _ACTION_CLUSTER_HORIZONTAL_GAP = UI_METRICS.overlay_gap
+_TRADE_OPTION_ARROW_WIDTH = 16
+_TRADE_OPTION_HORIZONTAL_PADDING = 1
+_NEXT_RESULTS_TEXT = "次の10件を取得"
+_FETCHING_RESULTS_TEXT = "出品を取得中…"
 _ACTION_CLUSTER_VERTICAL_GAP = UI_METRICS.control_gap
 _RELATED_ITEMS_TREE_HEIGHT = 180
 _RELATED_ITEMS_PRICE_HEIGHT_REDUCTION = 180
@@ -454,7 +460,7 @@ _FILTER_KIND_LABELS = {
     "socket": "ソケット",
     "special": "特殊",
     "unique exception": "ユニーク例外",
-    "mercenary": "MERCENARY",
+    "mercenary": "傭兵",
 }
 
 _FILTER_KIND_STYLES = {
@@ -651,6 +657,37 @@ class _ElidedScopeButton(QPushButton):
         option.text = self.fontMetrics().elidedText(option.text, Qt.ElideRight, content.width())
         painter = QStylePainter(self)
         painter.drawControl(QStyle.CE_PushButton, option)
+
+
+class _TradeOptionComboBox(QComboBox):
+    """Draw the dropdown cue with the same line icon as the condition toggle."""
+
+    def __init__(self, accessible_name: str):
+        super().__init__()
+        self.setObjectName("filterControl")
+        self.setAccessibleName(accessible_name)
+        self.setProperty("compactAction", True)
+        self.setProperty("mutedText", True)
+        self.arrow_icon = QIcon()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        arrow = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, self)
+        painter = QPainter(self)
+        mode = QIcon.Normal if self.isEnabled() else QIcon.Disabled
+        size = min(arrow.width(), arrow.height(), self.fontMetrics().height())
+        icon_rect = QRect(0, 0, size, size)
+        icon_rect.moveCenter(arrow.center())
+        self.arrow_icon.paint(painter, icon_rect, mode=mode)
+
+    def showPopup(self):
+        view = self.view()
+        popup = view.window()
+        # Qt otherwise sizes the popup frame from the closed control.
+        popup.setMinimumWidth(view.minimumWidth() + popup.width() - popup.contentsRect().width())
+        super().showPopup()
 
 
 class _FlowLayout(QLayout):
@@ -1055,8 +1092,14 @@ class _SparklineWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._points: tuple[float, ...] = ()
-        self.setFixedSize(116, 24)
+        self.setMinimumWidth(36)
+        self.setMaximumWidth(116)
+        self.setFixedHeight(24)
+        self.resize(self.sizeHint())
         self.setToolTip("poe.ninja 7日推移")
+
+    def sizeHint(self):
+        return QSize(116, 24)
 
     def setPoints(self, points: tuple[float, ...]):
         self._points = tuple(points)
@@ -1102,7 +1145,7 @@ class _PoetoreTitleBar(QWidget):
         self._expanded_controls = QWidget(self)
         controls_layout = QHBoxLayout(self._expanded_controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(0)
+        controls_layout.setSpacing(UI_METRICS.inline_gap)
         layout.addWidget(self._expanded_controls, 1)
         window.divine_rate_button = QPushButton("⇄ …", self._expanded_controls)
         window.divine_rate_button.setObjectName("divineRateButton")
@@ -1116,29 +1159,24 @@ class _PoetoreTitleBar(QWidget):
         controls_layout.addWidget(window.divine_rate_button)
         controls_layout.addStretch()
         controls_layout.addWidget(window.trade_league_combo)
-        window.league_popup_button = QPushButton("▼", self._expanded_controls)
+        window.league_popup_button = ToolbarButton(parent=self._expanded_controls, border_width=0)
         window.league_popup_button.setObjectName("leaguePopupButton")
         window.league_popup_button.setToolTip("リーグ一覧を開く")
         window.league_popup_button.setAccessibleName(window.league_popup_button.toolTip())
-        window.league_popup_button.setStyleSheet(icon_button_stylesheet(border_width=0))
-        window.league_popup_button.setFixedSize(28, 28)
         window.league_popup_button.clicked.connect(window.trade_league_combo.showPopup)
         controls_layout.addWidget(window.league_popup_button)
-        controls_layout.addSpacing(4)
-        window.league_refresh_button = QPushButton("再取得", self._expanded_controls)
+        window.league_refresh_button = ToolbarButton(parent=self._expanded_controls, border_width=0)
         window.league_refresh_button.setObjectName("leagueRefreshButton")
-        window.league_refresh_button.setToolTip("公式サイトからリーグ一覧を再取得")
-        window.league_refresh_button.setFixedSize(62, 28)
         window.league_refresh_button.clicked.connect(
             lambda: window.refresh_trade_leagues(force_refresh=True)
         )
         controls_layout.addWidget(window.league_refresh_button)
-        controls_layout.addSpacing(4)
-        window.poetore_close_button = QPushButton("×", self._expanded_controls)
+        glyph_style = f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;"
+        window.poetore_close_button = ToolbarButton(
+            "×", self._expanded_controls, border_width=0, content=glyph_style,
+        )
         window.poetore_close_button.setToolTip("閉じる")
         window.poetore_close_button.setAccessibleName(window.poetore_close_button.toolTip())
-        window.poetore_close_button.setStyleSheet(icon_button_stylesheet(border_width=0))
-        window.poetore_close_button.setFixedSize(28, 28)
         window.poetore_close_button.clicked.connect(window._close_and_return_to_poe)
         controls_layout.addWidget(window.poetore_close_button)
 
@@ -1317,6 +1355,7 @@ class PoetoreWindow(QWidget):
 
         self.item_header = QFrame()
         self.item_header.setObjectName("itemHeader")
+        self.item_header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         item_header_layout = QVBoxLayout(self.item_header)
         item_header_layout.setContentsMargins(10, 7, 10, 7)
         item_header_layout.setSpacing(1)
@@ -1378,8 +1417,10 @@ class PoetoreWindow(QWidget):
         ninja_layout = QHBoxLayout(self.poe_ninja_price_panel)
         ninja_layout.setContentsMargins(8, 5, 8, 5)
         ninja_layout.setSpacing(8)
-        self.poe_ninja_price_label = QLabel("poe.ninja 参考価格")
+        self.poe_ninja_price_label = QLabel()
         self.poe_ninja_price_label.setObjectName("poeNinjaPriceLabel")
+        self.poe_ninja_price_label.setWordWrap(True)
+        self._set_reference_price_heading("poe.ninja 参考価格")
         self.poe_ninja_price_value = QLabel("—")
         self.poe_ninja_price_value.setObjectName("poeNinjaPriceValue")
         self.poe_ninja_price_multiplier = QLabel("×")
@@ -1393,8 +1434,9 @@ class PoetoreWindow(QWidget):
         self.poe_ninja_trend_chart = _SparklineWidget()
         # 旧テスト・後続実装から差し込み口を参照できる別名。
         self.poe_ninja_trend_placeholder = self.poe_ninja_trend_chart
-        self.poe_ninja_open_button = QPushButton("poe.ninja  ↗")
+        self.poe_ninja_open_button = QPushButton("poe.ninja")
         self.poe_ninja_open_button.setObjectName("poeNinjaOpenButton")
+        self.poe_ninja_open_button.setToolTip("poe.ninjaで開く")
         self.poe_ninja_open_button.clicked.connect(self._open_poe_ninja_url)
         ninja_layout.addStretch()
         ninja_layout.addWidget(self.poe_ninja_price_label)
@@ -1504,18 +1546,12 @@ class PoetoreWindow(QWidget):
         )
         self.tablet_rarity_combo.hide()
 
-        self.trade_status_combo = QComboBox()
-        self.trade_status_combo.setObjectName("filterControl")
-        self.trade_status_combo.setProperty("compactAction", True)
-        self.trade_status_combo.setProperty("mutedText", True)
+        self.trade_status_combo = _TradeOptionComboBox("取引方式")
         self.trade_status_combo.addItem("インスタントバイアウトのみ", "instant")
         self.trade_status_combo.addItem("インスタント＋対面", "available")
         self.trade_status_combo.addItem("対面トレードのみ", "online")
         self.trade_status_combo.addItem("オフライン出品も含む", "offline")
-        self.trade_currency_combo = QComboBox()
-        self.trade_currency_combo.setObjectName("filterControl")
-        self.trade_currency_combo.setProperty("compactAction", True)
-        self.trade_currency_combo.setProperty("mutedText", True)
+        self.trade_currency_combo = _TradeOptionComboBox("出品通貨")
         self.trade_currency_combo.addItem("すべての通貨", "any")
         if self.poe_version == POE2:
             self.trade_currency_combo.addItem("高貴なオーブのみ", "exalted")
@@ -1543,10 +1579,8 @@ class PoetoreWindow(QWidget):
             self.trade_currency_combo.setItemData(
                 index, currency_tooltips[value], Qt.ToolTipRole
             )
-        self.listed_within_combo = QComboBox()
-        self.listed_within_combo.setObjectName("filterControl")
-        self.listed_within_combo.setProperty("compactAction", True)
-        self.listed_within_combo.setProperty("mutedText", True)
+        self.listed_within_combo = _TradeOptionComboBox("出品からの経過期間")
+        self.listed_within_combo.setToolTip("出品からの経過期間で絞り込みます。")
         for label, value in (
             ("期間指定なし", "any"), ("24時間以内", "1day"), ("3日以内", "3days"),
             ("1週間以内", "1week"), ("2週間以内", "2weeks"),
@@ -1899,11 +1933,11 @@ class PoetoreWindow(QWidget):
         self.weapon_property_header.addStretch(1)
         self.weapon_property_header.addWidget(self.disenchant_dust_panel)
         content_layout.addLayout(self.weapon_property_header)
-        self.clear_mod_conditions_button = QPushButton("すべて選択")
+        self.clear_mod_conditions_button = QPushButton("一括選択")
         self.clear_mod_conditions_button.setObjectName("secondaryActionButton")
         self.clear_mod_conditions_button.setProperty("mutedText", True)
         self.clear_mod_conditions_button.setToolTip(
-            "上の条件一覧のみ。ilvlなどの基本条件は変更しません"
+            "上の条件一覧にだけ適用します。ilvlなどの基本条件は対象外です。"
         )
         self.clear_mod_conditions_button.clicked.connect(
             self._toggle_all_mod_condition_checks
@@ -1971,12 +2005,12 @@ class PoetoreWindow(QWidget):
             self._toggle_mod_condition_from_text
         )
         content_layout.addWidget(self.mod_filter_tree)
-        self.mod_conditions_toggle = QPushButton("Mod一覧をたたむ ∧")
+        self.mod_conditions_toggle = QPushButton("条件をたたむ")
         self.mod_conditions_toggle.setObjectName("secondaryActionButton")
         self.mod_conditions_toggle.setProperty("mutedText", True)
         self.mod_conditions_toggle.setToolTip("Mod検索条件の一覧を折りたたむ")
         self.mod_conditions_toggle.clicked.connect(self._toggle_mod_conditions)
-        self.hidden_mods_toggle = QPushButton("隠し候補を表示")
+        self.hidden_mods_toggle = QPushButton("固定値の条件を表示")
         self.hidden_mods_toggle.setObjectName("secondaryActionButton")
         self.hidden_mods_toggle.setProperty("mutedText", True)
         self.hidden_mods_toggle.setCheckable(True)
@@ -1985,7 +2019,7 @@ class PoetoreWindow(QWidget):
             "通常は隠している検索候補を表示します。"
         )
         self.hidden_mods_toggle.toggled.connect(self._toggle_hidden_mods)
-        self.mod_sources_toggle = QPushButton("計算元Modを表示")
+        self.mod_sources_toggle = QPushButton("集約前のModを表示")
         self.mod_sources_toggle.setObjectName("secondaryActionButton")
         self.mod_sources_toggle.setProperty("mutedText", True)
         self.mod_sources_toggle.setCheckable(True)
@@ -1994,12 +2028,12 @@ class PoetoreWindow(QWidget):
             "計算に使われた元のMod文章を表示します。"
         )
         self.mod_sources_toggle.toggled.connect(self._toggle_mod_sources)
-        self.mercenary_supports_toggle = QPushButton("傭兵のサポートジェムを表示")
+        self.mercenary_supports_toggle = QPushButton("サポートジェム条件を表示")
         self.mercenary_supports_toggle.setObjectName("secondaryActionButton")
         self.mercenary_supports_toggle.setProperty("mutedText", True)
         self.mercenary_supports_toggle.setCheckable(True)
         self.mercenary_supports_toggle.setToolTip(
-            "傭兵の召喚状に含まれるサポートジェムの検索条件を表示します"
+            "傭兵の召喚状に含まれるサポートジェムの検索条件を切り替えます。"
         )
         self.mercenary_supports_toggle.toggled.connect(
             self._toggle_mercenary_supports
@@ -2035,7 +2069,7 @@ class PoetoreWindow(QWidget):
         content_layout.addWidget(self.search_scope_notice)
 
         action_row = _FlowLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setContentsMargins(0, 0, _ACTION_CLUSTER_HORIZONTAL_GAP, 0)
         action_row.setSpacing(_ACTION_CLUSTER_HORIZONTAL_GAP)
         action_row.setAlignment(Qt.AlignLeft)
         self.trade_action_layout = action_row
@@ -2046,12 +2080,12 @@ class PoetoreWindow(QWidget):
         action_row.addWidget(self.trade_status_combo)
         action_row.addWidget(self.trade_currency_combo)
         action_row.addWidget(self.listed_within_combo)
-        self.remember_trade_options_checkbox = QCheckBox("選択を記憶")
+        self.remember_trade_options_checkbox = QCheckBox("出品条件を記憶")
         self.remember_trade_options_checkbox.setObjectName(
             "rememberTradeOptionsCheckbox"
         )
         self.remember_trade_options_checkbox.setToolTip(
-            "ONの間は取引方式・通貨・出品期間の選択を記憶します"
+            "チェックを入れると取引方式・出品通貨・出品期間を記憶します。"
         )
         Styles.apply_checkbox_style(
             self.remember_trade_options_checkbox,
@@ -2066,16 +2100,16 @@ class PoetoreWindow(QWidget):
             self._remember_trade_options
         )
         action_row.addWidget(self.remember_trade_options_checkbox)
-        self.trade_url_button = QPushButton("公式トレード  ↗")
+        self.trade_url_button = QPushButton("公式トレード")
         self.trade_url_button.setObjectName("filterActionButton")
         self.trade_url_button.setProperty("compactAction", True)
         self.trade_url_button.setProperty("mutedText", True)
-        self.trade_url_button.setToolTip("日本語公式Tradeをブラウザで開く")
+        self.trade_url_button.setToolTip("この検索結果を公式トレードで開く")
         self.trade_url_button.setEnabled(False)
         self.trade_url_button.clicked.connect(self._open_trade_url)
         action_row.addWidget(self.trade_url_button)
 
-        self.price_status = QLabel("検索条件を読み取っています…")
+        self.price_status = QLabel("検索条件を準備中…")
         self.price_status.setWordWrap(True)
         self.price_status.setObjectName("priceStatus")
         status_row = QHBoxLayout()
@@ -2135,7 +2169,7 @@ class PoetoreWindow(QWidget):
             "出品最安と比較した目安です。"
         )
         self.installed_augment_recovery_panel.hide()
-        self.additional_results_button = QPushButton("次の10件を取得")
+        self.additional_results_button = QPushButton(_NEXT_RESULTS_TEXT)
         self.additional_results_button.setObjectName("filterActionButton")
         self.additional_results_button.clicked.connect(self._fetch_additional_results)
         self.additional_results_button.hide()
@@ -2384,21 +2418,6 @@ class PoetoreWindow(QWidget):
             }}
             QMenu#divineRateMenu::item {{ padding: 4px 18px 4px 10px; }}
             QMenu#divineRateMenu::item:selected {{ background: {theme_rgba('accent_soft', 101, 255, 202, 45)}; }}
-            QPushButton#leaguePopupButton {{
-                padding: 0;
-                font-size: 11px;
-            }}
-            QPushButton#leagueRefreshButton {{
-                color: {theme_color('text', '#D8E3DF')};
-                background: {theme_color('surface', '#202629')};
-                border: 1px solid {theme_color('border', '#3A4245')};
-                border-radius: 4px;
-                padding: 0 6px;
-                font-size: 11px;
-            }}
-            QPushButton#leagueRefreshButton:hover,
-            QPushButton#leagueRefreshButton:focus {{ border-color: {theme_color('accent', '#65FFCA')}; }}
-            QPushButton#leagueRefreshButton:disabled {{ color: {theme_color('disabled', '#66706D')}; }}
             QLabel#itemName {{
                 color: {theme_color('text', '#D8E3DF')};
                 font-size: 15px;
@@ -2607,16 +2626,21 @@ class PoetoreWindow(QWidget):
                 border: 1px solid {theme_color('border', '#465154')};
             }}
             QComboBox#filterControl:hover,
+            QComboBox#filterControl[compactAction="true"]:focus,
             QComboBox#filterControl:on {{
                 border-color: {theme_color('accent', '#65FFCA')};
             }}
             QComboBox#filterControl[compactAction="true"] {{
                 font-size: __COMPACT_ACTION_FONT__px;
-                padding: 2px 1px;
+                padding: 2px {_TRADE_OPTION_HORIZONTAL_PADDING}px;
                 min-height: 18px;
             }}
             QComboBox#filterControl[compactAction="true"]::drop-down {{
-                width: 8px;
+                width: {_TRADE_OPTION_ARROW_WIDTH}px;
+            }}
+            QComboBox#filterControl[compactAction="true"]::down-arrow {{
+                width: 0;
+                height: 0;
             }}
             QPushButton#filterActionButton[compactAction="true"] {{
                 font-size: __COMPACT_ACTION_FONT__px;
@@ -2696,6 +2720,14 @@ class PoetoreWindow(QWidget):
             "__COMPACT_ACTION_FONT__", str(theme_font_size(profile["mod_value_font"]))
         )
         self.setStyleSheet(style)
+        # Keep the 20px icon box at the default font and follow the profile's font adjustment.
+        title_icon_size = 20 + theme_font_size(font) - font
+        size = QSize(title_icon_size, title_icon_size)
+        self.league_popup_button.setIconSize(size)
+        self.league_refresh_button.setIconSize(size)
+        ink = theme_color('muted_text', '#98A39F')
+        self.league_popup_button.setIcon(chevron_icon(ink, size=title_icon_size))
+        self._sync_league_refresh_button()
 
     def _display_scale(self) -> float:
         return _DISPLAY_SIZE_PROFILES[self._result_font_size]["font"] / 12
@@ -2896,37 +2928,24 @@ class PoetoreWindow(QWidget):
 
     def _fit_compact_action_widths(self, *_args):
         """検索操作列を、現在表示中の文言に合う最小幅へ揃える。"""
-        profile = _DISPLAY_SIZE_PROFILES[self._result_font_size]
         for combo in (
             self.trade_status_combo,
             self.trade_currency_combo,
             self.listed_within_combo,
         ):
-            font = combo.font()
-            font.setPixelSize(theme_font_size(profile["mod_value_font"]))
-            metrics = QFontMetrics(font)
+            combo.ensurePolished()
+            metrics = combo.fontMetrics()
             text_width = metrics.horizontalAdvance(combo.currentText())
-            # コンパクト操作列用の左右パディング、矢印、境界分を確保する。
-            compact_width = text_width + 12
+            compact_width = text_width + _TRADE_OPTION_ARROW_WIDTH + 2 * (
+                _TRADE_OPTION_HORIZONTAL_PADDING + 1
+            )
             combo.setFixedWidth(compact_width)
 
-            if combo is self.trade_currency_combo:
-                # 閉じた状態は現在値へ詰め、長い選択肢は一覧側だけ広く表示する。
-                popup_text_width = max(
-                    (
-                        metrics.horizontalAdvance(combo.itemText(index))
-                        for index in range(combo.count())
-                    ),
-                    default=0,
-                )
-                combo.view().setMinimumWidth(popup_text_width + 24)
-
-        button_font = self.trade_url_button.font()
-        button_font.setPixelSize(theme_font_size(profile["mod_value_font"]))
-        button_metrics = QFontMetrics(button_font)
-        self.trade_url_button.setFixedWidth(
-            button_metrics.horizontalAdvance(self.trade_url_button.text()) + 12
-        )
+            # 一覧は現在値にかかわらず最長の選択肢を表示できる幅にする。
+            view = combo.view()
+            view.ensurePolished()
+            popup_width = view.sizeHintForColumn(combo.modelColumn())
+            view.setMinimumWidth(max(compact_width, popup_width + 2 * view.frameWidth()))
         self._fit_custom_font_window_width()
 
     def _fit_custom_font_window_width(self):
@@ -2979,20 +2998,10 @@ class PoetoreWindow(QWidget):
             not self.related_items_panel.isHidden()
         )
         self.trade_league_combo.setFixedWidth(self._scaled_display_value(238))
-        self.league_popup_button.setFixedSize(
-            self._scaled_display_value(28), self._scaled_display_value(28)
-        )
-        self.league_refresh_button.setFixedSize(
-            self._scaled_display_value(62), self._scaled_display_value(28)
-        )
-        self.poetore_close_button.setFixedSize(
-            self._scaled_display_value(28), self._scaled_display_value(28)
-        )
         self.poe_ninja_currency_icon.setFixedSize(
             self._scaled_display_value(28), self._scaled_display_value(28)
         )
         self._fit_search_range_width()
-        self._fit_compact_action_widths()
         self.mod_filter_tree.setColumnWidth(
             _MOD_COLUMN_CHECK, self._scaled_display_value(_MOD_CHECK_COLUMN_WIDTH)
         )
@@ -3018,21 +3027,42 @@ class PoetoreWindow(QWidget):
                         gap = self._scaled_display_value(_MOD_VALUE_LEADING_GAP) if column == _MOD_COLUMN_MIN else 0
                         cell.setFixedWidth(editor.width() + gap)
         self._apply_poetore_style()
+        ink = theme_color("muted_text", "#98A39F")
+        for combo in (self.trade_status_combo, self.trade_currency_combo, self.listed_within_combo):
+            combo.arrow_icon = chevron_icon(ink)
+        action_icon_size = theme_font_size(profile["font"]) + 3
+        icon_size = QSize(action_icon_size, action_icon_size)
+        self.mod_conditions_toggle.setIconSize(icon_size)
+        self.mod_conditions_toggle.setIcon(chevron_icon(ink, up=not self.mod_filter_tree.isHidden()))
+        link_icon = external_link_icon(ink)
+        for button in (self.trade_url_button, self.poe_ninja_open_button):
+            button.setIcon(link_icon)
+            button.setIconSize(icon_size)
+        additional = self.additional_results_button
+        additional.ensurePolished()
+        option = QStyleOptionButton()
+        additional.initStyleOption(option)
+        content = additional.style().subElementRect(QStyle.SE_PushButtonContents, option, additional)
+        additional.setFixedWidth(
+            max(additional.fontMetrics().horizontalAdvance(text)
+                for text in (_NEXT_RESULTS_TEXT, _FETCHING_RESULTS_TEXT))
+            + additional.width() - content.width()
+        )
+        self._fit_compact_action_widths()
         for toggle in (self.trade_preset_combo, self.base_scope_toggle, self.magic_rarity_toggle):
             equalize_button_sizes(toggle._buttons, expanding=True)
         for button in self.base_scope_toggle._buttons:
             button.setMinimumWidth(0)
-        equalize_button_sizes((self.league_popup_button, self.poetore_close_button),
-                              minimum_width=self._scaled_display_value(UI_METRICS.overlay_control_height),
-                              minimum_height=self._scaled_display_value(UI_METRICS.overlay_control_height))
-        equalize_button_sizes((self.league_popup_button, self.poetore_close_button,
-                               self.league_refresh_button, self.trade_league_combo),
-                              minimum_height=self._scaled_display_value(UI_METRICS.overlay_control_height),
-                              equal_width=False)
+        title_bar_buttons = (self.league_popup_button, self.league_refresh_button, self.poetore_close_button)
+        control_size = self._scaled_display_value(UI_METRICS.overlay_control_height)
+        equalize_button_sizes(title_bar_buttons, minimum_width=control_size, minimum_height=control_size)
+        equalize_button_sizes((*title_bar_buttons, self.trade_league_combo),
+                              minimum_height=control_size, equal_width=False)
         equalize_button_sizes((self.mod_conditions_toggle, self.clear_mod_conditions_button,
-                               self.hidden_mods_toggle, self.mod_sources_toggle))
+                               self.hidden_mods_toggle, self.mod_sources_toggle), equal_width=False)
         equalize_button_sizes((self.price_button, self.trade_status_combo,
-                               self.trade_currency_combo, self.listed_within_combo), equal_width=False)
+                               self.trade_currency_combo, self.listed_within_combo,
+                               self.remember_trade_options_checkbox), equal_width=False)
         # Qt/OSのスタイルによって、同じpaddingでもdisabledの読み取り専用
         # チップと操作可能な状態チップのsizeHintがずれる。表示サイズごとの
         # 基準高を明示し、Windowsを含む全環境で同じ行高に揃える。
@@ -3097,11 +3127,14 @@ class PoetoreWindow(QWidget):
     def _set_mod_conditions_collapsed(self, collapsed: bool):
         self.mod_filter_tree.setVisible(not collapsed)
         self.mod_conditions_toggle.setText(
-            "Mod一覧をひらく ∨" if collapsed else "Mod一覧をたたむ ∧"
+            "条件を表示" if collapsed else "条件をたたむ"
+        )
+        self.mod_conditions_toggle.setIcon(
+            chevron_icon(theme_color("muted_text", "#98A39F"), up=not collapsed)
         )
         self.mod_conditions_toggle.setToolTip(
-            "Mod検索条件の一覧を展開する" if collapsed
-            else "Mod検索条件の一覧を折りたたむ"
+            "検索条件の一覧を表示します。" if collapsed
+            else "検索条件の一覧を折りたたみます。"
         )
         self._adjust_window_height_to_mod_rows()
 
@@ -3114,7 +3147,7 @@ class PoetoreWindow(QWidget):
 
     def _toggle_hidden_mods(self, visible: bool):
         self.hidden_mods_toggle.setText(
-            "通常候補を表示" if visible else "隠し候補を表示"
+            "通常の条件を表示" if visible else "固定値の条件を表示"
         )
         for index in range(self.mod_filter_tree.topLevelItemCount()):
             row = self.mod_filter_tree.topLevelItem(index)
@@ -3164,14 +3197,14 @@ class PoetoreWindow(QWidget):
 
     def _toggle_mercenary_supports(self, visible: bool):
         self.mercenary_supports_toggle.setText(
-            "傭兵のサポートジェムを隠す"
-            if visible else "傭兵のサポートジェムを表示"
+            "サポートジェム条件を隠す"
+            if visible else "サポートジェム条件を表示"
         )
         self._toggle_hidden_mods(self.hidden_mods_toggle.isChecked())
 
     def _toggle_mod_sources(self, visible: bool):
         self.mod_sources_toggle.setText(
-            "計算元Modを隠す" if visible else "計算元Modを表示"
+            "集約前のModを隠す" if visible else "集約前のModを表示"
         )
         for index in range(self.mod_filter_tree.topLevelItemCount()):
             row = self.mod_filter_tree.topLevelItem(index)
@@ -3396,8 +3429,8 @@ class PoetoreWindow(QWidget):
             for checkbox in self._mod_condition_checkboxes()
         )
         self.clear_mod_conditions_button.setText(
-            "すべて解除"
-            if has_checked_condition else "すべて選択"
+            "一括解除"
+            if has_checked_condition else "一括選択"
         )
 
     def _toggle_all_mod_condition_checks(self):
@@ -3822,12 +3855,26 @@ class PoetoreWindow(QWidget):
             self._widget_belongs_to_panel(widget)
         )
 
+    def _sync_league_refresh_button(self):
+        button = self.league_refresh_button
+        color = theme_color('muted_text', '#98A39F')
+        size = button.iconSize().width()
+        if self._league_refresh_started:
+            label = "リーグ一覧を取得中…"
+            icon = checking_icon(color, size=size)
+        else:
+            label = "リーグ一覧を更新"
+            icon = reload_icon(color, size=size)
+        button.setEnabled(not self._league_refresh_started)
+        button.setIcon(icon)
+        button.setToolTip(label)
+        button.setAccessibleName(label)
+
     def refresh_trade_leagues(self, *, force_refresh: bool = False):
         if self._league_refresh_started:
             return
         self._league_refresh_started = True
-        self.league_refresh_button.setEnabled(False)
-        self.league_refresh_button.setText("取得中…")
+        self._sync_league_refresh_button()
 
         def run():
             try:
@@ -3848,8 +3895,7 @@ class PoetoreWindow(QWidget):
 
     def _show_trade_leagues(self, leagues):
         self._league_refresh_started = False
-        self.league_refresh_button.setEnabled(True)
-        self.league_refresh_button.setText("再取得")
+        self._sync_league_refresh_button()
         saved = self._saved_trade_league()
         if self.poe_version == POE2:
             from .poe2.trade import default_pc_league as poe2_default_pc_league
@@ -4600,13 +4646,19 @@ class PoetoreWindow(QWidget):
         self.divine_rate_menu.clear()
         self._divine_rate_retry_after = time.monotonic() + 4 * 60
 
+    def _set_reference_price_heading(self, heading: str):
+        # Qt allows breaks between Japanese characters. Join each word so
+        # the heading wraps only at the space between the source and price type.
+        self.poe_ninja_price_label.setText(" ".join("\u2060".join(word) for word in heading.split()))
+        self.poe_ninja_price_label.setAccessibleName(heading)
+
     def _show_poe_ninja_price(self, key, price: PoeNinjaPrice):
         if key != self._poe_ninja_item_key:
             trace = self._poe_ninja_performance_traces.pop(key, None)
             if trace is not None:
                 trace.mark("stale_poe_ninja_result_discarded")
             return
-        self.poe_ninja_price_label.setText("poe.ninja 参考価格")
+        self._set_reference_price_heading("poe.ninja 参考価格")
         self.poe_ninja_price_label.setToolTip("")
         amount, currency = price.display_price_parts()
         self.poe_ninja_price_value.setText(amount)
@@ -4629,6 +4681,7 @@ class PoetoreWindow(QWidget):
         if pixmap.isNull():
             self.poe_ninja_price_value.setText(price.display_price())
         trend = price.trend_summary()
+        self.poe_ninja_trend_label.setWordWrap(False)
         self.poe_ninja_trend_label.setText(
             f"{trend[0]} {trend[1]}\n7日推移" if trend else "7日データなし"
         )
@@ -4688,7 +4741,6 @@ class PoetoreWindow(QWidget):
 
         if not accepted:
             if official_expected or official_price is not None:
-                self.poe_ninja_price_label.setText("poe.ninja 参考価格")
                 self.poe_ninja_price_label.setToolTip(
                     "カレンシー交換の直近価格が未確定のため、"
                     "poe.ninjaの参考価格を表示しています"
@@ -4706,7 +4758,7 @@ class PoetoreWindow(QWidget):
                 self._hide_poe_ninja_price(key)
             return
         amount, currency = parts
-        self.poe_ninja_price_label.setText("カレンシー交換 直近価格")
+        self._set_reference_price_heading("カレンシー交換 直近価格")
         route = getattr(official_price, "selected_route", None)
         route_label = "Divine直接" if route == "direct_divine" else (
             "Chaos直接" if self.poe_version == POE1 else "Exalted直接"
@@ -4735,10 +4787,12 @@ class PoetoreWindow(QWidget):
         self.poe_ninja_currency_icon.setVisible(not pixmap.isNull())
         if ninja_price is not None:
             trend = ninja_price.trend_summary()
-            self.poe_ninja_trend_label.setText(
-                f"{trend[0]} {trend[1]}\npoe.ninja 7日推移"
-                if trend else "poe.ninja 7日データなし"
-            )
+            # The longer official heading and a wide price can leave too
+            # little room for the secondary caption and the link on one line.
+            self.poe_ninja_trend_label.setWordWrap(True)
+            change = "\u00a0".join(trend) + "\n" if trend else ""
+            caption = "\u2060".join("7日推移" if trend else "7日データなし")
+            self.poe_ninja_trend_label.setText(f"{change}poe.ninja {caption}")
         self.poe_ninja_price_panel.show()
 
     def _hide_poe_ninja_price(self, key=None):
@@ -4750,7 +4804,7 @@ class PoetoreWindow(QWidget):
         trace = self._poe_ninja_performance_traces.pop(key, None) if key is not None else None
         if trace is not None:
             trace.mark("poe_ninja_result_unavailable")
-        self.poe_ninja_price_label.setText("poe.ninja 参考価格")
+        self._set_reference_price_heading("poe.ninja 参考価格")
         self.poe_ninja_price_label.setToolTip("")
         self.poe_ninja_price_panel.hide()
         self.poe_ninja_price_value.setText("—")
@@ -6000,8 +6054,8 @@ class PoetoreWindow(QWidget):
         league = self._selected_trade_league()
         league_label = league or "現行SC（自動）"
         self._set_price_status(
-            f"{league_label}で「{preset_label} / {trade_status_label} / "
-            f"{trade_currency_label} / {listed_within_label}」を検索中…",
+            f"出品情報を取得中…\n{league_label}：{preset_label} / {trade_status_label} / "
+            f"{trade_currency_label} / {listed_within_label}",
         )
         filters = self._selected_stat_filters()
         needs_initial_filters = initial_filters is not None or (
@@ -7475,7 +7529,7 @@ class PoetoreWindow(QWidget):
         search_generation = self._search_generation
         search_cancel = self._search_cancel
         self.additional_results_button.setEnabled(False)
-        self.additional_results_button.setText("取得中…")
+        self.additional_results_button.setText(_FETCHING_RESULTS_TEXT)
 
         def run():
             try:
@@ -7504,7 +7558,7 @@ class PoetoreWindow(QWidget):
     def _additional_results_failed(self, message: str | None, search_generation: int):
         if search_generation != self._search_generation:
             return
-        self.additional_results_button.setText("次の10件を取得")
+        self.additional_results_button.setText(_NEXT_RESULTS_TEXT)
         self.additional_results_button.setEnabled(True)
         if message is not None:
             self._set_price_status(_user_facing_trade_error(message))
@@ -7520,7 +7574,7 @@ class PoetoreWindow(QWidget):
             and self.poe_version == POE2
             and bool(result.next_result_ids)
         )
-        self.additional_results_button.setText("次の10件を取得")
+        self.additional_results_button.setText(_NEXT_RESULTS_TEXT)
         self.additional_results_button.setEnabled(show_additional)
         self.additional_results_button.setVisible(show_additional)
         self.price_list.clear()
@@ -7531,10 +7585,10 @@ class PoetoreWindow(QWidget):
                 "価格付き出品は取得できませんでした。",
             )
             return
-        progress_note = "取得中 / " if partial else ""
+        progress_note = "出品情報を取得中…\n" if partial else ""
         fetched_count = result.fetched_count or len(result.listings)
         self._set_price_status(
-            f"{result.league}: {progress_note}候補{result.total}件 / "
+            f"{progress_note}{result.league}: 候補{result.total}件 / "
             f"取得{fetched_count}件{cache_note}",
             compact=not partial,
         )

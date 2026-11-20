@@ -4,9 +4,15 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QIcon, QImage, QPainter, QRegion
+from PySide6.QtGui import (
+    QColor, QFontDatabase, QFontMetrics, QHelpEvent, QIcon, QImage, QPainter, QRegion,
+    QTextLayout, QTextOption,
+)
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStyleOptionViewItem, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
+    QStyleOptionViewItem, QSystemTrayIcon, QWidget,
+)
 
 from src.app_font import bundled_font_path
 from src.poetore.exchange_rate_settings import (
@@ -18,6 +24,7 @@ from src.ui.appearance import (
     current_appearance, requested_appearance, resolve_tokens,
 )
 from src.ui.dialog_theme import UI_METRICS, icon_button_stylesheet
+from src.ui.toolbar_icons import chevron_icon, reload_icon
 from src.update.release_client import ReleaseInfo
 from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
 from tests.test_theme_contrast_audit import contrast
@@ -200,7 +207,11 @@ def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path
             (main.rate_refresh_button, (36, 36)),
             (rate_delete, (32, 32)),
         )),
-        (trade, ((trade.league_popup_button, (36, 33)), (trade.poetore_close_button, (36, 33)))),
+        (trade, (
+            (trade.league_popup_button, (33, 33)),
+            (trade.league_refresh_button, (33, 33)),
+            (trade.poetore_close_button, (33, 33)),
+        )),
     ):
         settle(qapp, window)
         handle = window.windowHandle()
@@ -253,6 +264,68 @@ def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path
             ), button.toolTip()
             assert button.geometry() == original
         window.hide()
+
+
+def test_trade_title_bar_uses_theme_ink_and_anchors_tooltips_above_buttons(qapp, tmp_path):
+    apply_application_appearance(qapp, {"appearance": {"preset": "poetore"}})
+    window = build_scenario("trade", tmp_path)
+    settle(qapp, window)
+    buttons = (window.league_popup_button, window.league_refresh_button, window.poetore_close_button)
+    initial_icons = [button.icon().pixmap(button.iconSize()).toImage() for button in buttons[:2]]
+
+    apply_application_appearance(qapp, {"appearance": {"preset": "tokyo_night"}})
+    window.apply_result_display_size()
+    window.move(0, 80)
+    qapp.processEvents()
+    ink = resolve_tokens({"preset": "tokyo_night"}, "poetore").muted_text
+    for button, initial, icon in zip(buttons, initial_icons, (chevron_icon, reload_icon)):
+        image = button.icon().pixmap(button.iconSize()).toImage()
+        assert image != initial
+        assert image == icon(ink).pixmap(button.iconSize()).toImage()
+
+    for button in buttons:
+        center = button.rect().center()
+        qapp.sendEvent(button, QHelpEvent(QEvent.ToolTip, center, button.mapToGlobal(center)))
+        tooltip = button.findChild(QLabel, "toolbarTooltip")
+        assert tooltip.isVisible() and tooltip.text() == button.toolTip()
+        assert tooltip.geometry().bottom() < button.mapToGlobal(QPoint()).y()
+        assert button.screen().availableGeometry().contains(tooltip.geometry())
+        qapp.sendEvent(button, QEvent(QEvent.Leave))
+
+
+def test_trade_title_bar_icons_scale_with_font_and_display_size(qapp, tmp_path):
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    buttons = (window.league_popup_button, window.league_refresh_button)
+    assert [button.iconSize().width() for button in buttons] == [20, 20]
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    widths = []
+    for profile in ("small", "medium", "large"):
+        window._app_config.setdefault("poetore", {})["result_font_size"] = profile
+        window.apply_result_display_size()
+        settle(qapp, window)
+        icon_size = buttons[0].iconSize()
+        assert icon_size.width() > 24
+        widths.append(icon_size.width())
+        for button in buttons:
+            assert button.iconSize() == icon_size
+            assert icon_size.width() < button.width()
+            assert button.icon().actualSize(icon_size) == icon_size
+            pixmap = button.icon().pixmap(icon_size, 2)
+            assert pixmap.devicePixelRatio() == 2
+            assert pixmap.size() == icon_size * 2
+    assert widths[0] < widths[1] < widths[2]
+
+    window._league_refresh_started = True
+    window._sync_league_refresh_button()
+    refresh = window.league_refresh_button
+    assert not refresh.isEnabled()
+    assert refresh.icon().actualSize(refresh.iconSize(), QIcon.Disabled) == refresh.iconSize()
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window.apply_result_display_size()
+    assert [button.iconSize().width() for button in buttons] == [20, 20]
 
 
 def test_main_icon_focus_ring_appears_for_tab_and_clears_for_mouse(qapp, tmp_path):
@@ -920,9 +993,9 @@ def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
         assert not manage.icon().isNull()
     elif key == "trade":
         assert_peers(window.trade_preset_combo._buttons)
-        assert_peers([window.league_popup_button, window.poetore_close_button])
+        assert_peers([window.league_popup_button, window.league_refresh_button, window.poetore_close_button])
         assert_peers([window.mod_conditions_toggle, window.clear_mod_conditions_button,
-                      window.hidden_mods_toggle, window.mod_sources_toggle])
+                      window.hidden_mods_toggle, window.mod_sources_toggle], width=False)
         assert_peers([window.price_button, window.trade_status_combo,
                       window.trade_currency_combo, window.listed_within_combo], width=False)
         window.set_obs_streaming_mode(True)
@@ -1155,18 +1228,97 @@ def test_trade_large_font_conditions_wrap_with_right_margin(qapp, tmp_path, vers
     assert len({control.mapTo(window, QPoint()).y() for control in controls}) >= 2
 
 
+@pytest.mark.parametrize("official_amount, words", [
+    (None, ("poe.ninja", "参考価格")),
+    (92, ("カレンシー交換", "直近価格")),
+    (12500, ("カレンシー交換", "直近価格")),
+])
+def test_trade_reference_price_heading_wraps_only_between_words(qapp, tmp_path, official_amount, words):
+    from src.poetore.official_exchange import CHAOS
+    from src.poetore.poe_ninja import PoeNinjaPrice
+    from src.poetore.window_position import PlacementContext
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("trade", tmp_path)
+    ninja = PoeNinjaPrice("Sample", None, 100, (80, 90, 100), "https://example.invalid/ninja")
+    official = None if official_amount is None else Mock(
+        status="accepted_direct", display_amount=official_amount, display_currency=CHAOS,
+    )
+    window._show_reference_price(window._poe_ninja_item_key, ninja, official)
+    available = QRect(0, 0, 800, 600)
+    window.show_at_context(PlacementContext(available, available.center()), activate=False)
+    settle(qapp, window)
+
+    heading = window.poe_ninja_price_label
+    text = heading.text()
+    layout = QTextLayout(text, heading.font())
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WordWrap if heading.wordWrap() else QTextOption.NoWrap)
+    layout.setTextOption(option)
+    lines = []
+    layout.beginLayout()
+    while (line := layout.createLine()).isValid():
+        line.setLineWidth(heading.contentsRect().width())
+        assert line.naturalTextWidth() <= heading.contentsRect().width()
+        line_text = text[line.textStart():line.textStart() + line.textLength()]
+        lines.append(line_text.replace("\u2060", "").strip())
+    layout.endLayout()
+    assert lines in [[" ".join(words)], list(words)]
+    assert heading.height() >= heading.heightForWidth(heading.width())
+    viewport = window._content_scroll.viewport()
+    for widget in (heading, window.poe_ninja_trend_label,
+                   window.poe_ninja_trend_chart, window.poe_ninja_open_button):
+        assert viewport.rect().contains(QRect(widget.mapTo(viewport, QPoint()), widget.size()))
+
+
+def test_trade_remember_checkbox_fits_with_scrollbar_and_right_margin(qapp, tmp_path):
+    from src.poetore.trade import TradeStatFilter
+    from src.poetore.window_position import PlacementContext
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    window._populate_stat_filters(tuple(
+        TradeStatFilter(f"explicit.{index}", f"Mod {index + 1} +#%", 45, "prefix", index < 3)
+        for index in range(19)
+    ))
+    available = QRect(0, 0, 800, 600)
+    window.show_at_context(PlacementContext(available, available.center()), activate=False)
+    settle(qapp, window)
+
+    scroll = window._content_scroll
+    assert scroll.verticalScrollBar().isVisible()
+    checkbox = window.remember_trade_options_checkbox
+    scroll.ensureWidgetVisible(checkbox, 0, 0)
+    qapp.processEvents()
+    viewport = scroll.viewport()
+    checkbox_rect = QRect(checkbox.mapTo(viewport, QPoint()), checkbox.size())
+    assert viewport.rect().contains(checkbox_rect)
+    assert viewport.rect().right() - checkbox_rect.right() >= UI_METRICS.overlay_gap
+
+    option = QStyleOptionButton()
+    checkbox.initStyleOption(option)
+    text_rect = checkbox.style().subElementRect(QStyle.SE_CheckBoxContents, option, checkbox)
+    assert text_rect.width() >= checkbox.fontMetrics().horizontalAdvance(checkbox.text())
+    assert viewport.rect().contains(text_rect.translated(checkbox_rect.topLeft()))
+
+
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
 @pytest.mark.parametrize("profile", ["small", "medium", "large"])
 @pytest.mark.parametrize("available", [QRect(0, 0, 800, 600), QRect(-960, 40, 800, 600)])
 def test_trade_large_font_fits_small_screen_and_all_controls_remain_reachable(
     qapp, tmp_path, version, profile, available,
 ):
+    from src.poetore.poe_ninja import PoeNinjaPrice
     from src.poetore.window_position import PlacementContext
 
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
     window = build_scenario("trade", tmp_path, version)
     window._app_config.setdefault("poetore", {})["result_font_size"] = profile
     window.apply_result_display_size()
+    window._show_poe_ninja_price(
+        window._poe_ninja_item_key,
+        PoeNinjaPrice("Sample", None, 100, (80, 90, 100), "https://example.invalid/ninja"),
+    )
     context = PlacementContext(available, available.bottomRight())
     window.show_at_context(context, activate=False)
     settle(qapp, window)
@@ -1174,7 +1326,8 @@ def test_trade_large_font_fits_small_screen_and_all_controls_remain_reachable(
     scroll = window._content_scroll
     assert scroll.horizontalScrollBar().maximum() == 0
     assert scroll.verticalScrollBar().maximum() > 0
-    for control in (window.item_header, window.mod_conditions_toggle, window.price_button,
+    for control in (window.item_header, window.poe_ninja_open_button,
+                    window.mod_conditions_toggle, window.price_button,
                     window.remember_trade_options_checkbox, window.trade_url_button, window.price_list):
         scroll.ensureWidgetVisible(control, 0, 0)
         qapp.processEvents()

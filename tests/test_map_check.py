@@ -8,6 +8,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from scripts.build_poetore_map_mods import build_catalog, source_from_lock
+from src.app_font import apply_bundled_ui_font
 from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.poetore.map_check import (
     decision_for,
@@ -23,6 +24,12 @@ from src.poetore.parser import parse_item_text
 from src.poetore.window_position import (
     PlacementContext,
     position_for_context_at_cursor_y,
+)
+from src.ui.appearance import (
+    apply_application_appearance,
+    configure_appearance,
+    current_appearance,
+    requested_appearance,
 )
 from src.ui.dialog_theme import dialog_theme_for_mode
 from src.ui.map_check import MapCheckWindow, MapModManagerDialog
@@ -387,8 +394,8 @@ def test_manager_groups_ordered_decisions_and_displays_current_choice():
         dialog.table.horizontalHeaderItem(column).text()
         for column in range(dialog.table.columnCount())
     ]
-    assert headers == ["Map Mod", "対象", "判定"]
-    buttons = dialog.table.cellWidget(0, 2).findChildren(QPushButton)
+    assert headers == ["Map Mod", "判定"]
+    buttons = dialog.table.cellWidget(0, 1).findChildren(QPushButton)
     assert [button.text() for button in buttons] == ["危険", "警告", "有利", "未設定"]
     assert all(not button.icon().isNull() for button in buttons)
     assert [button.text() for button in buttons if button.isChecked()] == ["未設定"]
@@ -403,6 +410,46 @@ def test_manager_groups_ordered_decisions_and_displays_current_choice():
     dialog.close()
 
 
+def test_manager_wraps_full_mod_names_at_24px(qapp, isolated_bundled_font):
+    appearance, requested = current_appearance(), requested_appearance()
+    assert apply_bundled_ui_font(qapp)
+    apply_application_appearance(qapp, {
+        "appearance": {"preset": "default", "overrides": {"base_font_size": 24}},
+    })
+    dialog = MapModManagerDialog(default_map_check_config())
+    try:
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.width() == 820
+        assert dialog.table.horizontalScrollBar().maximum() == 0
+
+        for row, entry in enumerate(dialog._entries):
+            cell = dialog.table.cellWidget(row, 0)
+            label = cell.findChild(QLabel, "mapManagerModText")
+            assert dialog.table.visualRect(dialog.table.model().index(row, 0)).contains(cell.geometry())
+            assert cell.rect().contains(label.geometry()), entry.japanese
+            assert label.text() == entry.japanese
+            assert label.wordWrap()
+            assert label.font().pixelSize() == 24
+            metrics = label.fontMetrics()
+            assert label.width() >= metrics.horizontalAdvance("マ" * 10)
+            wrapped = metrics.boundingRect(label.rect(), Qt.TextWordWrap, entry.japanese)
+            assert label.rect().contains(wrapped), entry.japanese
+
+        initial_height = dialog.table.rowHeight(0)
+        assert initial_height > dialog.table.rowHeight(2)
+        dialog.search.setText("Heist限定")
+        assert dialog.table.isRowHidden(0)
+        dialog.resize(980, dialog.height())
+        qapp.processEvents()
+        dialog.search.clear()
+        qapp.processEvents()
+        assert 0 < dialog.table.rowHeight(0) < initial_height
+    finally:
+        dialog.close()
+        configure_appearance(appearance, requested=requested)
+
+
 def test_manager_updates_in_place_with_search_and_scroll_preserved(qapp):
     dialog = MapModManagerDialog(default_map_check_config())
     dialog.show()
@@ -414,13 +461,13 @@ def test_manager_updates_in_place_with_search_and_scroll_preserved(qapp):
     row = dialog.table.rowAt(dialog.table.rowHeight(0))
     assert row >= 0
     entry = dialog._entries[row]
-    widget = dialog.table.cellWidget(row, 2)
+    widget = dialog.table.cellWidget(row, 1)
     warning = widget.findChildren(QPushButton)[1]
     saved = []
     dialog.config_changed.connect(lambda config: saved.append(normalized_map_check_config(config)))
 
     warning.click()
-    assert dialog.table.cellWidget(row, 2) is widget
+    assert dialog.table.cellWidget(row, 1) is widget
     assert scroll.value() == position
     assert dialog.search.text() == "モンスター"
     assert decision_for(saved[-1], entry.key) == "w"
@@ -439,19 +486,51 @@ def test_manager_clear_persists_for_default_mod_and_profiles_stay_independent(qa
     key = next(iter(config["decisions"]))
     dialog = MapModManagerDialog(config)
     row = next(row for row, entry in enumerate(dialog._entries) if entry.key == key)
-    buttons = dialog.table.cellWidget(row, 2).findChildren(QPushButton)
+    buttons = dialog.table.cellWidget(row, 1).findChildren(QPushButton)
     saved = []
     dialog.config_changed.connect(saved.append)
     buttons[-1].click()
     assert saved[-1]["decisions"][key] == "---"
     reopened = MapModManagerDialog(saved[-1])
-    assert reopened.table.cellWidget(row, 2).findChildren(QPushButton)[-1].isChecked()
+    assert reopened.table.cellWidget(row, 1).findChildren(QPushButton)[-1].isChecked()
     reopened.profile_buttons[1].click()
-    reopened.table.cellWidget(row, 2).findChildren(QPushButton)[0].click()
+    reopened.table.cellWidget(row, 1).findChildren(QPushButton)[0].click()
     assert reopened.config["decisions"][key] == "-d-"
     reopened.profile_buttons[0].click()
-    assert reopened.table.cellWidget(row, 2).findChildren(QPushButton)[-1].isChecked()
+    assert reopened.table.cellWidget(row, 1).findChildren(QPushButton)[-1].isChecked()
     reopened.close()
+    dialog.close()
+
+
+def test_manager_regex_search_matches_names_and_scope_and_reports_invalid_patterns(qapp):
+    dialog = MapModManagerDialog(default_map_check_config())
+
+    def visible_rows():
+        return {row for row in range(dialog.table.rowCount()) if not dialog.table.isRowHidden(row)}
+
+    mod = dialog._entries[0]
+    dialog.search.setText(r"^heist限定$|^" + mod.ref.split()[0].lower())
+    assert not visible_rows()
+    dialog.regex_search.click()
+    expected = {row for row, entry in enumerate(dialog._entries)
+                if entry.scope == "heist_exclusive"
+                or entry.ref.casefold().startswith(mod.ref.split()[0].casefold())}
+    assert visible_rows() == expected
+
+    dialog.search.setText("[")
+    assert dialog.search.property("error")
+    assert dialog.count_label.text() == "Regexの構文エラー"
+    assert visible_rows() == expected
+
+    dialog.search.setText("^レアモンスター")
+    assert not dialog.search.property("error")
+    expected = {row for row, entry in enumerate(dialog._entries)
+                if entry.japanese.startswith("レアモンスター")}
+    assert expected and visible_rows() == expected
+    dialog.selected_only.click()
+    assert visible_rows() == {row for row in expected if decision_for(dialog.config, dialog._entries[row].key) != "-"}
+    dialog.regex_search.click()
+    assert not visible_rows()
     dialog.close()
 
 
@@ -587,15 +666,19 @@ def test_manager_uses_numeric_profiles_without_removed_reflect_defaults():
     assert [button.text() for button in dialog.profile_buttons] == ["1", "2", "3"]
     assert dialog.table.rowCount() == 232
     assert "全232件" in dialog.count_label.text()
-    assert all(dialog.table.item(row, 1).text() != "更新確認が必要"
-               for row in range(dialog.table.rowCount()))
+    dialog.search.setText("更新確認が必要")
+    assert all(dialog.table.isRowHidden(row) for row in range(dialog.table.rowCount()))
     dialog.close()
 
 
 def test_manager_orders_normal_then_uber_map_then_heist_mods():
     QApplication.instance() or QApplication([])
     dialog = MapModManagerDialog(default_map_check_config())
-    scopes = [dialog.table.item(row, 1).text() for row in range(dialog.table.rowCount())]
+    scopes = [
+        next((label.text() for label in dialog.table.cellWidget(row, 0).findChildren(QLabel)
+              if label.property("uiRole") == "mapModScope"), "")
+        for row in range(dialog.table.rowCount())
+    ]
     assert scopes == sorted(
         scopes,
         key={
@@ -607,6 +690,11 @@ def test_manager_orders_normal_then_uber_map_then_heist_mods():
     )
     assert scopes.index("Uber Map限定") > scopes.index("")
     assert scopes.index("Heist限定") > scopes.index("Uber Map限定")
+    for tag in ("Uber Map限定", "Heist限定"):
+        dialog.search.setText(tag)
+        assert [scope for row, scope in enumerate(scopes) if not dialog.table.isRowHidden(row)] == [
+            scope for scope in scopes if scope == tag
+        ]
     dialog.close()
 
 

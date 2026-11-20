@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import partial
 
-from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRegularExpression, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,13 +19,12 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from src.app_mode import POENAVI_MODE
-from src.ui.appearance import resolve_dialog_theme, theme_font_size
+from src.ui.appearance import resolve_dialog_theme, suspend_theme_fixed_geometry, theme_font_size
 from src.poetore.clipboard import clipboard_change_token, read_item_clipboard
 from src.poetore.map_check import (
     DEFAULT_DECISIONS_BY_REF,
@@ -136,8 +135,38 @@ class MapModManagerDialog(QDialog):
         theme = resolve_dialog_theme(POETORE_DIALOG_THEME)
         apply_dialog_theme(self, theme)
         segment = 'QDialog[dialogTheme="poetore"] QTableWidget QPushButton[decisionSegment="true"]'
+        badge = 'QDialog[dialogTheme="poetore"] QLabel[uiRole="mapModScope"]'
+        selected_styles = []
+        for value, (_, role) in _DECISIONS.items():
+            ink = getattr(theme, role)
+            color = QColor(ink)
+            selected_styles.append(f"""
+                {segment}[decision="{value}"]:checked {{
+                    color: {theme.text if value == "-" else ink};
+                    border-color: {ink};
+                    background-color: rgba({color.red()}, {color.green()}, {color.blue()}, 48);
+                }}
+            """)
         self.setStyleSheet(self.styleSheet() + f"""
+            QDialog[dialogTheme="poetore"] QTableWidget QHeaderView::section:last {{
+                border-right: none;
+            }}
+            QWidget#mapModHeaderEnd {{
+                background-color: {theme.surface};
+                border-bottom: 1px solid {theme.border};
+                border-top-right-radius: {theme.radius - 1}px;
+            }}
+            {badge} {{
+                color: {theme.muted_text};
+                background-color: {theme.control};
+                border: 1px solid {theme.border_strong};
+                border-radius: {theme.compact_radius}px;
+                font-size: {theme.caption_size}px;
+                padding: 0 {UI_METRICS.inline_gap}px;
+            }}
             {segment} {{
+                color: {theme.muted_text};
+                border-color: {theme.border};
                 border-radius: 0;
                 padding: 0 {UI_METRICS.inline_gap}px;
             }}
@@ -149,15 +178,16 @@ class MapModManagerDialog(QDialog):
                 border-top-right-radius: {theme.compact_radius}px;
                 border-bottom-right-radius: {theme.compact_radius}px;
             }}
-            {segment}[decision="-"]:checked {{
+            {segment}:!checked:hover {{
+                color: {theme.text};
+                background-color: {theme.surface};
                 border-color: {theme.border_strong};
             }}
-        """ + "".join(
-            f'{segment}[decision="{value}"]:checked {{'
-            f' color: {getattr(theme, role)}; border-color: {getattr(theme, role)}; '
-            f' background-color: {theme.surface}; }}'
-            for value, (_label, role) in _DECISIONS.items() if value != "-"
-        ))
+            {''.join(selected_styles)}
+            {segment}[decision]:focus, {segment}[decision]:checked:focus {{
+                border-color: {theme.accent};
+            }}
+        """)
         root = QVBoxLayout(self)
         root.setContentsMargins(*([UI_METRICS.page_margin] * 4))
         root.setSpacing(UI_METRICS.control_gap)
@@ -185,6 +215,10 @@ class MapModManagerDialog(QDialog):
         self.search.setPlaceholderText("Map Modを検索…")
         self.search.setAccessibleName("Map Modを検索")
         controls.addWidget(self.search, 1)
+        self.regex_search = QCheckBox("Regex")
+        self.regex_search.setAccessibleName("正規表現で検索")
+        self.regex_search.setToolTip("正規表現で検索します（例：反射|耐性）")
+        controls.addWidget(self.regex_search)
         self.selected_only = QCheckBox("判定済みのみ表示")
         controls.addWidget(self.selected_only)
         self.count_label = QLabel()
@@ -192,25 +226,34 @@ class MapModManagerDialog(QDialog):
         controls.addWidget(self.count_label)
         root.addLayout(controls)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Map Mod", "対象", "判定"])
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Map Mod", "判定"])
         self.table.verticalHeader().hide()
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
+        self._scrollbar_header = QWidget(self.table.verticalScrollBar())
+        self._scrollbar_header.setObjectName("mapModHeaderEnd")
+        self._scrollbar_header.setAttribute(Qt.WA_StyledBackground)
+        self._scrollbar_header.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._scrollbar_header.setFixedWidth(theme.scrollbar_width)
         columns = self.table.horizontalHeader()
         columns.setSectionResizeMode(0, QHeaderView.Stretch)
         root.addWidget(self.table, 1)
         self._entries = self._catalog_entries()
         self._populate_table(theme)
-        for column in (1, 2):
-            self.table.resizeColumnToContents(column)
-            columns.setSectionResizeMode(column, QHeaderView.Fixed)
+        self.table.resizeColumnToContents(1)
+        columns.setSectionResizeMode(1, QHeaderView.Fixed)
         # Qt insets index widgets using the item stylesheet's horizontal padding.
-        columns.resizeSection(2, columns.sectionSize(2) + UI_METRICS.control_gap * 2)
+        columns.resizeSection(1, columns.sectionSize(1) + UI_METRICS.control_gap * 2)
+        columns.sectionResized.connect(self._resize_mod_rows)
+        columns.geometriesChanged.connect(self._align_table_scrollbar)
+        self._resize_mod_rows(0, 0, columns.sectionSize(0))
+        self._align_table_scrollbar()
         self.search.textChanged.connect(self._apply_filters)
+        self.regex_search.toggled.connect(self._apply_filters)
         self.selected_only.toggled.connect(self._apply_filters)
         self._apply_filters()
 
@@ -259,22 +302,29 @@ class MapModManagerDialog(QDialog):
         icons = _decision_icons(theme)
         button_size = None
         for row, entry in enumerate(self._entries):
-            mod = QTableWidgetItem(entry.japanese)
-            mod.setToolTip(entry.japanese)
-            self.table.setItem(row, 0, mod)
-            tag = _SCOPE_LABELS.get(entry.scope, "")
-            scope = QTableWidgetItem(tag)
-            scope.setToolTip(tag)
-            scope.setForeground(QColor(theme.muted_text))
-            scope.setTextAlignment(Qt.AlignCenter)
-            font = self.table.font()
-            font.setPixelSize(theme.caption_size)
-            scope.setFont(font)
-            self.table.setItem(row, 1, scope)
+            description_cell = QWidget()
+            # The table owns the height of this cell at the current column width.
+            suspend_theme_fixed_geometry(description_cell, True)
+            description_layout = QVBoxLayout(description_cell)
+            gap = UI_METRICS.inline_gap
+            description_layout.setContentsMargins(gap, gap, gap, gap)
+            description_layout.setSpacing(gap)
+            if tag := _SCOPE_LABELS.get(entry.scope):
+                badge = QLabel(tag)
+                badge.setProperty("uiRole", "mapModScope")
+                badge.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                description_layout.addWidget(badge, 0, Qt.AlignLeft)
+            description = QLabel(entry.japanese)
+            description.setObjectName("mapManagerModText")
+            description.setTextFormat(Qt.PlainText)
+            description.setWordWrap(True)
+            description.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+            description_layout.addWidget(description)
+            self.table.setCellWidget(row, 0, description_cell)
+            description.ensurePolished()
 
             container = QWidget()
             segments = QHBoxLayout(container)
-            gap = UI_METRICS.inline_gap
             segments.setContentsMargins(gap, gap // 2, gap, gap // 2)
             segments.setSpacing(0)
             group = QButtonGroup(container)
@@ -293,17 +343,43 @@ class MapModManagerDialog(QDialog):
             buttons[0].setProperty("segmentEdge", "first")
             buttons[-1].setProperty("segmentEdge", "last")
             buttons[-1].setToolTip("判定を未設定にし、確認状態を未確認に戻す")
-            self.table.setCellWidget(row, 2, container)
+            self.table.setCellWidget(row, 1, container)
             if button_size is None:
                 equalize_button_sizes(buttons, minimum_height=UI_METRICS.overlay_control_height)
                 button_size = buttons[0].minimumSize()
             for button in buttons:
                 button.setFixedSize(button_size)
             segments.setAlignment(Qt.AlignCenter)
-            self.table.setRowHeight(row, button_size.height() + gap + 2)
             self._sync_decision(entry.key, group)
             group.buttonClicked.connect(partial(self._choose, row))
             self._decisions.append(group)
+
+    def _align_table_scrollbar(self):
+        # Qt lays out the scrollbar alongside both the header and the rows.
+        scrollbar = self.table.verticalScrollBar()
+        header_height = self.table.horizontalHeader().height()
+        self._scrollbar_header.setFixedHeight(header_height)
+        style = f"QScrollBar:vertical {{ margin-top: {header_height}px; }}"
+        if scrollbar.styleSheet() != style:
+            scrollbar.setStyleSheet(style)
+
+    def _resize_mod_rows(self, column, _old_width, width):
+        if column != 0:
+            return
+        # The delegate insets cell widgets by the shared item padding and border.
+        gap = UI_METRICS.inline_gap
+        text_width = max(1, width - (UI_METRICS.control_gap + gap) * 2)
+        for row in range(self.table.rowCount()):
+            cell = self.table.cellWidget(row, 0)
+            description = cell.findChild(QLabel, "mapManagerModText")
+            bounds = description.fontMetrics().boundingRect(
+                QRect(0, 0, text_width, 0), Qt.TextWordWrap, description.text(),
+            )
+            content_height = bounds.height() + gap * 2
+            if cell.layout().count() > 1:
+                content_height += cell.layout().itemAt(0).sizeHint().height() + gap
+            segments = self.table.cellWidget(row, 1)
+            self.table.setRowHeight(row, max(content_height, segments.sizeHint().height()) + 2)
 
     def _sync_decision(self, key, group):
         value = decision_for(self.config, key)
@@ -315,14 +391,37 @@ class MapModManagerDialog(QDialog):
                 break
 
     def _apply_filters(self):
-        query = self.search.text().strip().casefold()
+        text = self.search.text()
+        regex = None
+        if text and self.regex_search.isChecked():
+            regex = QRegularExpression(
+                text,
+                QRegularExpression.CaseInsensitiveOption | QRegularExpression.UseUnicodePropertiesOption,
+            )
+        invalid = regex is not None and not regex.isValid()
+        if self.search.property("error") != invalid:
+            self.search.setProperty("error", invalid)
+            self.search.style().unpolish(self.search)
+            self.search.style().polish(self.search)
+            self.search.update()
+        if invalid:
+            self.count_label.setText("Regexの構文エラー")
+            self.count_label.setToolTip(regex.errorString())
+            return
+
+        self.count_label.setToolTip("")
+        query = text.strip().casefold()
         selected_only = self.selected_only.isChecked()
         scrollbar = self.table.verticalScrollBar()
         scroll_position = scrollbar.value()
         visible = 0
         for row, entry in enumerate(self._entries):
-            searchable = f"{entry.japanese} {entry.ref} {_SCOPE_LABELS.get(entry.scope, '')}"
-            matched = query in searchable.casefold() and (
+            fields = (entry.japanese, entry.ref, _SCOPE_LABELS.get(entry.scope, ""))
+            if regex is None:
+                matches_search = query in " ".join(fields).casefold()
+            else:
+                matches_search = any(regex.match(field).hasMatch() for field in fields if field)
+            matched = matches_search and (
                 not selected_only or decision_for(self.config, entry.key) in {"d", "w", "g"}
             )
             self.table.setRowHidden(row, not matched)

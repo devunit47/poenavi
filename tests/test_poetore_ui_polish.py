@@ -10,7 +10,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
+    QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton, QStyleOptionSlider,
     QStyleOptionViewItem, QSystemTrayIcon, QWidget,
 )
 
@@ -1112,13 +1112,34 @@ def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
         scroll = window.table if key == "map_manager" else window.scroll
         assert scroll.horizontalScrollBar().maximum() == 0
         if key == "map_manager":
-            group = window.table.cellWidget(0, 2)
+            group = window.table.cellWidget(0, window.table.columnCount() - 1)
             buttons = group.findChildren(QPushButton)
             assert_peers(buttons)
             assert all(group.rect().contains(button.geometry()) for button in buttons)
             viewport = window.table.viewport()
             assert all(viewport.rect().contains(QRect(button.mapTo(viewport, QPoint()), button.size()))
                        for button in buttons)
+            assert window.rect().contains(
+                QRect(window.regex_search.mapTo(window, QPoint()), window.regex_search.size())
+            )
+            scrollbar = window.table.verticalScrollBar()
+            assert scrollbar.isVisible()
+            option = QStyleOptionSlider()
+            scrollbar.initStyleOption(option)
+            for part in (QStyle.SC_ScrollBarGroove, QStyle.SC_ScrollBarSlider):
+                bounds = scrollbar.style().subControlRect(QStyle.CC_ScrollBar, option, part, scrollbar)
+                assert scrollbar.mapTo(window.table, bounds.topLeft()).y() == viewport.geometry().top()
+            header = window.table.horizontalHeader().geometry()
+            fill = window.table.grab()
+            pixels = fill.toImage()
+            scale = fill.devicePixelRatio()
+            gutter_x = scrollbar.mapTo(window.table, QPoint(scrollbar.width() // 2, 0)).x()
+            for y in (header.center().y(), header.bottom()):
+                expected = pixels.pixelColor(
+                    round((header.right() - UI_METRICS.control_gap) * scale), round(y * scale)
+                )
+                assert all(pixels.pixelColor(round(x * scale), round(y * scale)) == expected
+                           for x in range(header.right(), gutter_x + 1))
 
 
 @pytest.mark.parametrize("preset", PRESETS)

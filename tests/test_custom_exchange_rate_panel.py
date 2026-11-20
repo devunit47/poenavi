@@ -290,7 +290,7 @@ def test_delete_reveals_on_row_hover_without_moving_columns(qapp, tmp_path):
             return panel.grab().toImage().copy(area)
 
         assert delete.toolTip() and delete.accessibleName()
-        move_to(panel.title_label)
+        move_to(panel.manage_button)
         idle = delete_pixels()
         blank = idle.copy()
         blank.fill(idle.pixelColor(0, 0))
@@ -302,7 +302,7 @@ def test_delete_reveals_on_row_hover_without_moving_columns(qapp, tmp_path):
         move_to(value)
         assert delete_pixels() == revealed
         assert value.geometry() == original_value_geometry
-        move_to(panel.title_label)
+        move_to(panel.manage_button)
         assert delete_pixels() == idle
 
         panel.manage_button.setFocus(Qt.TabFocusReason)
@@ -366,7 +366,7 @@ def test_refresh_progress_and_failure_without_cache(qapp, qtbot, tmp_path):
         panel.activateWindow()
         assert QTest.qWaitForWindowActive(panel)
         handle = panel.windowHandle()
-        QTest.mouseMove(handle, panel.title_label.geometry().center())
+        QTest.mouseMove(handle, panel.manage_button.geometry().center())
         QTest.mouseMove(handle, panel.refresh_button.geometry().center())
         qtbot.waitUntil(
             lambda: QToolTip.isVisible() and QToolTip.text() == panel.refresh_button.toolTip(),
@@ -397,7 +397,7 @@ def test_refresh_progress_and_failure_without_cache(qapp, qtbot, tmp_path):
 def test_initial_rate_tooltip_is_only_on_refresh_button(qapp, tmp_path):
     panel, *_ = make_panel(qapp, tmp_path)
     try:
-        assert not panel.title_label.toolTip()
+        assert not panel.card.toolTip()
         assert not panel.refresh_button.text()
         assert not panel.refresh_button.icon().isNull()
         assert panel.refresh_button.accessibleName() == "公式取引データを再取得"

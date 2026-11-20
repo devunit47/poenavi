@@ -699,7 +699,9 @@ def test_poetore_mode_starts_capture_and_stash_scroll_services_for_poe2():
     assert not window.map_mods_button.isVisibleTo(window)
     stash_class.assert_called_once_with(enabled=True)
     prepare_window.assert_called_once_with(window)
-    assert window.rate_panel.title_label.text() == "カレンシー交換レート"
+    assert all(
+        label.text() != "カレンシー交換レート" for label in window.findChildren(QLabel)
+    )
     assert len(window.rate_panel.row_widgets) == 1
     window.close()
     app.processEvents()

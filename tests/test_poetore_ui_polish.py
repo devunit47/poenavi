@@ -10,7 +10,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
+    QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
     QStyleOptionViewItem, QSystemTrayIcon, QWidget,
 )
 
@@ -363,6 +363,38 @@ def test_trade_title_bar_uses_theme_ink_and_anchors_tooltips_above_buttons(qapp,
         assert tooltip.geometry().bottom() < button.mapToGlobal(QPoint()).y()
         assert button.screen().availableGeometry().contains(tooltip.geometry())
         qapp.sendEvent(button, QEvent(QEvent.Leave))
+
+
+def test_trade_numeric_chip_indicators_scale_with_font_and_display_size(qapp, tmp_path):
+    def indicator_size(checkbox):
+        option = QStyleOptionButton()
+        checkbox.initStyleOption(option)
+        return checkbox.style().subElementRect(QStyle.SE_CheckBoxIndicator, option, checkbox).size()
+
+    native_size = indicator_size(QCheckBox())
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    toggles = (
+        window.item_level_toggle, window.links_toggle, window.gem_level_toggle,
+        window.gem_quality_toggle, window.gem_socket_toggle, window.map_tier_chip.toggle,
+        window.runemastered_chip,
+    )
+    assert all(indicator_size(toggle) == native_size for toggle in toggles)
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    previous_size = native_size
+    for profile in ("small", "medium", "large"):
+        window._app_config.setdefault("poetore", {})["result_font_size"] = profile
+        window.apply_result_display_size()
+        size = indicator_size(toggles[0])
+        assert all(indicator_size(toggle) == size for toggle in toggles)
+        assert size.width() > previous_size.width()
+        assert size.height() > previous_size.height()
+        previous_size = size
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window.apply_result_display_size()
+    assert all(indicator_size(toggle) == native_size for toggle in toggles)
 
 
 def test_trade_title_bar_icons_scale_with_font_and_display_size(qapp, tmp_path):

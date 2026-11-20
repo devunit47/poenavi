@@ -1767,10 +1767,10 @@ class PoetoreWindow(QWidget):
         )
         self.unidentified_chip.hide()
         self.unidentified_tier_chip = _RequiredNumericFilterChip(
-            "未鑑定 Tier", 1, 99,
+            "未鑑定Tier", 1, 99,
         )
         self.unidentified_tier_chip.setToolTip(
-            "未鑑定品の検索 Tier を指定します。初期値はコピー元の Tier です。"
+            "未鑑定品の検索Tierを指定します。初期値はコピー元のTierです。"
         )
         self.unidentified_tier_chip.hide()
         self.viscera_slot_chip = _ReadOnlyFilterChip()
@@ -1794,7 +1794,7 @@ class PoetoreWindow(QWidget):
             "ベース防御値", 0, 100, suffix="%",
         )
         self.area_level_chip = _NumericFilterChip("Area Lv", 1, 100)
-        self.heist_wings_chip = _NumericFilterChip("公開 Wing", 1, 4)
+        self.heist_wings_chip = _NumericFilterChip("公開Wing", 1, 4)
         self.heist_job_chip = _NumericFilterChip("Job Lv", 1, 5)
         self.cluster_passives_chip = _NumericFilterChip("パッシブ数", 1, 35)
         for chip in (
@@ -2983,7 +2983,12 @@ class PoetoreWindow(QWidget):
             chip.setFixedHeight(filter_chip_height)
         numeric_toggles = self.findChildren(QCheckBox, "numericFilterToggle")
         indicator = numeric_toggles[0]
-        Styles.apply_checkbox_style(indicator, match_native_indicator=True, indicator_only=True)
+        # 標準フォントでは従来の寸法を保ち、選択中のプロファイルの文字サイズ差を反映する。
+        font_delta = theme_font_size(profile["font"]) - profile["font"]
+        indicator_scale = 1 + font_delta / _DISPLAY_SIZE_PROFILES["medium"]["font"]
+        Styles.apply_checkbox_style(
+            indicator, match_native_indicator=True, indicator_only=True, indicator_scale=indicator_scale,
+        )
         for toggle in numeric_toggles[1:]:
             toggle.setStyleSheet(indicator.styleSheet())
         equalize_button_sizes(
@@ -6683,7 +6688,7 @@ class PoetoreWindow(QWidget):
         self._cluster_enchant_rows = enchants if item.category == "cluster_jewel" else ()
         self.cluster_enchant_chip.setVisible(bool(self._cluster_enchant_rows))
         self.cluster_enchant_chip.setText(
-            "Enchant 効果：" + " / ".join(row.text for row in self._cluster_enchant_rows)
+            "Enchant効果：" + " / ".join(row.text for row in self._cluster_enchant_rows)
             if self._cluster_enchant_rows else ""
         )
         socket_mod = next((mod for mod in item.modifiers

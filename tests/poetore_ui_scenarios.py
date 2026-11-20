@@ -26,6 +26,25 @@ SCENARIOS = (
     ("category", None, None),
 )
 
+MAP_ITEM_TEXT = """アイテムクラス: マップ
+レアリティ: レア
+深淵の地図
+Map (Tier 16)
+--------
+アイテムレベル: 83
+--------
+{ プレフィックスモッド (ティア: 1) }
+レアモンスターの数が25%増加する
+{ サフィックスモッド (ティア: 1) }
+全てのプレイヤーの命中力が25%低下する
+{ サフィックスモッド (ティア: 1) }
+モンスターはアタックによるヒット時に重傷を付与する
+{ サフィックスモッド (ティア: 1) }
+モンスターはヒット時に盲目を付与する
+{ サフィックスモッド (ティア: 1) }
+この地図にだけ存在する未知の効果
+"""
+
 
 @contextmanager
 def offline_ui():
@@ -42,7 +61,26 @@ def offline_ui():
         yield
 
 
-def build_scenario(key, tmp_path, version="poe2"):
+def build_scenario(key, tmp_path, version="poe2", *, app_mode="poetore"):
+    if key == "map":
+        from src.poetore.map_check import default_map_check_config, entries_by_stat_id, set_decision
+        from src.poetore.parser import parse_item_text
+        from src.poetore.window_position import PlacementContext
+        from src.ui.map_check import MapCheckWindow
+
+        config = default_map_check_config()
+        config["show_new_stats"] = True
+        lookup = entries_by_stat_id()
+        modifiers = parse_item_text(MAP_ITEM_TEXT).modifiers
+        recognized = [lookup[mod.stat_id].key for mod in modifiers if mod.stat_id in lookup]
+        for mod_key, decision in zip(recognized, ("d", "w", "g", "s"), strict=True):
+            set_decision(config, mod_key, decision)
+        window = MapCheckWindow(config, app_mode=app_mode)
+        available = window.screen().availableGeometry()
+        window._placement_context = PlacementContext(available, available.center())
+        with patch("src.ui.map_check.read_item_clipboard", return_value=MAP_ITEM_TEXT):
+            window._consume_clipboard()
+        return window
     if key == "trade":
         from src.poetore.ui import PoetoreWindow
         from src.poetore.trade import PriceListing, PriceResult, TradeStatFilter
@@ -64,11 +102,7 @@ def build_scenario(key, tmp_path, version="poe2"):
         window.show_categories(tuple(CATEGORY_LABELS), QPoint(0, 0))
         return window
     module, name = next((module, name) for scenario, module, name in SCENARIOS if scenario == key)
-    window = _window(module, name, version, tmp_path)
-    if key == "map":
-        from src.poetore.models import ItemModifier, ParsedItem
-        window._render(ParsedItem("Maps", "Rare", "深淵の地図", "Map", "map", modifiers=(ItemModifier("未知のMod", stat_id="missing"),)))
-    return window
+    return _window(module, name, version, tmp_path)
 
 
 def settle(app, window):

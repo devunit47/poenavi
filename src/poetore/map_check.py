@@ -89,7 +89,8 @@ def set_decision(config: dict, key: str, value: str, profile: int | None = None)
     current = list(str(decisions.get(key, "---")))
     current[profile - 1] = value
     updated = "".join(current)
-    if updated == "---":
+    # Keep explicit clears for shipped defaults so normalization cannot restore them.
+    if updated == "---" and key not in default_map_check_config()["decisions"]:
         decisions.pop(key, None)
     else:
         decisions[key] = updated

@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
-from PySide6.QtGui import QFontDatabase, QHelpEvent
+from PySide6.QtGui import QColor, QFontDatabase, QHelpEvent, QPalette
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QComboBox, QDialog,
     QGroupBox, QLabel, QLineEdit, QStyle, QStyleOptionButton,
@@ -137,7 +137,11 @@ def _window(module, name, version, tmp_path):
         return cls(None, "テストエリア", [{"title": "通常", "key": "default", "text": "次へ", "mini_navi": []}], show_direction=version == "poe1")
     if name == "PoBSkillSetSelectionDialog":
         return cls([{"id": "1", "title": "Act leveling", "active": True}, {"id": "2", "title": "Endgame"}])
-    if name in ("CheatSheetManagerDialog", "CheatSheetOverlay", "MapModManagerDialog", "MapCheckWindow"):
+    if name == "MapCheckWindow":
+        from tests.poetore_ui_scenarios import build_scenario
+
+        return build_scenario("map", tmp_path, version, app_mode=QApplication.instance().property("appMode"))
+    if name in ("CheatSheetManagerDialog", "CheatSheetOverlay", "MapModManagerDialog"):
         return cls({})
     if name == "MapImageDialog":
         return cls(str(tmp_path / "missing.png"), poe_version=version)
@@ -347,20 +351,22 @@ def test_act4_all_profiles_and_completion(qapp, font_size):
     assert not (failures := _audit_pages(qapp, window)), "\n".join(failures)
 
 
-def test_unknown_mod_and_augment_hints_keep_game_colors(qapp):
+def test_unknown_mod_uses_theme_warning_and_augment_hints_keep_game_colors(qapp):
     from src.poetore.models import ItemModifier, ParsedItem
     from src.poetore.ui import PoetoreWindow
-    from src.ui.map_check import MapCheckWindow
     from src.ui.appearance import COLOR_ROLES
-    configure_appearance({"preset": "tokyo_night", "overrides": {role: "#123456" for role in COLOR_ROLES}})
+    from src.ui.map_check import MapCheckWindow
+    overrides = dict.fromkeys(COLOR_ROLES, "#123456")
+    overrides["warning"] = "#ABCDEF"
+    configure_appearance({"preset": "tokyo_night", "overrides": overrides})
     trade = PoetoreWindow(app_config={})
     assert "color: #79b8b2;" in trade.installed_augment_recovery_hint.styleSheet()
     assert 'color: #ff5757;' in trade.styleSheet().split('cycleToggle[alert="true"]', 1)[1].split('}', 1)[0]
     map_check = MapCheckWindow({})
     map_check._render(ParsedItem("Maps", "Rare", "Test map", "Test", "map", modifiers=(ItemModifier("未知のMod", stat_id="missing"),)))
-    label = next(label for label in map_check.findChildren(QLabel) if "未認識Mod" in label.text())
-    assert "color:#efb366;" in label.styleSheet()
+    label = map_check.findChild(QLabel, "mapUnknown")
     assert not (failures := _audit_pages(qapp, map_check)), "\n".join(failures)
+    assert label.palette().color(QPalette.WindowText) == QColor("#ABCDEF")
 
 
 def test_standard_qt_dialogs(qapp):
@@ -405,6 +411,7 @@ def test_window_inventory_is_complete():
         "AppearanceSettingsWidget", "AppInfoWidget", "CustomCommandSettingsWidget",
         "ElidedLabel", "RateValueLabel", "CustomExchangeRatePanel", "_RateDeleteButton",
         "_RegisteredPairRow", "_RegisteredPairsWidget", "RegionPreview", "ClickableImageLabel",
+        "_ModButton",
         "GemTrackerWidget", "HighAccuracyOcrPackGroup", "ClickableThumb", "MapThumbnailWidget",
         "MiniNaviLockButtonWindow", "_PoetoreModeTitleBar", "ToolbarButton", "_HideoutNotificationButton",
         "HotkeyButton", "TriggerKeyButton", "AutoHideHotkeyWidget", "RichTextEdit",

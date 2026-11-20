@@ -65,6 +65,31 @@ def trash_icon(color) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
+def close_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawLine(QPointF(7, 7), QPointF(17, 17))
+    painter.drawLine(QPointF(17, 7), QPointF(7, 17))
+    return finish_line_icon(pixmap, painter)
+
+
+def map_mod_manager_icon(color) -> QIcon:
+    """A folded map with a marked location."""
+    pixmap, painter = line_icon_canvas(color)
+    outline = QPainterPath(QPointF(13.0, 19.4))
+    outline.lineTo(8.5, 17.8)
+    outline.lineTo(3.5, 19.5)
+    outline.lineTo(3.5, 5.4)
+    outline.lineTo(8.5, 3.7)
+    outline.lineTo(14.0, 5.5)
+    outline.lineTo(20.5, 3.7)
+    outline.lineTo(20.5, 12.0)
+    painter.drawPath(outline)
+    painter.drawLine(QPointF(8.5, 3.7), QPointF(8.5, 17.8))
+    painter.drawLine(QPointF(14.0, 5.5), QPointF(14.0, 12.5))
+    painter.drawEllipse(QPointF(17.9, 17.4), 2.7, 2.7)
+    return finish_line_icon(pixmap, painter)
+
+
 def reload_icon(color, *, size=24) -> QIcon:
     pixmap, painter = line_icon_canvas(color, size=size)
     painter.drawArc(QRectF(4.5, 4.5, 15, 15), 30 * 16, 300 * 16)

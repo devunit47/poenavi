@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox
 
 from src.poetore.parser import parse_item_text
 from src.poetore import trade
-from src.poetore.ui import PoetoreWindow, _MOD_COLUMN_CHECK
+from src.poetore.ui import PoetoreWindow, _MOD_COLUMN_CHECK, _MOD_COLUMN_KIND
 
 
 SAMPLE = """アイテムクラス: マップフラグメント
@@ -137,10 +137,11 @@ def test_warrant_ui_reveals_supports_without_losing_selected_skills(
             if row.data(0, Qt.UserRole + 4).stat_id.startswith("mercenary.support")
         ]
         assert main_rows and support_rows
+        assert all(row.text(_MOD_COLUMN_KIND) == "傭兵" for row in main_rows + support_rows)
         assert all(not row.isHidden() for row in main_rows)
         assert all(row.isHidden() for row in support_rows)
         assert not window.mercenary_supports_toggle.isHidden()
-        assert window.mercenary_supports_toggle.text() == "傭兵のサポートジェムを表示"
+        assert window.mercenary_supports_toggle.text() == "サポートジェム条件を表示"
         assert window.mercenary_supports_toggle.objectName() == "secondaryActionButton"
         assert window.mercenary_supports_toggle.property("mutedText") is True
         window.show()
@@ -177,7 +178,7 @@ def test_warrant_ui_reveals_supports_without_losing_selected_skills(
 
         assert all(not row.isHidden() for row in main_rows + support_rows)
         assert window.mercenary_supports_toggle.isChecked()
-        assert window.mercenary_supports_toggle.text() == "傭兵のサポートジェムを隠す"
+        assert window.mercenary_supports_toggle.text() == "サポートジェム条件を隠す"
         assert main_checkbox.isChecked()
         selected = {
             row.stat_id for row in window._selected_stat_filters() if row.enabled

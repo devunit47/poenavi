@@ -245,6 +245,7 @@ def test_scope_button_painted_text_fits(qapp):
 # inspector, so a new chip/overlay cannot silently escape this audit.
 PAINTERS = {
     "_ElidedScopeButton": "inspect_scope_button",
+    "_TradeOptionComboBox": "No painter text: draws a chevron over the native combo.",
     "DesecrationTierOverlay": "inspect_desecration",
     "OutlinedLabel": "inspect_ocr_status",
     "ExpeditionRegionSelector": "inspect_region_selectors",
@@ -266,7 +267,7 @@ def test_custom_painter_inventory_is_complete():
         for cls in ast.walk(ast.parse(file.read_text(encoding="utf-8-sig"))):
             if isinstance(cls, ast.ClassDef) and any(isinstance(method, ast.FunctionDef) and method.name == "paintEvent" for method in cls.body):
                 found.add(cls.name)
-                if cls.name in ("_SparklineWidget", "CheatSheetOverlay", "_RateDeleteButton", "_ToolbarTooltip"):
+                if cls.name in ("_SparklineWidget", "CheatSheetOverlay", "_RateDeleteButton", "_ToolbarTooltip", "_TradeOptionComboBox"):
                     method = next(method for method in cls.body if isinstance(method, ast.FunctionDef) and method.name == "paintEvent")
                     assert not any(isinstance(call, ast.Attribute) and call.attr in ("drawText", "addText") for call in ast.walk(method))
     assert found == PAINTERS.keys()

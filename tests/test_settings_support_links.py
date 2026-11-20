@@ -47,8 +47,14 @@ def test_app_information_update_button_uses_injected_callback(qapp):
     dialog.close()
 
 
-def test_app_information_displays_ndlocr_attribution(qapp):
+def test_app_information_displays_disclaimer_and_ndlocr_attribution(qapp):
     dialog = SettingsDialog(current_config={})
+
+    disclaimer = dialog.findChild(QLabel, "appDisclaimerLabel")
+    assert disclaimer is not None
+    assert "ぽえなびは無料の非公式ツール" in disclaimer.text()
+    assert "提携・承認関係はありません" in disclaimer.text()
+    assert all("ぽえとれについて" not in label.text() for label in dialog.findChildren(QLabel))
 
     label = dialog.findChild(QLabel, "ndlocrLicenseLabel")
     assert label is not None

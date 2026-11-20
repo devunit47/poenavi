@@ -189,11 +189,9 @@ def test_friend_diagnostic_build_is_separate_from_normal_release():
     assert "PoENavi-diagnostic.zip" in batch
 
 
-def test_readme_notices_and_app_wording_cover_required_attribution():
+def test_readme_and_notices_cover_required_attribution():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-    poetore_ui = (ROOT / "src" / "poetore" / "ui.py").read_text(encoding="utf-8")
-    app_info_ui = (ROOT / "src" / "ui" / "app_info_widget.py").read_text(encoding="utf-8")
     assert "Patreon" in readme
     assert "公認・承認を受けたものではありません" in readme
     assert "Awakened PoE Trade" in notices and "MIT License" in notices
@@ -203,12 +201,6 @@ def test_readme_notices_and_app_wording_cover_required_attribution():
     assert "国立国会図書館" in notices and "CC BY 4.0" in notices
     assert "公認・提携製品ではありません" in notices
     assert (ROOT / "assets" / "fonts" / "NotoSansJP-OFL.txt").is_file()
-    assert "無料の非公式ツール" not in poetore_ui
-    assert "ぽえなびは無料の非公式ツール" in app_info_ui
-    assert "提携・承認関係はありません" in app_info_ui
-    assert "NDLOCR-Lite 1.3.1" in app_info_ui
-    assert "CC BY 4.0" in app_info_ui
-    assert "ぽえとれについて" not in app_info_ui
 
 
 def test_signpath_policy_and_privacy_documents_are_linked_and_complete():

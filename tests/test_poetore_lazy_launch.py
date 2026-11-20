@@ -1,6 +1,6 @@
-import ast
+import subprocess
+import sys
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 from src.ui.main_window import MainWindow
@@ -9,14 +9,15 @@ from src.utils.poe_version_data import POE2
 
 class PoetoreLazyLaunchTest(unittest.TestCase):
     def test_main_window_module_does_not_import_poetore_ui_at_startup(self):
-        source = Path("src/ui/main_window.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        top_level_imports = [
-            node for node in tree.body
-            if isinstance(node, (ast.Import, ast.ImportFrom))
-            and "poetore" in ast.unparse(node)
-        ]
-        self.assertEqual(top_level_imports, [])
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys; import src.ui.main_window; "
+                "print('src.poetore.ui' in sys.modules)",
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "False")
 
     def test_open_poetore_delegates_to_lazy_entrypoint(self):
         window = MainWindow.__new__(MainWindow)

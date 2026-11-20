@@ -4,12 +4,13 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
 
-def _canvas():
-    pixmap = QPixmap(48, 48)
+def _canvas(size=24):
+    pixmap = QPixmap(size * 2, size * 2)
     pixmap.setDevicePixelRatio(2)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
+    painter.scale(size / 24, size / 24)
     return pixmap, painter
 
 
@@ -18,8 +19,8 @@ def _finish(pixmap, painter) -> QIcon:
     return QIcon(pixmap)
 
 
-def line_icon_canvas(color):
-    pixmap, painter = _canvas()
+def line_icon_canvas(color, *, size=24):
+    pixmap, painter = _canvas(max(24, size))
     painter.setPen(QPen(QColor(color), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
     return pixmap, painter
 
@@ -64,11 +65,19 @@ def trash_icon(color) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
-def reload_icon(color) -> QIcon:
-    pixmap, painter = line_icon_canvas(color)
+def reload_icon(color, *, size=24) -> QIcon:
+    pixmap, painter = line_icon_canvas(color, size=size)
     painter.drawArc(QRectF(4.5, 4.5, 15, 15), 30 * 16, 300 * 16)
     painter.drawPolyline(QPolygonF([
         QPointF(18.5, 4), QPointF(18.5, 8.25), QPointF(14.25, 8.25),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def chevron_down_icon(color, *, size=24) -> QIcon:
+    pixmap, painter = line_icon_canvas(color, size=size)
+    painter.drawPolyline(QPolygonF([
+        QPointF(5, 9), QPointF(12, 15), QPointF(19, 9),
     ]))
     return finish_line_icon(pixmap, painter)
 
@@ -96,8 +105,8 @@ def download_icon(color) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
-def checking_icon(color) -> QIcon:
-    pixmap, painter = line_icon_canvas(color)
+def checking_icon(color, *, size=24) -> QIcon:
+    pixmap, painter = line_icon_canvas(color, size=size)
     painter.drawEllipse(QPointF(12, 12), 8, 8)
     painter.drawPolyline(QPolygonF([
         QPointF(12, 7), QPointF(12, 12), QPointF(15.5, 14),

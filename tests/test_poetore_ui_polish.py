@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QIcon, QImage, QPainter, QRegion
+from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QHelpEvent, QIcon, QImage, QPainter, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStyleOptionViewItem, QSystemTrayIcon, QWidget
 
@@ -18,6 +18,7 @@ from src.ui.appearance import (
     current_appearance, requested_appearance, resolve_tokens,
 )
 from src.ui.dialog_theme import UI_METRICS, icon_button_stylesheet
+from src.ui.toolbar_icons import chevron_down_icon, reload_icon
 from src.update.release_client import ReleaseInfo
 from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
 from tests.test_theme_contrast_audit import contrast
@@ -200,7 +201,11 @@ def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path
             (main.rate_refresh_button, (36, 36)),
             (rate_delete, (32, 32)),
         )),
-        (trade, ((trade.league_popup_button, (36, 33)), (trade.poetore_close_button, (36, 33)))),
+        (trade, (
+            (trade.league_popup_button, (33, 33)),
+            (trade.league_refresh_button, (33, 33)),
+            (trade.poetore_close_button, (33, 33)),
+        )),
     ):
         settle(qapp, window)
         handle = window.windowHandle()
@@ -253,6 +258,68 @@ def test_toolbar_icons_render_interaction_states_without_resizing(qapp, tmp_path
             ), button.toolTip()
             assert button.geometry() == original
         window.hide()
+
+
+def test_trade_title_bar_uses_theme_ink_and_anchors_tooltips_above_buttons(qapp, tmp_path):
+    apply_application_appearance(qapp, {"appearance": {"preset": "poetore"}})
+    window = build_scenario("trade", tmp_path)
+    settle(qapp, window)
+    buttons = (window.league_popup_button, window.league_refresh_button, window.poetore_close_button)
+    initial_icons = [button.icon().pixmap(button.iconSize()).toImage() for button in buttons[:2]]
+
+    apply_application_appearance(qapp, {"appearance": {"preset": "tokyo_night"}})
+    window.apply_result_display_size()
+    window.move(0, 80)
+    qapp.processEvents()
+    ink = resolve_tokens({"preset": "tokyo_night"}, "poetore").muted_text
+    for button, initial, icon in zip(buttons, initial_icons, (chevron_down_icon, reload_icon)):
+        image = button.icon().pixmap(button.iconSize()).toImage()
+        assert image != initial
+        assert image == icon(ink).pixmap(button.iconSize()).toImage()
+
+    for button in buttons:
+        center = button.rect().center()
+        qapp.sendEvent(button, QHelpEvent(QEvent.ToolTip, center, button.mapToGlobal(center)))
+        tooltip = button.findChild(QLabel, "toolbarTooltip")
+        assert tooltip.isVisible() and tooltip.text() == button.toolTip()
+        assert tooltip.geometry().bottom() < button.mapToGlobal(QPoint()).y()
+        assert button.screen().availableGeometry().contains(tooltip.geometry())
+        qapp.sendEvent(button, QEvent(QEvent.Leave))
+
+
+def test_trade_title_bar_icons_scale_with_font_and_display_size(qapp, tmp_path):
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    buttons = (window.league_popup_button, window.league_refresh_button)
+    assert [button.iconSize().width() for button in buttons] == [20, 20]
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    widths = []
+    for profile in ("small", "medium", "large"):
+        window._app_config.setdefault("poetore", {})["result_font_size"] = profile
+        window.apply_result_display_size()
+        settle(qapp, window)
+        icon_size = buttons[0].iconSize()
+        assert icon_size.width() > 24
+        widths.append(icon_size.width())
+        for button in buttons:
+            assert button.iconSize() == icon_size
+            assert icon_size.width() < button.width()
+            assert button.icon().actualSize(icon_size) == icon_size
+            pixmap = button.icon().pixmap(icon_size, 2)
+            assert pixmap.devicePixelRatio() == 2
+            assert pixmap.size() == icon_size * 2
+    assert widths[0] < widths[1] < widths[2]
+
+    window._league_refresh_started = True
+    window._sync_league_refresh_button()
+    refresh = window.league_refresh_button
+    assert not refresh.isEnabled()
+    assert refresh.icon().actualSize(refresh.iconSize(), QIcon.Disabled) == refresh.iconSize()
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window.apply_result_display_size()
+    assert [button.iconSize().width() for button in buttons] == [20, 20]
 
 
 def test_main_icon_focus_ring_appears_for_tab_and_clears_for_mouse(qapp, tmp_path):
@@ -920,7 +987,7 @@ def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
         assert not manage.icon().isNull()
     elif key == "trade":
         assert_peers(window.trade_preset_combo._buttons)
-        assert_peers([window.league_popup_button, window.poetore_close_button])
+        assert_peers([window.league_popup_button, window.league_refresh_button, window.poetore_close_button])
         assert_peers([window.mod_conditions_toggle, window.clear_mod_conditions_button,
                       window.hidden_mods_toggle, window.mod_sources_toggle])
         assert_peers([window.price_button, window.trade_status_combo,

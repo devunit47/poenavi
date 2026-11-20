@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.poetore.exchange_catalog import exchange_catalog_by_id
+from src.poetore.map_check import set_decision
 from src.ui.dialog_theme import UI_METRICS
+from src.ui.map_check import MapModManagerDialog
 from src.ui.poetore_mode_window import (
     PoetoreModeWindow,
     _expedition_icon,
@@ -27,6 +29,68 @@ from src.update.startup_gate import run_startup_update_gate
 from src.utils.config_manager import ConfigManager
 from src.utils.poe_version_data import POE1, POE2
 from src.version import APP_VERSION
+
+
+@pytest.mark.parametrize("prewarm", [False, True])
+def test_map_mod_manager_reuses_dialog_and_reloads_current_config(qtbot, monkeypatch, prewarm):
+    config = {"poe_version": POE1, "hotkeys": {}}
+    with patch.object(ConfigManager, "load_config", return_value=config), patch(
+        "src.ui.poetore_mode_window.GlobalHotkeyService",
+    ), patch.object(PoetoreModeWindow, "refresh_currency_rate"):
+        window = PoetoreModeWindow()
+    qtbot.addWidget(window)
+    opened = []
+    monkeypatch.setattr(MapModManagerDialog, "exec", lambda dialog: opened.append(dialog))
+    window.show()
+
+    assert window._map_mod_manager_dialog is None
+    assert window._map_mod_manager_timer.isActive()
+    if prewarm:
+        qtbot.waitUntil(lambda: window._map_mod_manager_dialog is not None)
+        prepared = window._map_mod_manager_dialog
+        assert not prepared.isVisible()
+
+    window.map_mods_button.click()
+    dialog, = opened
+    if prewarm:
+        assert dialog is prepared
+    assert not window._map_mod_manager_timer.isActive()
+    cell = dialog.table.cellWidget(0, 1)
+    key = dialog._entries[0].key
+    map_check = window._ensure_map_check_window()
+    changed = {"profile": 2, "show_new_stats": True}
+    set_decision(changed, key, "d")
+    map_check.reload_config(changed)
+    with patch.object(ConfigManager, "save_config") as save:
+        map_check._cycle_entry(key)
+        save.assert_called_once()
+    dialog.selected_only.setChecked(True)
+    dialog.regex_search.setChecked(True)
+    dialog.search.setText("[")
+
+    with patch.object(ConfigManager, "save_config") as save, qtbot.assertNotEmitted(
+        dialog.config_changed,
+    ):
+        window.map_mods_button.click()
+        save.assert_not_called()
+
+    assert opened == [dialog, dialog]
+    assert dialog.table.cellWidget(0, 1) is cell
+    assert cell.findChildren(QPushButton)[1].isChecked()
+    assert dialog.profile_buttons[1].isChecked()
+    assert dialog.show_new.isChecked()
+    assert dialog.search.text() == ""
+    assert not dialog.regex_search.isChecked()
+    assert not dialog.selected_only.isChecked()
+    assert not dialog.table.isRowHidden(0)
+    assert dialog.table.verticalScrollBar().value() == 0
+    assert dialog.focusWidget() is dialog.search
+
+    with patch.object(ConfigManager, "save_config") as save:
+        cell.findChildren(QPushButton)[2].click()
+        save.assert_called_once()
+    window.close()
+    assert window._map_mod_manager_dialog is None
 
 
 def test_main_title_bar_shows_title_and_short_poe_version_without_eyebrow():
@@ -705,6 +769,9 @@ def test_poetore_mode_starts_capture_and_stash_scroll_services_for_poe2():
     assert "poetore_auto_hide" in supplied_hotkeys
     assert "map_check" not in supplied_hotkeys
     assert not window.map_mods_button.isVisibleTo(window)
+    assert not window._map_mod_manager_timer.isActive()
+    window.open_map_mod_manager()
+    assert window._map_mod_manager_dialog is None
     stash_class.assert_called_once_with(enabled=True)
     prepare_window.assert_called_once_with(window)
     assert all(

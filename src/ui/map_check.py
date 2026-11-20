@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from functools import partial
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRegularExpression, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent, QPointF, QRect, QRegularExpression, QSignalBlocker, QSize, Qt, QTimer, Signal,
+)
 from PySide6.QtGui import QColor, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -274,6 +276,24 @@ class MapModManagerDialog(QDialog):
         equalize_button_sizes([self.close_button], minimum_width=UI_METRICS.action_width)
         self.search.setFocus()
 
+    def reload_config(self, config: dict):
+        self.config = normalized_map_check_config(config)
+        self._profiles.button(self.config["profile"]).setChecked(True)
+        with QSignalBlocker(self.show_new):
+            self.show_new.setChecked(self.config["show_new_stats"])
+        self._refresh_decisions()
+        with (
+            QSignalBlocker(self.search),
+            QSignalBlocker(self.regex_search),
+            QSignalBlocker(self.selected_only),
+        ):
+            self.search.clear()
+            self.regex_search.setChecked(False)
+            self.selected_only.setChecked(False)
+        self._apply_filters()
+        self.table.scrollToTop()
+        self.search.setFocus()
+
     def _set_show_new(self, checked):
         self.config["show_new_stats"] = bool(checked)
         self._save()
@@ -282,10 +302,13 @@ class MapModManagerDialog(QDialog):
         if self.config["profile"] == profile:
             return
         self.config["profile"] = profile
-        for entry, group in zip(self._entries, self._decisions):
-            self._sync_decision(entry.key, group)
+        self._refresh_decisions()
         self._apply_filters()
         self._save()
+
+    def _refresh_decisions(self):
+        for entry, group in zip(self._entries, self._decisions):
+            self._sync_decision(entry.key, group)
 
     def _catalog_entries(self):
         known_refs = {entry.ref for entry in self.catalog}

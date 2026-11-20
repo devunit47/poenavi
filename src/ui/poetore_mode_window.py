@@ -306,6 +306,7 @@ class PoetoreModeWindow(QMainWindow):
             raise RuntimeError("PoE2版ぽえとれは現在テスト中です")
         self._cheat_sheet_overlay = None
         self._map_check_window = None
+        self._map_mod_manager_dialog = None
         self._memo_dialog = None
         self._expedition_reward_controller = None
         self._desecration_tier_controller = None
@@ -372,6 +373,11 @@ class PoetoreModeWindow(QMainWindow):
         QTimer.singleShot(0, self.refresh_currency_rate)
         self._prepare_poetore_window()
         self._apply_obs_streaming_mode()
+        self._map_mod_manager_timer = QTimer(self)
+        self._map_mod_manager_timer.setSingleShot(True)
+        self._map_mod_manager_timer.timeout.connect(self._ensure_map_mod_manager_dialog)
+        if is_feature_supported(MAP_CHECK, self.poe_version):
+            self._map_mod_manager_timer.start(1000)
 
     @staticmethod
     def _asset_path(filename):
@@ -1263,13 +1269,31 @@ class PoetoreModeWindow(QMainWindow):
             return None
         self._ensure_map_check_window().capture_from_poe()
 
-    def open_map_mod_manager(self):
+    def _ensure_map_mod_manager_dialog(self):
         if not is_feature_supported(MAP_CHECK, self.poe_version):
+            self._dispose_map_mod_manager_dialog()
             return None
-        from src.ui.map_check import MapModManagerDialog
+        if self._map_mod_manager_dialog is None:
+            from src.ui.map_check import MapModManagerDialog
 
-        dialog = MapModManagerDialog(self.config.get("map_check", {}), self)
-        dialog.config_changed.connect(self._save_map_check_config)
+            dialog = MapModManagerDialog(self.config.get("map_check", {}), self)
+            dialog.config_changed.connect(self._save_map_check_config)
+            self._map_mod_manager_dialog = dialog
+        return self._map_mod_manager_dialog
+
+    def _dispose_map_mod_manager_dialog(self):
+        self._map_mod_manager_timer.stop()
+        if self._map_mod_manager_dialog is not None:
+            self._map_mod_manager_dialog.close()
+            self._map_mod_manager_dialog.deleteLater()
+            self._map_mod_manager_dialog = None
+
+    def open_map_mod_manager(self):
+        self._map_mod_manager_timer.stop()
+        dialog = self._ensure_map_mod_manager_dialog()
+        if dialog is None:
+            return
+        dialog.reload_config(self.config.get("map_check", {}))
         dialog.exec()
         if self._map_check_window is not None:
             self._map_check_window.reload_config(self.config.get("map_check", {}))
@@ -1751,6 +1775,7 @@ class PoetoreModeWindow(QMainWindow):
             self._map_check_window.close()
             self._map_check_window.deleteLater()
             self._map_check_window = None
+        self._dispose_map_mod_manager_dialog()
         if getattr(self, "_poetore_window", None) is not None:
             self._poetore_window.close()
             self._poetore_window.deleteLater()

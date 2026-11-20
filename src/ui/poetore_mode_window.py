@@ -49,7 +49,7 @@ from src.ui.custom_command_settings import (
 from src.ui.toolbar_button import ToolbarButton
 from src.ui.toolbar_icons import (
     checking_icon, download_icon, finish_line_icon, hideout_notification_icon,
-    line_icon_canvas, update_check_icon,
+    line_icon_canvas, map_mod_manager_icon, update_check_icon,
 )
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.update.release_client import parse_version
@@ -184,24 +184,6 @@ def _settings_icon() -> QIcon:
             outline.append(QPointF(12.0 + radius * cos(angle), 12.0 + radius * sin(angle)))
     painter.drawPolygon(outline)
     painter.drawEllipse(QPointF(12.0, 12.0), 2.6, 2.6)
-    return finish_line_icon(pixmap, painter)
-
-
-def _map_mod_manager_icon() -> QIcon:
-    """A folded map with a marked location."""
-    pixmap, painter = _icon_canvas()
-    outline = QPainterPath(QPointF(13.0, 19.4))
-    outline.lineTo(8.5, 17.8)
-    outline.lineTo(3.5, 19.5)
-    outline.lineTo(3.5, 5.4)
-    outline.lineTo(8.5, 3.7)
-    outline.lineTo(14.0, 5.5)
-    outline.lineTo(20.5, 3.7)
-    outline.lineTo(20.5, 12.0)
-    painter.drawPath(outline)
-    painter.drawLine(QPointF(8.5, 3.7), QPointF(8.5, 17.8))
-    painter.drawLine(QPointF(14.0, 5.5), QPointF(14.0, 12.5))
-    painter.drawEllipse(QPointF(17.9, 17.4), 2.7, 2.7)
     return finish_line_icon(pixmap, painter)
 
 
@@ -578,8 +560,8 @@ class PoetoreModeWindow(QMainWindow):
         )
         self.cheat_sheets_button.setIcon(_image_manager_icon())
         self.cheat_sheets_button.setIconSize(QSize(24, 24))
-        self.map_mods_button = self._header_button("", "Map Modを登録・管理")
-        self.map_mods_button.setIcon(_map_mod_manager_icon())
+        self.map_mods_button = self._header_button("", "Map Mod管理")
+        self.map_mods_button.setIcon(map_mod_manager_icon(resolve_app_theme(POETORE_THEME).muted_text))
         self.map_mods_button.setIconSize(QSize(24, 24))
         self.map_mods_button.setVisible(
             is_feature_supported(MAP_CHECK, self.poe_version)

@@ -2,10 +2,13 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QPoint, QRect, QSize
+import pytest
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from scripts.build_poetore_map_mods import build_catalog, source_from_lock
+from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.poetore.map_check import (
     decision_for,
     default_map_check_config,
@@ -21,7 +24,7 @@ from src.poetore.window_position import (
     PlacementContext,
     position_for_context_at_cursor_y,
 )
-from src.ui.dialog_theme import POETORE_DIALOG_THEME
+from src.ui.dialog_theme import dialog_theme_for_mode
 from src.ui.map_check import MapCheckWindow, MapModManagerDialog
 
 
@@ -164,7 +167,7 @@ Map (Tier 16)
     assert len(buttons) == 1
     assert buttons[0].property("map_mod_text") == "レアモンスターの数が25%増加する"
     assert not any("検索対象ではない暗黙効果" in text for text in labels)
-    assert not any(text.startswith("未認識Mod") for text in labels)
+    assert not any(text.startswith("未認識のMod") for text in labels)
     window.close()
 
 
@@ -281,7 +284,7 @@ Map (Tier 16)
     window = MapCheckWindow(default_map_check_config())
     window._render(parsed)
     labels = [label.text() for label in window.body.findChildren(QLabel)]
-    assert not any(text.startswith("未認識Mod") for text in labels)
+    assert not any(text.startswith("未認識のMod") for text in labels)
     window.close()
 
 
@@ -311,7 +314,7 @@ Reported Alias Test 3
     window = MapCheckWindow(default_map_check_config())
     window._render(parsed)
     labels = [label.text() for label in window.body.findChildren(QLabel)]
-    assert not any(text.startswith("未認識Mod") for text in labels)
+    assert not any(text.startswith("未認識のMod") for text in labels)
     window.close()
 
 
@@ -370,60 +373,102 @@ def test_reported_nightmare_map_full_copy_resolves_chaos_and_guaranteed_wither()
     window = MapCheckWindow(default_map_check_config())
     window._render(parsed)
     labels = [label.text() for label in window.body.findChildren(QLabel)]
-    assert not any(text.startswith("未認識Mod") for text in labels)
+    assert not any(text.startswith("未認識のMod") for text in labels)
     window.close()
 
 
-def test_manager_orders_decision_columns_by_severity():
+def test_manager_groups_ordered_decisions_and_displays_current_choice():
     QApplication.instance() or QApplication([])
-    dialog = MapModManagerDialog(default_map_check_config())
+    config = default_map_check_config()
+    key = next(entry.key for entry in load_map_mod_catalog() if entry.scope == "normal")
+    set_decision(config, key, "s")
+    dialog = MapModManagerDialog(config)
     headers = [
         dialog.table.horizontalHeaderItem(column).text()
         for column in range(dialog.table.columnCount())
     ]
-    assert headers == ["Map Mod", "危険", "警告", "有利", "解除"]
-    assert [
-        dialog.table.cellWidget(0, column).text()
-        for column in range(1, dialog.table.columnCount())
-    ] == ["☠", "⚠", "✓", "×"]
+    assert headers == ["Map Mod", "対象", "判定"]
+    buttons = dialog.table.cellWidget(0, 2).findChildren(QPushButton)
+    assert [button.text() for button in buttons] == ["危険", "警告", "有利", "未設定"]
+    assert all(not button.icon().isNull() for button in buttons)
+    assert [button.text() for button in buttons if button.isChecked()] == ["未設定"]
+    buttons[-1].click()
+    assert decision_for(dialog.config, key) == "-"
+    buttons[0].click()
+    assert [button.text() for button in buttons if button.isChecked()] == ["危険"]
+    buttons[0].click()
+    assert buttons[0].isChecked()
+    buttons[-1].click()
+    assert [button.text() for button in buttons if button.isChecked()] == ["未設定"]
     dialog.close()
 
 
-def test_manager_uses_shared_poetore_theme_and_preserves_meaning_colors():
-    QApplication.instance() or QApplication([])
+def test_manager_updates_in_place_with_search_and_scroll_preserved(qapp):
     dialog = MapModManagerDialog(default_map_check_config())
-    assert dialog.property("dialogTheme") == "poetore"
-    assert dialog.property("density") == "compact"
-    assert dialog.title_label.property("uiRole") == "title"
-    assert dialog.count_label.property("uiRole") == "muted"
-    assert dialog.close_button.property("buttonRole") == "secondary"
-    assert all(
-        button.property("buttonRole") == "secondary"
-        for button in dialog.profile_buttons
-    )
-    assert POETORE_DIALOG_THEME.accent in dialog.styleSheet()
-    assert "ui-checkbox-checked.svg" in dialog.styleSheet()
-    assert "QTableCornerButton::section" in dialog.styleSheet()
-    assert POETORE_DIALOG_THEME.surface in dialog.styleSheet()
-    assert [
-        dialog.table.cellWidget(0, column).property("meaningColor")
-        for column in range(1, dialog.table.columnCount())
-    ] == ["danger", "warning", "beneficial", "clear"]
-    assert "#8b1e25" in dialog.table.cellWidget(0, 1).styleSheet()
-    assert "#a85a13" in dialog.table.cellWidget(0, 2).styleSheet()
-    assert "#27633a" in dialog.table.cellWidget(0, 3).styleSheet()
+    dialog.show()
+    dialog.search.setText("モンスター")
+    qapp.processEvents()
+    scroll = dialog.table.verticalScrollBar()
+    scroll.setValue(scroll.maximum() // 2)
+    assert (position := scroll.value()) > 0
+    row = dialog.table.rowAt(dialog.table.rowHeight(0))
+    assert row >= 0
+    entry = dialog._entries[row]
+    widget = dialog.table.cellWidget(row, 2)
+    warning = widget.findChildren(QPushButton)[1]
+    saved = []
+    dialog.config_changed.connect(lambda config: saved.append(normalized_map_check_config(config)))
+
+    warning.click()
+    assert dialog.table.cellWidget(row, 2) is widget
+    assert scroll.value() == position
+    assert dialog.search.text() == "モンスター"
+    assert decision_for(saved[-1], entry.key) == "w"
+
+    dialog.selected_only.setChecked(True)
+    assert not dialog.table.isRowHidden(row)
+    widget.findChildren(QPushButton)[-1].click()
+    assert dialog.table.isRowHidden(row)
+    assert dialog.search.text() == "モンスター"
+    assert decision_for(saved[-1], entry.key) == "-"
     dialog.close()
 
 
-def test_map_check_window_keeps_existing_overlay_theme():
-    QApplication.instance() or QApplication([])
-    window = MapCheckWindow(default_map_check_config())
-    assert window.property("dialogTheme") is None
-    assert "QDialog,QWidget{background:#111416;color:#E6ECEA;}" in (
-        window.styleSheet()
-    )
-    assert "QPushButton:hover{border-color:#65FFCA;}" in window.styleSheet()
+def test_manager_clear_persists_for_default_mod_and_profiles_stay_independent(qapp):
+    config = default_map_check_config()
+    key = next(iter(config["decisions"]))
+    dialog = MapModManagerDialog(config)
+    row = next(row for row, entry in enumerate(dialog._entries) if entry.key == key)
+    buttons = dialog.table.cellWidget(row, 2).findChildren(QPushButton)
+    saved = []
+    dialog.config_changed.connect(saved.append)
+    buttons[-1].click()
+    assert saved[-1]["decisions"][key] == "---"
+    reopened = MapModManagerDialog(saved[-1])
+    assert reopened.table.cellWidget(row, 2).findChildren(QPushButton)[-1].isChecked()
+    reopened.profile_buttons[1].click()
+    reopened.table.cellWidget(row, 2).findChildren(QPushButton)[0].click()
+    assert reopened.config["decisions"][key] == "-d-"
+    reopened.profile_buttons[0].click()
+    assert reopened.table.cellWidget(row, 2).findChildren(QPushButton)[-1].isChecked()
+    reopened.close()
+    dialog.close()
+
+
+@pytest.mark.parametrize("mode", [POENAVI_MODE, POETORE_MODE])
+def test_map_check_uses_mode_theme_and_shared_profile_controls(qapp, mode):
+    dialog = MapModManagerDialog(default_map_check_config())
+    window = MapCheckWindow(default_map_check_config(), app_mode=mode)
+    assert dialog.property("dialogTheme") == POETORE_MODE
+    assert window.property("dialogTheme") == mode
+    assert window.property("dialogAccent") == dialog_theme_for_mode(mode).accent
+    assert not window.close_button.icon().isNull()
+    assert window.close_button.accessibleName() == "閉じる"
+    assert [button.minimumSize() for button in window.profile_buttons] == [
+        button.minimumSize() for button in dialog.profile_buttons
+    ]
     window.close()
+    dialog.close()
 
 
 def test_seen_column_is_hidden_when_new_mod_notifications_are_disabled():
@@ -472,12 +517,21 @@ Map (Tier 16)
     assert "確認済み" in seen.toolTip()
 
     seen.click()
-    assert seen.text() == "確認済"
-    set_decision(window.config, key, "d")
-    window._refresh_seen_buttons(key)
-    assert seen.text() == "設定済"
+    assert seen.text() == "確認済み"
+    decision = next(button for button in window.body.findChildren(QPushButton)
+                    if button.property("map_mod_key") == key)
+    assert decision.verdict.text() == "未設定"
+    decision.click()
+    assert decision.verdict.text() == "危険"
+    assert seen.text() == "判定済み"
     assert not seen.isEnabled()
     assert decision_for(window.config, key) == "d"
+    for label, value in (("警告", "w"), ("有利", "g"), ("未設定", "-")):
+        decision.click()
+        assert decision.verdict.text() == label
+        assert decision_for(window.config, key) == value
+    assert seen.text() == "未確認"
+    assert seen.isEnabled()
     window.close()
 
 
@@ -533,25 +587,26 @@ def test_manager_uses_numeric_profiles_without_removed_reflect_defaults():
     assert [button.text() for button in dialog.profile_buttons] == ["1", "2", "3"]
     assert dialog.table.rowCount() == 232
     assert "全232件" in dialog.count_label.text()
-    assert all(entry.scope != "outdated" for entry, _tag in dialog._rows())
+    assert all(dialog.table.item(row, 1).text() != "更新確認が必要"
+               for row in range(dialog.table.rowCount()))
     dialog.close()
 
 
 def test_manager_orders_normal_then_uber_map_then_heist_mods():
     QApplication.instance() or QApplication([])
     dialog = MapModManagerDialog(default_map_check_config())
-    scopes = [entry.scope for entry, _tag in dialog._rows()]
+    scopes = [dialog.table.item(row, 1).text() for row in range(dialog.table.rowCount())]
     assert scopes == sorted(
         scopes,
         key={
-            "normal": 0,
-            "ubermap_exclusive": 1,
-            "heist_exclusive": 2,
-            "outdated": 3,
+            "": 0,
+            "Uber Map限定": 1,
+            "Heist限定": 2,
+            "更新確認が必要": 3,
         }.get,
     )
-    assert scopes.index("ubermap_exclusive") > scopes.index("normal")
-    assert scopes.index("heist_exclusive") > scopes.index("ubermap_exclusive")
+    assert scopes.index("Uber Map限定") > scopes.index("")
+    assert scopes.index("Heist限定") > scopes.index("Uber Map限定")
     dialog.close()
 
 
@@ -576,9 +631,41 @@ def test_non_map_clipboard_is_rejected_without_trade_search():
     assert "Map系アイテムではありません" in information.call_args.args[2]
     assert not window.isVisible()
     window.close()
-def test_map_check_uses_shared_result_font_size():
-    QApplication.instance() or QApplication([])
+
+
+def test_map_check_uses_shared_result_font_size(qapp):
+    from tests.poetore_ui_scenarios import MAP_ITEM_TEXT
+
     config = default_map_check_config()
     config["_font_size"] = "large"
     window = MapCheckWindow(config)
-    assert "font-size:16px" in window.styleSheet()
+
+    window._item = parse_item_text(MAP_ITEM_TEXT)
+    window._render(window._item)
+    window.show()
+    qapp.processEvents()
+    description = window.findChild(QLabel, "mapModText")
+    assert description.font().pixelSize() == 16
+
+    window.reload_config({**config, "_font_size": "small"})
+    qapp.processEvents()
+    description = window.findChild(QLabel, "mapModText")
+    assert description.font().pixelSize() == 11
+    window.close()
+
+
+def test_map_check_escape_restores_poe_focus_and_deactivation_closes(qapp):
+    window = MapCheckWindow(default_map_check_config())
+    window._poe_window_hwnd = 81
+    window.show()
+    qapp.processEvents()
+    with patch("src.ui.map_check.focus_window") as focus:
+        QTest.keyClick(window, Qt.Key_Escape)
+        qapp.processEvents()
+        focus.assert_called_once_with(81)
+    assert not window.isVisible()
+
+    window.show()
+    qapp.sendEvent(window, QEvent(QEvent.WindowDeactivate))
+    qapp.processEvents()
+    assert not window.isVisible()

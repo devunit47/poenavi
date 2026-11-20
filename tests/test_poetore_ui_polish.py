@@ -482,7 +482,7 @@ def test_auxiliary_poetore_icon_buttons_render_transparently(qapp, tmp_path):
         (exchange, exchange.registered_widget._rows[0].findChildren(QPushButton)),
         (settings, (settings.hideout_minutes_up_button, settings.hideout_minutes_down_button,
                     settings.hideout_seconds_up_button, settings.hideout_seconds_down_button)),
-        (map_check, [button for button in map_check.findChildren(QPushButton) if button.text() == "×"]),
+        (map_check, [map_check.close_button]),
         (memo, [button for button in memo.findChildren(QPushButton) if button.text() == "✕"]),
         (cheat_sheets, [button for button in cheat_sheets.findChildren(QPushButton) if button.text() == "×"]),
     ):
@@ -1109,6 +1109,16 @@ def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
         assert_peers(window.findChildren(QPushButton))
     else:
         assert_peers(window.profile_buttons)
+        scroll = window.table if key == "map_manager" else window.scroll
+        assert scroll.horizontalScrollBar().maximum() == 0
+        if key == "map_manager":
+            group = window.table.cellWidget(0, 2)
+            buttons = group.findChildren(QPushButton)
+            assert_peers(buttons)
+            assert all(group.rect().contains(button.geometry()) for button in buttons)
+            viewport = window.table.viewport()
+            assert all(viewport.rect().contains(QRect(button.mapTo(viewport, QPoint()), button.size()))
+                       for button in buttons)
 
 
 @pytest.mark.parametrize("preset", PRESETS)

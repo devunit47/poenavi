@@ -378,7 +378,7 @@ def test_action_cluster_uses_consistent_spacing_at_every_display_size(
         assert window.action_cluster_layout.getContentsMargins() == zero_margins
         assert window.mod_conditions_actions_layout.getContentsMargins() == zero_margins
         assert window.mercenary_supports_actions_layout.getContentsMargins() == zero_margins
-        assert window.trade_action_layout.getContentsMargins() == zero_margins
+        assert window.trade_action_layout.getContentsMargins() == (0, 0, window.trade_action_layout.spacing(), 0)
     finally:
         window.close()
 
@@ -10614,7 +10614,7 @@ def test_reference_price_panel_prefers_official_price_and_keeps_ninja_context(qa
         window._poe_ninja_item_key = key
         window._show_reference_price(key, ninja, official)
 
-        assert window.poe_ninja_price_label.text() == "カレンシー交換 直近価格"
+        assert window.poe_ninja_price_label.accessibleName() == "カレンシー交換 直近価格"
         assert (
             "公式Currency Exchangeで直近24時間以内に取引が成立した"
             "最新1時間の平均価格"
@@ -10622,7 +10622,8 @@ def test_reference_price_panel_prefers_official_price_and_keeps_ninja_context(qa
         )
         assert window.poe_ninja_price_value.text() == "1.2"
         assert window.poe_ninja_currency_icon.toolTip() == "Divine Orb"
-        assert "poe.ninja 7日推移" in window.poe_ninja_trend_label.text()
+        trend_caption = window.poe_ninja_trend_label.text().replace("\u2060", "")
+        assert "poe.ninja 7日推移" in trend_caption
         assert window.poe_ninja_trend_chart._points == (0, 2, 4)
         assert window._last_poe_ninja_url == "https://poe.ninja/example"
         assert not window.poe_ninja_open_button.isHidden()
@@ -10667,7 +10668,7 @@ def test_reference_price_panel_labels_ninja_fallback_as_reference(qapp):
     try:
         window._poe_ninja_item_key = key
         window._show_reference_price(key, ninja, official)
-        assert window.poe_ninja_price_label.text() == "poe.ninja 参考価格"
+        assert window.poe_ninja_price_label.accessibleName() == "poe.ninja 参考価格"
         assert "直近価格が未確定" in window.poe_ninja_price_label.toolTip()
         assert window.poe_ninja_price_value.text() == "42"
         assert window.poe_ninja_currency_icon.toolTip() == "Chaos Orb"
@@ -10684,7 +10685,7 @@ def test_reference_price_panel_labels_syncing_exchange_item_as_reference(qapp):
     try:
         window._poe_ninja_item_key = key
         window._show_reference_price(key, ninja, None, official_expected=True)
-        assert window.poe_ninja_price_label.text() == "poe.ninja 参考価格"
+        assert window.poe_ninja_price_label.accessibleName() == "poe.ninja 参考価格"
         assert "カレンシー交換の直近価格が未確定" in (
             window.poe_ninja_price_label.toolTip()
         )
@@ -10701,7 +10702,7 @@ def test_reference_price_panel_keeps_legacy_ninja_label_for_non_exchange_item(qa
     try:
         window._poe_ninja_item_key = key
         window._show_reference_price(key, ninja, None)
-        assert window.poe_ninja_price_label.text() == "poe.ninja 参考価格"
+        assert window.poe_ninja_price_label.accessibleName() == "poe.ninja 参考価格"
         assert "Currency Exchange対象外" in (
             window.poe_ninja_price_label.toolTip()
         )
@@ -10725,7 +10726,7 @@ def test_reference_price_panel_can_show_official_price_without_ninja(qapp):
         window._poe_ninja_item_key = key
         window._show_reference_price(key, None, official)
         assert not window.poe_ninja_price_panel.isHidden()
-        assert window.poe_ninja_price_label.text() == "カレンシー交換 直近価格"
+        assert window.poe_ninja_price_label.accessibleName() == "カレンシー交換 直近価格"
         assert window.poe_ninja_price_value.text() == "0.5"
         assert window.poe_ninja_currency_icon.toolTip() == "Divine Orb"
         assert window.poe_ninja_trend_chart._points == ()
@@ -10762,7 +10763,7 @@ def test_primary_price_queue_reaches_official_display_for_poe1_exchange_item(
             patch.object(window, "_record_official_exchange_shadow", return_value=official),
         ):
             window._queue_poe_ninja_price(item)
-        assert window.poe_ninja_price_label.text() == "カレンシー交換 直近価格"
+        assert window.poe_ninja_price_label.accessibleName() == "カレンシー交換 直近価格"
         assert window.poe_ninja_price_value.text() == "1"
         assert window.poe_ninja_currency_icon.toolTip() == "Chaos Orb"
     finally:
@@ -10845,7 +10846,7 @@ def test_primary_price_queue_uses_official_when_ninja_lookup_fails(qapp, monkeyp
             patch.object(window, "_record_official_exchange_shadow", return_value=official),
         ):
             window._queue_poe_ninja_price(item)
-        assert window.poe_ninja_price_label.text() == "カレンシー交換 直近価格"
+        assert window.poe_ninja_price_label.accessibleName() == "カレンシー交換 直近価格"
         assert window.poe_ninja_price_value.text() == "29"
         assert window.poe_ninja_open_button.isHidden()
     finally:

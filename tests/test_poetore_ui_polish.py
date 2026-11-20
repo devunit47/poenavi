@@ -4,9 +4,15 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QHelpEvent, QIcon, QImage, QPainter, QRegion
+from PySide6.QtGui import (
+    QColor, QFontDatabase, QFontMetrics, QHelpEvent, QIcon, QImage, QPainter, QRegion,
+    QTextLayout, QTextOption,
+)
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStyleOptionViewItem, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QLabel, QPushButton, QStyle, QStyleOptionButton,
+    QStyleOptionViewItem, QSystemTrayIcon, QWidget,
+)
 
 from src.app_font import bundled_font_path
 from src.poetore.exchange_rate_settings import (
@@ -1220,6 +1226,80 @@ def test_trade_large_font_conditions_wrap_with_right_margin(qapp, tmp_path, vers
         else:
             assert control.width() >= control.minimumSizeHint().width()
     assert len({control.mapTo(window, QPoint()).y() for control in controls}) >= 2
+
+
+@pytest.mark.parametrize("official_amount, words", [
+    (None, ("poe.ninja", "参考価格")),
+    (92, ("カレンシー交換", "直近価格")),
+    (12500, ("カレンシー交換", "直近価格")),
+])
+def test_trade_reference_price_heading_wraps_only_between_words(qapp, tmp_path, official_amount, words):
+    from src.poetore.official_exchange import CHAOS
+    from src.poetore.poe_ninja import PoeNinjaPrice
+    from src.poetore.window_position import PlacementContext
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("trade", tmp_path)
+    ninja = PoeNinjaPrice("Sample", None, 100, (80, 90, 100), "https://example.invalid/ninja")
+    official = None if official_amount is None else Mock(
+        status="accepted_direct", display_amount=official_amount, display_currency=CHAOS,
+    )
+    window._show_reference_price(window._poe_ninja_item_key, ninja, official)
+    available = QRect(0, 0, 800, 600)
+    window.show_at_context(PlacementContext(available, available.center()), activate=False)
+    settle(qapp, window)
+
+    heading = window.poe_ninja_price_label
+    text = heading.text()
+    layout = QTextLayout(text, heading.font())
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WordWrap if heading.wordWrap() else QTextOption.NoWrap)
+    layout.setTextOption(option)
+    lines = []
+    layout.beginLayout()
+    while (line := layout.createLine()).isValid():
+        line.setLineWidth(heading.contentsRect().width())
+        assert line.naturalTextWidth() <= heading.contentsRect().width()
+        line_text = text[line.textStart():line.textStart() + line.textLength()]
+        lines.append(line_text.replace("\u2060", "").strip())
+    layout.endLayout()
+    assert lines in [[" ".join(words)], list(words)]
+    assert heading.height() >= heading.heightForWidth(heading.width())
+    viewport = window._content_scroll.viewport()
+    for widget in (heading, window.poe_ninja_trend_label,
+                   window.poe_ninja_trend_chart, window.poe_ninja_open_button):
+        assert viewport.rect().contains(QRect(widget.mapTo(viewport, QPoint()), widget.size()))
+
+
+def test_trade_remember_checkbox_fits_with_scrollbar_and_right_margin(qapp, tmp_path):
+    from src.poetore.trade import TradeStatFilter
+    from src.poetore.window_position import PlacementContext
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 13}}})
+    window = build_scenario("trade", tmp_path)
+    window._populate_stat_filters(tuple(
+        TradeStatFilter(f"explicit.{index}", f"Mod {index + 1} +#%", 45, "prefix", index < 3)
+        for index in range(19)
+    ))
+    available = QRect(0, 0, 800, 600)
+    window.show_at_context(PlacementContext(available, available.center()), activate=False)
+    settle(qapp, window)
+
+    scroll = window._content_scroll
+    assert scroll.verticalScrollBar().isVisible()
+    checkbox = window.remember_trade_options_checkbox
+    scroll.ensureWidgetVisible(checkbox, 0, 0)
+    qapp.processEvents()
+    viewport = scroll.viewport()
+    checkbox_rect = QRect(checkbox.mapTo(viewport, QPoint()), checkbox.size())
+    assert viewport.rect().contains(checkbox_rect)
+    assert viewport.rect().right() - checkbox_rect.right() >= UI_METRICS.overlay_gap
+
+    option = QStyleOptionButton()
+    checkbox.initStyleOption(option)
+    text_rect = checkbox.style().subElementRect(QStyle.SE_CheckBoxContents, option, checkbox)
+    assert text_rect.width() >= checkbox.fontMetrics().horizontalAdvance(checkbox.text())
+    assert viewport.rect().contains(text_rect.translated(checkbox_rect.topLeft()))
 
 
 @pytest.mark.parametrize("version", ["poe1", "poe2"])

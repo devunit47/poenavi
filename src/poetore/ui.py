@@ -1326,6 +1326,7 @@ class PoetoreWindow(QWidget):
 
         self.item_header = QFrame()
         self.item_header.setObjectName("itemHeader")
+        self.item_header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         item_header_layout = QVBoxLayout(self.item_header)
         item_header_layout.setContentsMargins(10, 7, 10, 7)
         item_header_layout.setSpacing(1)
@@ -1387,9 +1388,10 @@ class PoetoreWindow(QWidget):
         ninja_layout = QHBoxLayout(self.poe_ninja_price_panel)
         ninja_layout.setContentsMargins(8, 5, 8, 5)
         ninja_layout.setSpacing(8)
-        self.poe_ninja_price_label = QLabel("poe.ninja 参考価格")
+        self.poe_ninja_price_label = QLabel()
         self.poe_ninja_price_label.setObjectName("poeNinjaPriceLabel")
         self.poe_ninja_price_label.setWordWrap(True)
+        self._set_reference_price_heading("poe.ninja 参考価格")
         self.poe_ninja_price_value = QLabel("—")
         self.poe_ninja_price_value.setObjectName("poeNinjaPriceValue")
         self.poe_ninja_price_multiplier = QLabel("×")
@@ -2038,7 +2040,7 @@ class PoetoreWindow(QWidget):
         content_layout.addWidget(self.search_scope_notice)
 
         action_row = _FlowLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setContentsMargins(0, 0, _ACTION_CLUSTER_HORIZONTAL_GAP, 0)
         action_row.setSpacing(_ACTION_CLUSTER_HORIZONTAL_GAP)
         action_row.setAlignment(Qt.AlignLeft)
         self.trade_action_layout = action_row
@@ -4616,13 +4618,19 @@ class PoetoreWindow(QWidget):
         self.divine_rate_menu.clear()
         self._divine_rate_retry_after = time.monotonic() + 4 * 60
 
+    def _set_reference_price_heading(self, heading: str):
+        # Qt allows breaks between Japanese characters. Join each word so
+        # the heading wraps only at the space between the source and price type.
+        self.poe_ninja_price_label.setText(" ".join("\u2060".join(word) for word in heading.split()))
+        self.poe_ninja_price_label.setAccessibleName(heading)
+
     def _show_poe_ninja_price(self, key, price: PoeNinjaPrice):
         if key != self._poe_ninja_item_key:
             trace = self._poe_ninja_performance_traces.pop(key, None)
             if trace is not None:
                 trace.mark("stale_poe_ninja_result_discarded")
             return
-        self.poe_ninja_price_label.setText("poe.ninja 参考価格")
+        self._set_reference_price_heading("poe.ninja 参考価格")
         self.poe_ninja_price_label.setToolTip("")
         amount, currency = price.display_price_parts()
         self.poe_ninja_price_value.setText(amount)
@@ -4645,6 +4653,7 @@ class PoetoreWindow(QWidget):
         if pixmap.isNull():
             self.poe_ninja_price_value.setText(price.display_price())
         trend = price.trend_summary()
+        self.poe_ninja_trend_label.setWordWrap(False)
         self.poe_ninja_trend_label.setText(
             f"{trend[0]} {trend[1]}\n7日推移" if trend else "7日データなし"
         )
@@ -4704,7 +4713,6 @@ class PoetoreWindow(QWidget):
 
         if not accepted:
             if official_expected or official_price is not None:
-                self.poe_ninja_price_label.setText("poe.ninja 参考価格")
                 self.poe_ninja_price_label.setToolTip(
                     "カレンシー交換の直近価格が未確定のため、"
                     "poe.ninjaの参考価格を表示しています"
@@ -4722,7 +4730,7 @@ class PoetoreWindow(QWidget):
                 self._hide_poe_ninja_price(key)
             return
         amount, currency = parts
-        self.poe_ninja_price_label.setText("カレンシー交換 直近価格")
+        self._set_reference_price_heading("カレンシー交換 直近価格")
         route = getattr(official_price, "selected_route", None)
         route_label = "Divine直接" if route == "direct_divine" else (
             "Chaos直接" if self.poe_version == POE1 else "Exalted直接"
@@ -4751,10 +4759,12 @@ class PoetoreWindow(QWidget):
         self.poe_ninja_currency_icon.setVisible(not pixmap.isNull())
         if ninja_price is not None:
             trend = ninja_price.trend_summary()
-            self.poe_ninja_trend_label.setText(
-                f"{trend[0]} {trend[1]}\npoe.ninja 7日推移"
-                if trend else "poe.ninja 7日データなし"
-            )
+            # The longer official heading and a wide price can leave too
+            # little room for the secondary caption and the link on one line.
+            self.poe_ninja_trend_label.setWordWrap(True)
+            change = "\u00a0".join(trend) + "\n" if trend else ""
+            caption = "\u2060".join("7日推移" if trend else "7日データなし")
+            self.poe_ninja_trend_label.setText(f"{change}poe.ninja {caption}")
         self.poe_ninja_price_panel.show()
 
     def _hide_poe_ninja_price(self, key=None):
@@ -4766,7 +4776,7 @@ class PoetoreWindow(QWidget):
         trace = self._poe_ninja_performance_traces.pop(key, None) if key is not None else None
         if trace is not None:
             trace.mark("poe_ninja_result_unavailable")
-        self.poe_ninja_price_label.setText("poe.ninja 参考価格")
+        self._set_reference_price_heading("poe.ninja 参考価格")
         self.poe_ninja_price_label.setToolTip("")
         self.poe_ninja_price_panel.hide()
         self.poe_ninja_price_value.setText("—")

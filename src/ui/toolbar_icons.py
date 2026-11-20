@@ -74,10 +74,23 @@ def reload_icon(color, *, size=24) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
-def chevron_down_icon(color, *, size=24) -> QIcon:
+def chevron_icon(color, *, up=False, size=24) -> QIcon:
     pixmap, painter = line_icon_canvas(color, size=size)
+    outer_y, center_y = (15, 9) if up else (9, 15)
     painter.drawPolyline(QPolygonF([
-        QPointF(5, 9), QPointF(12, 15), QPointF(19, 9),
+        QPointF(6, outer_y), QPointF(12, center_y), QPointF(18, outer_y),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def external_link_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawPolyline(QPolygonF([
+        QPointF(12, 5), QPointF(5, 5), QPointF(5, 19), QPointF(19, 19), QPointF(19, 12),
+    ]))
+    painter.drawLine(QPointF(11, 13), QPointF(20, 4))
+    painter.drawPolyline(QPolygonF([
+        QPointF(15, 4), QPointF(20, 4), QPointF(20, 9),
     ]))
     return finish_line_icon(pixmap, painter)
 

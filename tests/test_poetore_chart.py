@@ -242,7 +242,7 @@ def test_chart_clear_all_removes_mod_conditions_but_keeps_scope(qapp, monkeypatc
         cleared = window._selected_stat_filters()
         assert cleared
         assert all(not row.enabled for row in cleared)
-        assert window.clear_mod_conditions_button.text() == "すべて選択"
+        assert window.clear_mod_conditions_button.text() == "一括選択"
         query = build_search_query(
             item, window._trade_base_type, cleared,
             exact_base_type=window._searches_exact_base_type(item),

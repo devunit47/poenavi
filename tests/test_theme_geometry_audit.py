@@ -32,7 +32,6 @@ from src.ui.appearance import (
 # exemption for labels, buttons, editable fields, or all fixed-size controls.
 WIDTH_ALLOWLIST = {
     "ElidedLabel": "Rate item names elide at the right; the tooltip has the full name.",
-    "compactAction": "Trade action popup shows the complete choices; its closed control is compact.",
     "editableText": "Free text/path inputs scroll horizontally; their line height is still required.",
 }
 
@@ -184,9 +183,7 @@ def geometry_failures(root):
         if not text or (isinstance(widget, QLabel) and not widget.pixmap().isNull()):
             continue
         rect = widget.rect()
-        exception = ("ElidedLabel" if type(widget).__name__ == "ElidedLabel"
-                     else "compactAction" if isinstance(widget, QComboBox) and widget.property("compactAction") else None)
-        skip_width = exception in WIDTH_ALLOWLIST
+        skip_width = type(widget).__name__ == "ElidedLabel" and "ElidedLabel" in WIDTH_ALLOWLIST
         if isinstance(widget, QLabel):
             needed = _label_requirement(widget)
         elif isinstance(widget, QAbstractButton):
@@ -398,7 +395,8 @@ def test_window_inventory_is_complete():
     # window/component classes must be explicitly assigned to a generating
     # scenario, rather than disappearing from a hand-written factory list.
     embedded = {
-        "_UniqueRollSlider", "_BinaryToggle", "_ElidedScopeButton", "_CycleButton", "_AreaSegmentedControl",
+        "_UniqueRollSlider", "_BinaryToggle", "_ElidedScopeButton", "_TradeOptionComboBox",
+        "_CycleButton", "_AreaSegmentedControl",
         "_NumericFilterChip", "_RequiredNumericFilterChip", "_SparklineWidget", "_PoetoreTitleBar",
         "AppearanceSettingsWidget", "AppInfoWidget", "CustomCommandSettingsWidget",
         "ElidedLabel", "RateValueLabel", "CustomExchangeRatePanel", "_RateDeleteButton",

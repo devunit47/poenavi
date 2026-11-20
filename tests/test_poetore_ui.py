@@ -7,9 +7,9 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QFontMetrics, QKeyEvent, QMouseEvent, QPalette, QPixmap, QWheelEvent
+from PySide6.QtGui import QIcon, QKeyEvent, QMouseEvent, QPalette, QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QCheckBox, QComboBox, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QCheckBox, QComboBox, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QStyle, QStyleOptionComboBox, QTreeWidgetItem, QWidget
 import pytest
 
 from src.poetore.ui import (
@@ -265,8 +265,12 @@ def test_poetore_window_always_accepts_mouse_input(qapp):
         assert window.minimumWidth() == 610
         assert window.height() == 1039
         assert window.price_list.minimumHeight() == 434
-        assert window.trade_url_button.text() == "公式トレード  ↗"
-        assert window.trade_url_button.toolTip() == "日本語公式Tradeをブラウザで開く"
+        assert window.trade_url_button.text() == "公式トレード"
+        assert window.trade_url_button.toolTip() == "この検索結果を公式トレードで開く"
+        assert window.poe_ninja_open_button.text() == "poe.ninja"
+        assert window.poe_ninja_open_button.toolTip() == "poe.ninjaで開く"
+        assert not window.trade_url_button.icon().isNull()
+        assert window.trade_url_button.icon().cacheKey() == window.poe_ninja_open_button.icon().cacheKey()
         assert all(button.text() != "貼り付け" for button in window.findChildren(QPushButton))
     finally:
         window.close()
@@ -339,11 +343,7 @@ def test_trade_action_row_uses_compact_fonts_and_fits_window(
             window.listed_within_combo,
             window.trade_url_button,
         )
-        assert all(control.property("compactAction") for control in controls)
-        assert (
-            f"font-size: {compact_font}px;\n                padding: 2px 1px;"
-            in window.styleSheet()
-        )
+        assert all(control.font().pixelSize() == compact_font for control in controls)
         assert controls[-1].geometry().right() < window._panel.width()
         assert all(combo.minimumWidth() == combo.maximumWidth() for combo in controls[:3])
         assert window.price_button.width() == search_button_width
@@ -3724,7 +3724,7 @@ def test_search_range_change_keeps_checkboxes_but_recalculates_edited_values(qap
 def test_hidden_candidates_and_pseudo_sources_can_be_toggled(qapp):
     window = PoetoreWindow()
     try:
-        assert window.mod_sources_toggle.text() == "計算元Modを表示"
+        assert window.mod_sources_toggle.text() == "集約前のModを表示"
         assert "価格比較に影響しないため" in window.hidden_mods_toggle.toolTip()
         assert "影響しにくい" not in window.hidden_mods_toggle.toolTip()
         assert "Pseudo" not in window.mod_sources_toggle.toolTip()
@@ -3771,10 +3771,10 @@ def test_hidden_candidates_and_pseudo_sources_can_be_toggled(qapp):
         assert not hidden.isHidden()
 
         window.mod_sources_toggle.setChecked(True)
-        assert window.mod_sources_toggle.text() == "計算元Modを隠す"
+        assert window.mod_sources_toggle.text() == "集約前のModを隠す"
         assert normal.isExpanded()
         window.mod_sources_toggle.setChecked(False)
-        assert window.mod_sources_toggle.text() == "計算元Modを表示"
+        assert window.mod_sources_toggle.text() == "集約前のModを表示"
         assert not normal.isExpanded()
     finally:
         window.close()
@@ -3952,7 +3952,7 @@ def test_search_keeps_checked_hidden_unique_mutation_visible(qapp):
 
         assert search.called
         assert not window.hidden_mods_toggle.isChecked()
-        assert window.hidden_mods_toggle.text() == "隠し候補を表示"
+        assert window.hidden_mods_toggle.text() == "固定値の条件を表示"
         assert not window.mod_filter_tree.topLevelItem(0).isHidden()
         assert not window.mod_filter_tree.topLevelItem(1).isHidden()
         sent = search.call_args.kwargs["stat_filters"]
@@ -4302,7 +4302,7 @@ def test_partial_price_result_is_preserved_when_remaining_requests_cancel(qapp):
     try:
         window._search_partially_completed(result, 7)
 
-        assert "取得中" in window.price_status.text()
+        assert window.price_status.text().startswith("出品情報を取得中…")
         assert window.price_list.topLevelItemCount() == 1
         assert not window.price_button.isEnabled()
         assert not window.trade_url_button.isEnabled()
@@ -4331,6 +4331,15 @@ def test_next_ten_button_is_shown_only_for_poe2_results(qapp):
         assert not poe2.additional_results_button.isHidden()
         assert poe2.additional_results_button.text() == "次の10件を取得"
         assert poe2.price_status.text() == "Standard: 候補30件 / 取得10件"
+
+        button = poe2.additional_results_button
+        width = button.width()
+        with patch("src.poetore.ui.threading.Thread") as thread:
+            button.click()
+            thread.return_value.start.assert_called_once()
+        assert button.text() == "出品を取得中…"
+        assert not button.isEnabled()
+        assert button.width() == width
 
         poe2._additional_results_completed(replace(
             result, next_result_ids=(), fetched_count=20,
@@ -5413,15 +5422,15 @@ def test_mod_conditions_can_be_collapsed_without_losing_values(qapp):
         editor.setText("95")
 
         window.show()
-        assert window.mod_conditions_toggle.text() == "Mod一覧をたたむ ∧"
+        assert window.mod_conditions_toggle.text() == "条件をたたむ"
         window.mod_conditions_toggle.click()
         assert window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "Mod一覧をひらく ∨"
+        assert window.mod_conditions_toggle.text() == "条件を表示"
         assert window._selected_stat_filters()[0].min_value == 95
 
         window.mod_conditions_toggle.click()
         assert not window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "Mod一覧をたたむ ∧"
+        assert window.mod_conditions_toggle.text() == "条件をたたむ"
     finally:
         window.close()
 
@@ -5440,7 +5449,7 @@ def test_mod_conditions_default_is_reset_for_each_new_item(qapp):
 
         assert window.mod_filter_tree.topLevelItemCount() == 0
         assert window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "Mod一覧をひらく ∨"
+        assert window.mod_conditions_toggle.text() == "条件を表示"
 
         window.mod_conditions_toggle.click()
         assert not window.mod_filter_tree.isHidden()
@@ -5462,7 +5471,7 @@ def test_mod_conditions_default_is_reset_for_each_new_item(qapp):
 
         assert window.mod_filter_tree.topLevelItemCount() > 0
         assert not window.mod_filter_tree.isHidden()
-        assert window.mod_conditions_toggle.text() == "Mod一覧をたたむ ∧"
+        assert window.mod_conditions_toggle.text() == "条件をたたむ"
     finally:
         window.close()
 
@@ -5566,9 +5575,9 @@ def test_mod_condition_checks_toggle_all_without_changing_item_level(qapp):
         window.item_level_edit.setText("84")
         window._set_item_level_filter_enabled(True)
 
-        assert window.clear_mod_conditions_button.text() == "すべて解除"
+        assert window.clear_mod_conditions_button.text() == "一括解除"
         assert window.clear_mod_conditions_button.toolTip() == (
-            "上の条件一覧のみ。ilvlなどの基本条件は変更しません"
+            "上の条件一覧にだけ適用します。ilvlなどの基本条件は対象外です。"
         )
         window.show()
         qapp.processEvents()
@@ -5584,17 +5593,19 @@ def test_mod_condition_checks_toggle_all_without_changing_item_level(qapp):
             window.clear_mod_conditions_button.geometry().center().y()
             == window.mod_conditions_toggle.geometry().center().y()
         )
+        assert window.clear_mod_conditions_button.width() != window.mod_conditions_toggle.width()
+        assert not window.mod_conditions_toggle.icon().isNull()
         window.clear_mod_conditions_button.click()
 
         assert [row.enabled for row in window._selected_stat_filters()] == [False, False]
-        assert window.clear_mod_conditions_button.text() == "すべて選択"
+        assert window.clear_mod_conditions_button.text() == "一括選択"
         assert window._selected_item_level() == 84
         assert window._item_level_filter_enabled
 
         window.clear_mod_conditions_button.click()
 
         assert [row.enabled for row in window._selected_stat_filters()] == [True, True]
-        assert window.clear_mod_conditions_button.text() == "すべて解除"
+        assert window.clear_mod_conditions_button.text() == "一括解除"
     finally:
         window.close()
 
@@ -5609,14 +5620,14 @@ def test_mod_condition_toggle_shows_clear_when_partially_checked(qapp):
         window._populate_stat_filters(filters)
 
         assert [row.enabled for row in window._selected_stat_filters()] == [True, False]
-        assert window.clear_mod_conditions_button.text() == "すべて解除"
+        assert window.clear_mod_conditions_button.text() == "一括解除"
 
         checkboxes = window._mod_condition_checkboxes()
         checkboxes[0].setChecked(False)
-        assert window.clear_mod_conditions_button.text() == "すべて選択"
+        assert window.clear_mod_conditions_button.text() == "一括選択"
 
         checkboxes[1].setChecked(True)
-        assert window.clear_mod_conditions_button.text() == "すべて解除"
+        assert window.clear_mod_conditions_button.text() == "一括解除"
     finally:
         window.close()
 
@@ -7227,24 +7238,54 @@ def test_poe2_trade_currency_shortens_only_exalted_divine_label(qapp):
             "高貴なオーブまたは神のオーブ建ての出品"
         )
 
-        window._fit_compact_action_widths()
         combined_width = window.trade_currency_combo.width()
-        compact_font = window.trade_currency_combo.font()
-        compact_font.setPixelSize(
-            _DISPLAY_SIZE_PROFILES[window._result_font_size]["mod_value_font"]
-        )
-        compact_metrics = QFontMetrics(compact_font)
-        assert combined_width == compact_metrics.horizontalAdvance("高貴または神") + 12
         window.trade_currency_combo.setCurrentIndex(
             window.trade_currency_combo.findData("exalted")
         )
-        window._fit_compact_action_widths()
         exalted_width = window.trade_currency_combo.width()
-        assert exalted_width == compact_metrics.horizontalAdvance("高貴なオーブのみ") + 12
         assert window.trade_currency_combo.view().minimumWidth() >= exalted_width
         assert combined_width < window.trade_status_combo.width()
         assert combined_width < exalted_width
         assert window.width() == 650
+    finally:
+        window.close()
+
+
+def test_trade_option_dropdowns_show_arrows_and_explain_their_purpose(qapp):
+    window = PoetoreWindow()
+    try:
+        window._set_price_status_layout(compact=True)
+        window.resize(740, window.height())
+        window.show()
+        qapp.processEvents()
+        memory = window.remember_trade_options_checkbox
+        assert memory.text() == "出品条件を記憶"
+        assert memory.toolTip() == "チェックを入れると取引方式・出品通貨・出品期間を記憶します。"
+        assert memory.geometry().center().y() == window.price_button.geometry().center().y()
+        assert window.listed_within_combo.toolTip() == "出品からの経過期間で絞り込みます。"
+
+        for combo, name in (
+            (window.trade_status_combo, "取引方式"),
+            (window.trade_currency_combo, "出品通貨"),
+            (window.listed_within_combo, "出品からの経過期間"),
+        ):
+            assert combo.accessibleName() == name
+            option = QStyleOptionComboBox()
+            combo.initStyleOption(option)
+            style = combo.style()
+            arrow = style.subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, combo)
+            field = style.subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxEditField, combo)
+            assert not arrow.intersects(field)
+            assert field.width() >= combo.fontMetrics().horizontalAdvance(combo.currentText())
+            with_arrow = combo.grab(arrow).toImage()
+            with patch.object(combo, "arrow_icon", QIcon()):
+                assert combo.grab(arrow).toImage() != with_arrow
+            QTest.mouseClick(combo, Qt.LeftButton, pos=arrow.center())
+            assert combo.view().isVisible()
+            for index in range(combo.count()):
+                item = combo.model().index(index, combo.modelColumn())
+                assert combo.view().sizeHintForIndex(item).width() <= combo.view().viewport().width()
+            combo.hidePopup()
     finally:
         window.close()
 

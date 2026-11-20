@@ -18,7 +18,7 @@ from src.ui.appearance import (
     current_appearance, requested_appearance, resolve_tokens,
 )
 from src.ui.dialog_theme import UI_METRICS, icon_button_stylesheet
-from src.ui.toolbar_icons import chevron_down_icon, reload_icon
+from src.ui.toolbar_icons import chevron_icon, reload_icon
 from src.update.release_client import ReleaseInfo
 from tests.poetore_ui_scenarios import build_scenario, offline_ui, settle
 from tests.test_theme_contrast_audit import contrast
@@ -272,7 +272,7 @@ def test_trade_title_bar_uses_theme_ink_and_anchors_tooltips_above_buttons(qapp,
     window.move(0, 80)
     qapp.processEvents()
     ink = resolve_tokens({"preset": "tokyo_night"}, "poetore").muted_text
-    for button, initial, icon in zip(buttons, initial_icons, (chevron_down_icon, reload_icon)):
+    for button, initial, icon in zip(buttons, initial_icons, (chevron_icon, reload_icon)):
         image = button.icon().pixmap(button.iconSize()).toImage()
         assert image != initial
         assert image == icon(ink).pixmap(button.iconSize()).toImage()
@@ -989,7 +989,7 @@ def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
         assert_peers(window.trade_preset_combo._buttons)
         assert_peers([window.league_popup_button, window.league_refresh_button, window.poetore_close_button])
         assert_peers([window.mod_conditions_toggle, window.clear_mod_conditions_button,
-                      window.hidden_mods_toggle, window.mod_sources_toggle])
+                      window.hidden_mods_toggle, window.mod_sources_toggle], width=False)
         assert_peers([window.price_button, window.trade_status_combo,
                       window.trade_currency_combo, window.listed_within_combo], width=False)
         window.set_obs_streaming_mode(True)
@@ -1228,12 +1228,17 @@ def test_trade_large_font_conditions_wrap_with_right_margin(qapp, tmp_path, vers
 def test_trade_large_font_fits_small_screen_and_all_controls_remain_reachable(
     qapp, tmp_path, version, profile, available,
 ):
+    from src.poetore.poe_ninja import PoeNinjaPrice
     from src.poetore.window_position import PlacementContext
 
     apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
     window = build_scenario("trade", tmp_path, version)
     window._app_config.setdefault("poetore", {})["result_font_size"] = profile
     window.apply_result_display_size()
+    window._show_poe_ninja_price(
+        window._poe_ninja_item_key,
+        PoeNinjaPrice("Sample", None, 100, (80, 90, 100), "https://example.invalid/ninja"),
+    )
     context = PlacementContext(available, available.bottomRight())
     window.show_at_context(context, activate=False)
     settle(qapp, window)
@@ -1241,7 +1246,8 @@ def test_trade_large_font_fits_small_screen_and_all_controls_remain_reachable(
     scroll = window._content_scroll
     assert scroll.horizontalScrollBar().maximum() == 0
     assert scroll.verticalScrollBar().maximum() > 0
-    for control in (window.item_header, window.mod_conditions_toggle, window.price_button,
+    for control in (window.item_header, window.poe_ninja_open_button,
+                    window.mod_conditions_toggle, window.price_button,
                     window.remember_trade_options_checkbox, window.trade_url_button, window.price_list):
         scroll.ensureWidgetVisible(control, 0, 0)
         qapp.processEvents()

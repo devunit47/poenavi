@@ -398,7 +398,7 @@ def test_window_inventory_is_complete():
     # window/component classes must be explicitly assigned to a generating
     # scenario, rather than disappearing from a hand-written factory list.
     embedded = {
-        "_UniqueRollSlider", "_BinaryToggle", "_ElidedScopeButton", "_CycleButton", "_AreaSegmentedControl",
+        "_ModFilterTree", "_UniqueRollSlider", "_BinaryToggle", "_ElidedScopeButton", "_CycleButton", "_AreaSegmentedControl",
         "_NumericFilterChip", "_RequiredNumericFilterChip", "_SparklineWidget", "_PoetoreTitleBar",
         "AppearanceSettingsWidget", "AppInfoWidget", "CustomCommandSettingsWidget",
         "ElidedLabel", "RateValueLabel", "CustomExchangeRatePanel", "_RateDeleteButton",

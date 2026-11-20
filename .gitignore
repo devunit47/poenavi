@@ -10,6 +10,10 @@ PoENavi.zip
 PoENavi.zip.sha256
 *.spec
 
+# .NET build output
+tools/ExpeditionWindowsOcr/bin/
+tools/ExpeditionWindowsOcr/obj/
+
 # User data (generated at runtime)
 .env
 .env.*

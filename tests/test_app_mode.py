@@ -279,6 +279,7 @@ class AppModeTest(unittest.TestCase):
         single_instance = MagicMock()
         single_instance.start.return_value = True
         with patch.object(main, "QApplication", return_value=app), \
+             patch.object(main, "apply_bundled_ui_font") as apply_font, \
              patch.object(main, "SingleInstanceGuard", return_value=single_instance), \
              patch.object(main.ConfigManager, "load_config", side_effect=load_config), \
              patch.object(main, "select_startup_options", side_effect=select_startup), \
@@ -296,6 +297,7 @@ class AppModeTest(unittest.TestCase):
             events,
             ["load_config", "update_gate", "load_config", "select_startup"],
         )
+        apply_font.assert_called_once_with(app)
         app.setProperty.assert_any_call("startupUpdateChecked", True)
         app.setProperty.assert_any_call("startupPoeVersionSelected", True)
         app.setProperty.assert_any_call("appMode", POENAVI_MODE)
@@ -308,6 +310,7 @@ class AppModeTest(unittest.TestCase):
         single_instance.start.return_value = False
 
         with patch.object(main, "QApplication", return_value=app), \
+             patch.object(main, "apply_bundled_ui_font"), \
              patch.object(main, "SingleInstanceGuard", return_value=single_instance), \
              patch.object(main.QMessageBox, "information") as information, \
              patch.object(main.ConfigManager, "load_config") as load_config:

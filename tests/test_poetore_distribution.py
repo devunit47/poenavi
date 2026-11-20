@@ -42,7 +42,7 @@ def test_poetore_distribution_contains_only_minimal_derived_data():
         "exact", "local", "decimal", "tiers", "options",
     }
     assert all(
-        required <= set(row) <= required | {"category_select"}
+        required <= set(row) <= required | {"category_select", "english", "english_negated"}
         for row in payload["mods"]
     )
     assert all(isinstance(row["negated"], bool) for row in payload["mods"])

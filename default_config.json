@@ -78,6 +78,7 @@
             }
         },
         "result_font_size": "medium",
+        "english_mod_matching": true,
         "capture_error_notification_enabled": false,
         "hideout_notification": {
             "duration_seconds": 60,

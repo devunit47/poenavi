@@ -53,6 +53,53 @@ def _trade_entries(payload: dict) -> dict[tuple[str, str], dict]:
     }
 
 
+def add_english_matchers(payload: dict, awakened_lines: Iterable[str]) -> None:
+    """固定済みAwakenedのTrade IDで、既存のModへ英語文型を追加する。"""
+    matchers: dict[tuple[str, str], set[tuple[str, bool]]] = {}
+    options: dict[tuple[str, str, str], set[str]] = {}
+    for stat in _awakened_stats(awakened_lines):
+        for kind, ids in (stat.get("trade") or {}).get("ids", {}).items():
+            for stat_id in ids:
+                base_id, _, option_id = stat_id.partition("|")
+                for matcher in stat.get("matchers", ()):
+                    template = matcher.get("string", "").strip()
+                    if not template:
+                        continue
+                    value = matcher.get("value", option_id)
+                    if value != "":
+                        options.setdefault((kind, base_id, str(value)), set()).add(template)
+                    if "value" not in matcher:
+                        # 合成ID自体がModとして存在する場合もある。
+                        matches = matchers.setdefault((kind, stat_id), set())
+                        negated = bool(matcher.get("negate", False))
+                        # 同じ文型に相反する符号がある場合は両方残して実行時に曖昧扱いする。
+                        matches.add((template, negated))
+
+    compatibility_options = {
+        (row["kind"], f"{row['stat_id']}|{option['value']}")
+        for row in payload["mods"] for option in row["options"]
+        if (row["kind"], row["stat_id"], str(option["value"])) in options
+    }
+    for row in payload["mods"]:
+        key = (row["kind"], row["stat_id"])
+        # 個別IDが同梱されていても、既存のbase stat＋optionを優先する。
+        matches = () if key in compatibility_options else matchers.get(key, ())
+        ref_template = row["ref"].replace("+#", "#")
+        for field, negated in (("english", False), ("english_negated", True)):
+            templates = sorted(template for template, negate in matches if negate == negated)
+            row.pop(field, None)
+            if templates:
+                # nullは同じ文型のrefを再利用し、同梱データの重複を避ける。
+                row[field] = list(dict.fromkeys(
+                    None if template.replace("+#", "#") == ref_template else template
+                    for template in templates
+                ))
+        for option in row["options"]:
+            templates = options.get((*key, str(option["value"])), ())
+            if not option.get("english") and len(templates) == 1:
+                option["english"] = next(iter(templates))
+
+
 def _ref_matcher_negated(stat: dict) -> bool:
     """refと同じ表示文のAwakened matcher.negateを返す。"""
     ref = normalize_stat_text(str(stat.get("ref", "")))

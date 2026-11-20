@@ -2,7 +2,7 @@
 
 ## 目的と境界
 
-PoE 1の武器・防具・装飾品について、日本語コピー文を共通Mod定義とTrade API stat IDへ
+PoE 1の武器・防具・装飾品について、日英のコピー文を共通Mod定義とTrade API stat IDへ
 対応付ける。アプリにはRePoEの全データを同梱せず、検索に必要な項目だけへ変換した
 `data/poetore/mod_metadata.json`を同梱する。
 
@@ -17,8 +17,8 @@ PoE 1の武器・防具・装飾品について、日本語コピー文を共通
 - 日本語公式Trade API: 検索可能なstat IDと日本語matcher。Mod基盤の骨格
 - 日本語補完台帳 (`scripts/poetore-japanese-overrides.json`): 公式日本語APIの既知の
   翻訳欠落だけを、確認済みの旧日本語文面で補完
-- Awakened PoE Trade: 独自台帳との比較監査、防具ベース、Gem、Unique固定Mod、関連品。
-  Mod基盤の生成入力には使わない
+- Awakened PoE Trade: 既存Trade stat IDに追加する英語文型、独自台帳との比較監査、
+  防具ベース、Gem、Unique固定Mod、関連品
 
 生成物には各取得元URL、Awakenedのcommit、取得内容のSHA-256を記録する。
 `scripts/poetore-sources.lock.json`を開発時の入力正本とし、通常の再生成では取得内容が
@@ -40,10 +40,17 @@ PYTHONPATH=. python scripts/build_poetore_metadata.py
 - 前回確認済みの公式Stat一覧との差分（追加・削除・日本語文面変更）
 
 Awakened本家が取得不能でも、Mod基盤は次の経路で更新できる。この場合、既存の
-防具ベース・Gem・Unique・関連品の派生情報は保持し、Awakened比較監査だけを省略する。
+防具ベース・Gem・Unique・関連品と、既存stat IDの英語文型を保持し、Awakened比較監査を省略する。
 
 ```bash
 PYTHONPATH=. python scripts/build_poetore_metadata.py --official-mods-only
+```
+
+既存の日本語文型やTierを保持し、固定済みAwakened statsから英語文型だけを再生成できる。
+この経路でも入力ハッシュ、索引の整合性、候補を使ったpytestを検査する。
+
+```bash
+PYTHONPATH=. python scripts/build_poetore_metadata.py --english-matchers-only --apply
 ```
 
 独自判断台帳は通常の更新で自動上書きしない。初回分離に使った
@@ -79,6 +86,7 @@ PYTHONPATH=. python scripts/build_poetore_metadata.py --refresh-lock --apply
 
 - 共通Mod: `ref`, `stat_id`, `kind`, `better`, `inverted`, `exact`, `local`
 - 日本語matcher: `japanese`
+- 英語matcher: `english`、符号反転を伴う `english_negated`。配列内の `null` は `ref` と同じ文型を示す
 - Tier: `tier`, `minimum`, `maximum`, `required_level`, `generation`, `mod_id`
 - 防具ベース: `base_armour`配下の英語ベースタイプと`ar`／`ev`／`es`／`ward`の最小・最大値
 - 未鑑定Unique候補: `unique_icons`配下の英語Unique名とPoE公式CDNアイコンURL
@@ -86,6 +94,9 @@ PYTHONPATH=. python scripts/build_poetore_metadata.py --refresh-lock --apply
 
 一致が一意なら確度1.0、同一日本語表記に複数候補があれば0.75、未解決は0.0とする。
 未解決値を正本へ推測で書かず、従来の公式Trade API照合へフォールバックする。
+
+英語文型は設定の「英語Modの照合」が有効なとき、日本語の文型・別表記の照合後に使う。
+英語の候補がカテゴリやModの生成情報を使っても複数残る場合、stat IDは未解決とする。
 
 ## 数値検索
 

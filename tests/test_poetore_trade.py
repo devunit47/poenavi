@@ -3107,7 +3107,7 @@ Item Level: 70
 --------
 +40(30-50) to maximum Life
 +10% to Fire Resistance
-""")
+""", english_mod_matching=False)
     entries = (
         {"id": "explicit.life", "text": "+# to maximum Life", "type": "explicit"},
         {"id": "explicit.fire", "text": "+#% to Fire Resistance", "type": "explicit"},

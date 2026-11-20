@@ -152,7 +152,7 @@ def test_surface_override_covers_panels_and_controls():
     assert dialog_theme_for_mode("poenavi").control == "#203040"
 
 
-def test_startup_selects_installed_font_and_falls_back_for_missing_font(qapp):
+def test_startup_selects_installed_font_and_falls_back_for_missing_font(qapp, isolated_bundled_font):
     from src.app_font import apply_bundled_ui_font
 
     apply_bundled_ui_font(qapp)

@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from src.poetore.metadata_builder import (
+    add_english_matchers,
     apply_japanese_trade_overrides,
     audit_awakened_stat_rules,
     build_official_index,
@@ -74,6 +75,21 @@ def _run_regression_tests(candidate: Path) -> None:
         subprocess.run(command, check=True, env=command_env)
 
 
+def _test_and_publish(candidate_bytes: bytes, output: Path, apply: bool) -> None:
+    candidate_path = output.with_name(f".{output.name}.candidate")
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_path.write_bytes(candidate_bytes)
+    try:
+        _run_regression_tests(candidate_path)
+        if apply:
+            candidate_path.replace(output)
+        else:
+            print("dry-run complete;正本は変更していません（反映には --apply）")
+    finally:
+        if candidate_path.exists():
+            candidate_path.unlink()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ぽえとれ用Modメタデータを安全に検証・生成")
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
@@ -97,13 +113,18 @@ def main() -> int:
         "--allow-large-removal", action="store_true",
         help="10%%超または100件超の削除をレビュー済みとして許可する",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--related-items-only", action="store_true",
         help="固定済みAwakened items/item-dropだけから関連品定義を更新する",
     )
-    parser.add_argument(
+    modes.add_argument(
         "--official-mods-only", action="store_true",
         help="Awakenedを取得せず、公式Trade＋RePoE＋独自台帳だけでMod基盤を更新する",
+    )
+    modes.add_argument(
+        "--english-matchers-only", action="store_true",
+        help="固定済みAwakened statsから既存Modの英語matcherだけを更新する",
     )
     args = parser.parse_args()
     lock = _load_json(args.lock)
@@ -114,6 +135,22 @@ def main() -> int:
     }
     if set(source_rows) != required:
         raise SystemExit(f"source lock keys mismatch: expected={sorted(required)} actual={sorted(source_rows)}")
+
+    if args.english_matchers_only:
+        source = source_rows["awakened_poe_trade"]
+        blob = _get(source["url"])
+        if hashlib.sha256(blob).hexdigest() != source["sha256"]:
+            raise SystemExit("locked source hash changed: awakened_poe_trade")
+        payload = _load_json(args.output)
+        add_english_matchers(payload, blob.decode("utf-8").splitlines())
+        payload["sources"]["awakened_poe_trade"] = source
+        integrity = validate_minimal_index(payload)
+        if integrity["errors"]:
+            raise SystemExit("candidate rejected: " + "; ".join(integrity["errors"]))
+        candidate_bytes = _serialized(payload)
+        print(f"candidate records={integrity['record_count']} size={len(candidate_bytes)}")
+        _test_and_publish(candidate_bytes, args.output, args.apply)
+        return 0
 
     if args.related_items_only:
         if not args.apply:
@@ -214,6 +251,19 @@ def main() -> int:
             "unique_disenchant_values", "related_item_groups",
         ):
             candidate[field] = previous.get(field, candidate.get(field))
+        previous_mods = {(row["kind"], row["stat_id"]): row for row in previous["mods"]}
+        for row in candidate["mods"]:
+            old = previous_mods.get((row["kind"], row["stat_id"]), {})
+            for field in ("english", "english_negated"):
+                if field in old:
+                    row[field] = old[field]
+            english_options = {str(option["value"]): option["english"]
+                               for option in old.get("options", ()) if option.get("english")}
+            for option in row["options"]:
+                if not option.get("english") and str(option["value"]) in english_options:
+                    option["english"] = english_options[str(option["value"])]
+    else:
+        add_english_matchers(candidate, awakened)
     integrity = validate_minimal_index(candidate)
     differences = diff_minimal_indexes(previous, candidate)
     unresolved = unresolved_trade_entries(candidate, jp_trade)
@@ -253,27 +303,17 @@ def main() -> int:
     if failures:
         raise SystemExit("candidate rejected: " + "; ".join(failures))
 
-    candidate_path = args.output.with_name(f".{args.output.name}.candidate")
-    candidate_path.parent.mkdir(parents=True, exist_ok=True)
-    candidate_path.write_bytes(candidate_bytes)
-    try:
-        _run_regression_tests(candidate_path)
-        if args.apply:
-            candidate_path.replace(args.output)
-            if args.refresh_lock:
-                args.lock.write_text(
-                    json.dumps(effective_lock, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-                )
-                args.official_baseline.write_text(
-                    json.dumps(official_snapshot, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-            print(f"applied {integrity['record_count']} records atomically: {args.output}")
-        else:
-            print("dry-run complete;正本は変更していません（反映には --apply）")
-    finally:
-        if candidate_path.exists():
-            candidate_path.unlink()
+    _test_and_publish(candidate_bytes, args.output, args.apply)
+    if args.apply:
+        if args.refresh_lock:
+            args.lock.write_text(
+                json.dumps(effective_lock, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            args.official_baseline.write_text(
+                json.dumps(official_snapshot, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        print(f"applied {integrity['record_count']} records atomically: {args.output}")
     return 0
 
 

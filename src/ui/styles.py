@@ -127,7 +127,7 @@ class _Styles:
 
     @staticmethod
     def apply_checkbox_style(
-        checkbox, checked_color="#4488ff", *, match_native_indicator=False,
+        checkbox, checked_color="#4488ff", *, match_native_indicator=False, indicator_only=False,
     ):
         """Apply checkbox style with a proper checkmark icon."""
         from PySide6.QtCore import QSize, Qt
@@ -179,15 +179,14 @@ class _Styles:
             painter.drawLine(7, 13, 14, 5)
         painter.end()
 
-        # Unchecked pixmap (transparent with border - handled by stylesheet)
-        unchecked = QPixmap(indicator_width, indicator_height)
-        unchecked.fill(QColor(0, 0, 0, 0))
-
-        icon = QIcon()
-        icon.addPixmap(pixmap, QIcon.Normal, QIcon.On)
-        icon.addPixmap(unchecked, QIcon.Normal, QIcon.Off)
-        checkbox.setIcon(icon)
-        checkbox.setIconSize(QSize(0, 0))  # Hide icon, we use it only for indicator
+        if not indicator_only:
+            unchecked = QPixmap(indicator_width, indicator_height)
+            unchecked.fill(Qt.transparent)
+            icon = QIcon()
+            icon.addPixmap(pixmap, QIcon.Normal, QIcon.On)
+            icon.addPixmap(unchecked, QIcon.Normal, QIcon.Off)
+            checkbox.setIcon(icon)
+            checkbox.setIconSize(QSize(0, 0))
 
         # Use stylesheet with image approach
         import os
@@ -205,10 +204,12 @@ class _Styles:
         )
         pixmap.save(check_path)
 
-        checkbox.setStyleSheet(f"""
+        label_style = "" if indicator_only else f"""
             QCheckBox {{
                 color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(12)}px; spacing: 8px;
             }}
+        """
+        checkbox.setStyleSheet(label_style + f"""
             QCheckBox::indicator {{
                 width: {indicator_width}px; height: {indicator_height}px;
                 border: {border_width}px solid {theme_color('border', '#888888')};

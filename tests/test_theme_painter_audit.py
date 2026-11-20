@@ -241,10 +241,27 @@ def test_scope_button_painted_text_fits(qapp):
     assert not (failures := inspect_scope_button(qapp)), "\n".join(failures)
 
 
+def test_fixed_filter_chip_painted_text_fits(qapp):
+    from src.poetore.ui import PoetoreWindow
+
+    window = PoetoreWindow()
+    try:
+        chip = window.completion_reward_chip
+        chip.setText("完了報酬：" + "大変長い報酬アイテムの名前" * 5)
+        chip.resize(180, chip.height())
+        chip.ensurePolished()
+        expected = chip.fontMetrics().elidedText(chip.text(), Qt.ElideRight, chip.contentsRect().width())
+        assert expected.endswith("…")
+        assert not (failures := inspect_paint(chip, (expected,))), "\n".join(failures)
+    finally:
+        window.close()
+
+
 # Every custom painter is explicitly accounted for. Adding one requires an
 # inspector, so a new chip/overlay cannot silently escape this audit.
 PAINTERS = {
-    "_ElidedScopeButton": "inspect_scope_button",
+    "_ElidedButton": "inspect_scope_button",
+    "_ReadOnlyFilterChip": "test_fixed_filter_chip_painted_text_fits",
     "_TradeOptionComboBox": "No painter text: draws a chevron over the native combo.",
     "DesecrationTierOverlay": "inspect_desecration",
     "OutlinedLabel": "inspect_ocr_status",

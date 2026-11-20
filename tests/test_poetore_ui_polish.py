@@ -32,6 +32,78 @@ from tests.test_theme_geometry_audit import geometry_failures
 from tests.test_theme_painter_audit import inspect_paint
 
 
+@pytest.mark.parametrize("font_size", [13, 24])
+def test_trade_numeric_chips_fit_their_inputs_at_the_same_height(qapp, tmp_path, font_size):
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": font_size}}})
+    window = build_scenario("trade", tmp_path)
+    chips = (
+        window.item_level_tag, window.gem_level_tag, window.gem_quality_tag,
+        window.gem_socket_tag, window.links_tag, window.map_tier_chip,
+        window.unidentified_tier_chip, window.runemastered_tag,
+    )
+    window.item_level_tag.setValues(100, 100)
+    window.gem_quality_tag.setValues(100)
+    window.unidentified_tier_chip.setValue(99)
+    for chip in chips:
+        chip.show()
+    settle(qapp, window)
+
+    assert len({chip.height() for chip in chips}) == 1
+    minimum = window.item_level_edit
+    assert minimum.width() == window.item_level_max_edit.width() == window.gem_quality_edit.width()
+    assert minimum.width() > window.gem_level_edit.width()
+    assert window.gem_level_edit.width() > window.links_edit.width()
+    assert not geometry_failures(window)
+
+    toggle = window.item_level_toggle
+    window.activateWindow()
+    toggle.setFocus()
+    assert toggle.hasFocus()
+    toggle_with_focus = toggle.grab().toImage()
+    QTest.keyClick(toggle, Qt.Key_Tab)
+    assert minimum.hasFocus()
+    assert toggle.grab().toImage() != toggle_with_focus
+    editor_with_focus = minimum.grab().toImage()
+    QTest.keyClick(minimum, Qt.Key_Tab)
+    assert window.item_level_max_edit.hasFocus()
+    assert minimum.grab().toImage() != editor_with_focus
+
+
+def test_trade_fixed_chip_elides_at_flow_width(qapp, tmp_path):
+    window = build_scenario("trade", tmp_path)
+    chip = window.completion_reward_chip
+    text = "完了報酬：" + "長い名前のアイテム" * 12
+    chip.setText(text)
+    chip.show()
+    window.filter_chip_layout.setGeometry(QRect(0, 0, 190, 100))
+
+    assert chip.width() <= 190
+    assert chip._display_text(chip.contentsRect().width()).endswith("…")
+    assert chip.text() == chip.toolTip() == text
+
+
+def test_trade_logbook_areas_fit_the_narrow_panel(qapp, tmp_path):
+    from src.poetore.window_position import PlacementContext
+
+    apply_application_appearance(qapp, {"appearance": {"overrides": {"base_font_size": 24}}})
+    window = build_scenario("trade", tmp_path, "poe1")
+    selector = window.logbook_area_selector
+    labels = tuple(f"エリア{index}：断たれた円環のドルイド" for index in range(1, 6))
+    selector.setLabels(labels)
+    window.logbook_area_container.show()
+    available = QRect(0, 0, 800, 600)
+    window.show_at_context(PlacementContext(available, available.center()), activate=False)
+    settle(qapp, window)
+
+    viewport = window._content_scroll.viewport()
+    for button, label in zip(selector._buttons, labels):
+        top_left = button.mapTo(window, QPoint()) - viewport.mapTo(window, QPoint())
+        assert 0 <= top_left.x() <= viewport.width() - button.width()
+        assert button.toolTip() == label
+    selector._buttons[-1].click()
+    assert selector._buttons[-1].isChecked()
+
+
 @pytest.fixture(autouse=True)
 def isolated_ui(qapp):
     screens = qapp.screens()
@@ -1368,7 +1440,7 @@ def test_trade_narrow_large_font_prioritizes_mod_names_and_keeps_range_on_tab_ro
         assert row.toolTip(1) in ("プレフィックス", "サフィックス")
         assert row.toolTip(3) == row.text(3)
     assert window.search_range_combo.mapTo(window, QPoint()).y() == window.trade_preset_combo.mapTo(window, QPoint()).y()
-    assert "Mod数値：-10%まで許容" in window.search_range_combo.toolTip()
+    assert "Mod数値：−10%まで" in window.search_range_combo.toolTip()
     assert window.search_range_combo.currentData() == 10
 
 
@@ -1431,7 +1503,7 @@ def test_trade_narrow_mod_name_wraps_before_eliding_and_restores_on_widening(qap
     if repeat == 1:
         assert tree.columnWidth(3) - 12 >= metrics.horizontalAdvance(text)
         assert tree.visualItemRect(row).height() == window._mod_row_height()
-    assert window.search_range_combo.currentText() == "Mod数値：-10%まで許容"
+    assert window.search_range_combo.currentText() == "Mod数値：−10%まで"
 
 
 @pytest.mark.parametrize("version", ["poe1", "poe2"])
@@ -1447,7 +1519,7 @@ def test_trade_default_font_keeps_full_labels_and_single_line_rows(qapp, tmp_pat
     assert tree.topLevelItem(1).text(1) == "サフィックス"
     assert tree.columnWidth(2) == window._scaled_display_value(62)
     assert tree.visualItemRect(tree.topLevelItem(0)).height() == window._mod_row_height()
-    assert window.search_range_combo.currentText() == "Mod数値：-10%まで許容"
+    assert window.search_range_combo.currentText() == "Mod数値：−10%まで"
 
 
 @pytest.mark.parametrize("version", ["poe1", "poe2"])

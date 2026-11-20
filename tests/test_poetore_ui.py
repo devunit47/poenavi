@@ -3640,8 +3640,8 @@ def test_poetore_search_range_is_persisted(qapp):
     window = PoetoreWindow(app_config=config, save_config=saved)
     try:
         assert window.search_range_combo.currentData() == 20
-        assert window.search_range_combo.currentText() == "Mod数値：-20%まで許容"
-        assert "読取値100・-10%まで許容 → 最小値90で検索" in (
+        assert window.search_range_combo.currentText() == "Mod数値：−20%まで"
+        assert "読取値100・−10%まで → 最小値90で検索" in (
             window.search_range_combo.toolTip()
         )
         window.search_range_combo.setCurrentIndex(
@@ -3994,7 +3994,7 @@ def test_price_result_is_rendered_in_japanese(qapp):
         "剣", "レア", "Doom Sever", "Reaver Sword", "weapon", item_level=86,
     )
     window.item_level_tag.show()
-    window._set_item_level_filter_enabled(True)
+    window.item_level_tag.setActive(True)
     window.item_level_edit.setText("86")
     window._show_price_result(PriceResult("Mirage", "q", 42, (
         PriceListing(4, "chaos", "seller1", "Doom Sever", "Reaver Sword",
@@ -5573,7 +5573,7 @@ def test_mod_condition_checks_toggle_all_without_changing_item_level(qapp):
         window._populate_stat_filters(filters)
         window.item_level_tag.show()
         window.item_level_edit.setText("84")
-        window._set_item_level_filter_enabled(True)
+        window.item_level_tag.setActive(True)
 
         assert window.clear_mod_conditions_button.text() == "一括解除"
         assert window.clear_mod_conditions_button.toolTip() == (
@@ -5600,7 +5600,7 @@ def test_mod_condition_checks_toggle_all_without_changing_item_level(qapp):
         assert [row.enabled for row in window._selected_stat_filters()] == [False, False]
         assert window.clear_mod_conditions_button.text() == "一括選択"
         assert window._selected_item_level() == 84
-        assert window._item_level_filter_enabled
+        assert window.item_level_tag.isActive()
 
         window.clear_mod_conditions_button.click()
 
@@ -6199,7 +6199,7 @@ def test_localized_blighted_map_shows_readonly_map_area_as_first_condition(qapp)
         assert window.item_name_label.text() == "ブライトに覆われたマップ (ティア 3)"
         assert not window.map_area_chip.isHidden()
         assert window.map_area_chip.text() == "マップ：熱帯の島"
-        assert not window.map_area_chip.isEnabled()
+        assert isinstance(window.map_area_chip, QLabel)
         visible_names = tuple(
             name for name, chip in window._filter_chips if not chip.isHidden()
         )
@@ -6445,6 +6445,26 @@ def test_unidentified_unique_candidates_can_be_selected(qapp):
         assert buttons[1].isChecked()
         assert not buttons[0].isChecked()
         assert "2種類" in window.price_status.text()
+    finally:
+        window.close()
+
+
+def test_unique_candidate_cards_keep_their_geometry_on_selection(qapp):
+    window = PoetoreWindow()
+    try:
+        name = "とても長い未鑑定ユニーク候補の名前" * 4
+        window._show_unique_candidates(("The First", name))
+        window.show()
+        qapp.processEvents()
+        first, second = window.unique_name_group.buttons()
+        geometry = [(button.geometry(), button.sizeHint()) for button in (first, second)]
+        assert second.width() < second.fontMetrics().horizontalAdvance(name)
+        assert second.toolTip() == name
+
+        second.click()
+        qapp.processEvents()
+        assert second.isChecked()
+        assert [(button.geometry(), button.sizeHint()) for button in (first, second)] == geometry
     finally:
         window.close()
 
@@ -6723,14 +6743,14 @@ def test_split_filter_is_an_awakened_style_cycle_button(qapp):
     try:
         toggle = window.split_combo
         assert toggle.property("active") is True
-        assert toggle.currentText() == "スプリット品含む"
+        assert toggle.currentText() == "スプリットを含む"
         assert toggle.currentData() is True
         toggle.click()
-        assert toggle.currentText() == "非スプリット"
+        assert toggle.currentText() == "スプリットを除外"
         assert toggle.currentData() is False
         assert toggle.property("active") is True
         toggle.click()
-        assert toggle.currentText() == "スプリット品含む"
+        assert toggle.currentText() == "スプリットを含む"
     finally:
         window.close()
 
@@ -6740,15 +6760,17 @@ def test_item_state_cycle_buttons_use_clear_search_condition_labels(qapp):
     try:
         expected_labels = {
             "unidentified_chip": ("未鑑定のみ", "未鑑定を含む"),
-            "veiled_chip": ("同一Veiled Modあり", "Veiled指定なし"),
-            "foil_chip": ("Foil Unique", "通常Unique"),
-            "mirrored_combo": ("ミラー品含む", "ミラー品を除外"),
-            "sanctified_combo": ("聖別品のみ", "非聖別品のみ", "聖別品含む"),
-            "split_combo": ("スプリット品含む", "非スプリット"),
+            "veiled_chip": ("同一Veiled Modのみ", "Veiledを含む"),
+            "foil_chip": ("Foil Uniqueのみ", "Foil Uniqueを除外"),
+            "mirrored_combo": ("ミラーを含む", "ミラーを除外"),
+            "sanctified_combo": ("聖別化のみ", "聖別化を除外", "聖別化を含む"),
+            "split_combo": ("スプリットを含む", "スプリットを除外"),
         }
         for name, labels in expected_labels.items():
             toggle = getattr(window, name)
             assert tuple(toggle.itemText(index) for index in range(toggle.count())) == labels
+            assert not toggle.icon().isNull()
+            assert " → ".join((*labels, labels[0])) in toggle.toolTip()
     finally:
         window.close()
 
@@ -6758,17 +6780,23 @@ def test_corruption_filter_is_a_three_state_cycle_button(qapp):
     try:
         toggle = window.corrupted_combo
         assert toggle.count() == 3
-        assert toggle.currentText() == "非コラプトのみ"
+        from src.ui.appearance import theme_color
+        from src.ui.toolbar_icons import cycle_icon, reload_icon
+        icon_size = toggle.iconSize()
+        ink = theme_color("text", "#E6ECEA")
+        assert toggle.icon().pixmap(icon_size).toImage() == cycle_icon(ink).pixmap(icon_size).toImage()
+        assert toggle.icon().pixmap(icon_size).toImage() != reload_icon(ink).pixmap(icon_size).toImage()
+        assert toggle.currentText() == "コラプトを除外"
         assert toggle.currentData() is False
         toggle.click()
-        assert toggle.currentText() == "コラプト品含む"
+        assert toggle.currentText() == "コラプトを含む"
         assert toggle.currentData() is True
         toggle.click()
         assert toggle.currentText() == "コラプトのみ"
         assert toggle.currentData() == "only"
         assert toggle.property("alert") is True
         toggle.click()
-        assert toggle.currentText() == "非コラプトのみ"
+        assert toggle.currentText() == "コラプトを除外"
         assert toggle.property("alert") is False
     finally:
         window.close()
@@ -7018,7 +7046,7 @@ Item Level: 75
         assert window.rarity_condition_chip.isHidden()
         assert not window.magic_rarity_toggle.isHidden()
         assert window.magic_rarity_toggle.itemText(0) == "非ユニーク"
-        assert window.magic_rarity_toggle.currentText() == "マジック完全一致"
+        assert window.magic_rarity_toggle.currentText() == "マジックのみ"
 
         window.magic_rarity_toggle.setCurrentIndex(0)
         assert window.magic_rarity_toggle.currentData() is False
@@ -7364,11 +7392,11 @@ Split
 """)
         window._configure_item_state_filters(item)
         assert window.corrupted_combo.itemText(0) == "コラプトのみ"
-        assert window.corrupted_combo.itemText(1) == "非コラプトのみ"
-        assert window.corrupted_combo.itemText(2) == "コラプト品含む"
+        assert window.corrupted_combo.itemText(1) == "コラプトを除外"
+        assert window.corrupted_combo.itemText(2) == "コラプトを含む"
         assert window.corrupted_combo.currentData() is False
-        assert window.split_combo.itemText(0) == "スプリット品含む"
-        assert window.split_combo.itemText(1) == "非スプリット"
+        assert window.split_combo.itemText(0) == "スプリットを含む"
+        assert window.split_combo.itemText(1) == "スプリットを除外"
         assert window.split_combo.currentData() is True
         assert not window.split_combo.isHidden()
         assert not isinstance(window.corrupted_combo, QComboBox)
@@ -7479,10 +7507,10 @@ Mirrored
 """)
         window._configure_item_state_filters(mirrored)
         assert not window.mirrored_combo.isHidden()
-        assert window.mirrored_combo.currentText() == "ミラー品含む"
+        assert window.mirrored_combo.currentText() == "ミラーを含む"
         assert window.mirrored_combo.currentData() is True
         window.mirrored_combo.click()
-        assert window.mirrored_combo.currentText() == "ミラー品を除外"
+        assert window.mirrored_combo.currentText() == "ミラーを除外"
         assert window.mirrored_combo.currentData() is False
 
         plain = replace(mirrored, raw_text="plain", flags=())
@@ -7510,17 +7538,17 @@ def test_poe2_sanctified_chip_is_three_state_without_warning_color(qapp):
 
         toggle = window.sanctified_combo
         assert not toggle.isHidden()
-        assert toggle.currentText() == "聖別品のみ"
+        assert toggle.currentText() == "聖別化のみ"
         assert toggle.currentData() == "only"
         assert toggle.property("alert") is False
 
         toggle.click()
-        assert toggle.currentText() == "非聖別品のみ"
+        assert toggle.currentText() == "聖別化を除外"
         assert toggle.currentData() is False
         assert toggle.property("alert") is False
 
         toggle.click()
-        assert toggle.currentText() == "聖別品含む"
+        assert toggle.currentText() == "聖別化を含む"
         assert toggle.currentData() is True
         assert toggle.property("alert") is False
 
@@ -7562,7 +7590,7 @@ Penumbra Ring
         assert by_id["explicit.stat_1368271171"].min_value == 48.0
         assert window.mod_warning.isHidden()
         assert not window.mirrored_combo.isHidden()
-        assert window.mirrored_combo.currentText() == "ミラー品含む"
+        assert window.mirrored_combo.currentText() == "ミラーを含む"
     finally:
         window.close()
 
@@ -7699,11 +7727,14 @@ def test_map_and_heist_special_filter_chips(qapp):
 """)
         window._configure_special_filter_chips(map_item)
         assert not window.map_tier_chip.isHidden()
-        assert window.map_tier_chip.width() == 116
         assert window.map_tier_chip.values() == (16.0, None)
         assert window.map_tier_chip.maximum_edit.isHidden()
         assert window.blighted_chip.text() == "ブライトに破壊されたマップ"
-        assert window.completion_reward_chip.text() == "完了報酬: Mageblood"
+        assert window.completion_reward_chip.text() == "完了報酬：Mageblood"
+        for chip in (window.blighted_chip, window.completion_reward_chip):
+            assert isinstance(chip, QLabel)
+            assert chip.focusPolicy() == Qt.NoFocus
+            assert chip.toolTip() == chip.text()
         ids = {row.stat_id: row for row in window._selected_special_chip_filters()}
         assert ids["property.map_tier"].max_value == 16.0
         assert ids["property.map_uberblighted"].enabled
@@ -7745,7 +7776,7 @@ Map (Tier 16)
         window._configure_special_filter_chips(nightmare_map)
         assert not window.nightmare_map_chip.isHidden()
         assert window.nightmare_map_chip.text() == "ナイトメア"
-        assert not window.nightmare_map_chip.isEnabled()
+        assert isinstance(window.nightmare_map_chip, QLabel)
         assert window.map_tier_chip.isHidden()
         assert "property.map_tier" not in {
             row.stat_id for row in window._selected_special_chip_filters()
@@ -8015,7 +8046,8 @@ Item Level: 86
         assert window.item_level_edit.validator().top() == 100
         assert window.item_level_tag.parentWidget() is window.filter_chip_container
         assert window._selected_item_level() is None
-        assert window.item_level_toggle.text() == "☐ ilvl："
+        assert window.item_level_toggle.text() == "ilvl："
+        assert not window.item_level_toggle.isChecked()
 
         window.item_level_edit.setText("84")
         window.item_level_toggle.click()
@@ -8023,12 +8055,14 @@ Item Level: 86
         window.item_level_toggle.click()
         assert window._selected_item_level_range() == (None, None)
         assert window.item_level_tag.property("active") is False
-        assert window.item_level_toggle.text() == "☐ ilvl："
+        assert window.item_level_toggle.text() == "ilvl："
+        assert not window.item_level_toggle.isChecked()
         assert window.item_level_edit.font().strikeOut()
         window.item_level_toggle.click()
         assert window._selected_item_level_range() == (84, None)
         assert window.item_level_tag.property("active") is True
-        assert window.item_level_toggle.text() == "☑ ilvl："
+        assert window.item_level_toggle.text() == "ilvl："
+        assert window.item_level_toggle.isChecked()
         assert not window.item_level_edit.font().strikeOut()
 
         window.item_level_toggle.click()
@@ -8755,9 +8789,11 @@ def test_logbook_area_switch_has_dedicated_row_and_fits_long_labels(qapp):
         assert panel_layout.itemAt(area_index - 1).layout() is not None
         assert window.logbook_area_selector.parentWidget() is window.logbook_area_container
         assert window.logbook_area_selector not in window.filter_chip_layout.ordered_widgets()
+        window.show()
+        qapp.processEvents()
         for button in window.logbook_area_selector._buttons:
-            required = button.fontMetrics().horizontalAdvance(button.text()) + 24
-            assert button.minimumWidth() >= required
+            assert button.toolTip() == button.text()
+            assert button.width() >= button.fontMetrics().horizontalAdvance(button.text())
     finally:
         window.close()
 
@@ -8821,7 +8857,8 @@ def test_gem_level_chip_uses_read_level_and_can_be_toggled_and_edited(qapp):
         assert not window.gem_level_tag.isHidden()
         assert window.gem_level_edit.text() == "3"
         assert window._selected_gem_level() == 3
-        assert window.gem_level_toggle.text() == "☑ ジェムLv："
+        assert window.gem_level_toggle.text() == "ジェムLv："
+        assert window.gem_level_toggle.isChecked()
 
         window.gem_level_toggle.click()
         assert window._selected_gem_level() is None
@@ -8852,7 +8889,8 @@ def test_gem_quality_chip_uses_read_quality_and_can_be_toggled_and_edited(qapp):
         assert not window.gem_quality_tag.isHidden()
         assert window.gem_quality_edit.text() == "16"
         assert window._selected_quality() == 16
-        assert window.gem_quality_toggle.text() == "☑ 品質："
+        assert window.gem_quality_toggle.text() == "品質："
+        assert window.gem_quality_toggle.isChecked()
 
         window.gem_quality_toggle.click()
         assert window._selected_quality() is None
@@ -8969,8 +9007,8 @@ def test_poe2_runemastered_chip_defaults_on_and_switches_trade_type(qapp):
         qapp.processEvents()
 
         assert not window.runemastered_tag.isHidden()
+        assert window.runemastered_chip.text() == "ルーンマスター版"
         assert window.runemastered_chip.isChecked()
-        assert window.runemastered_chip.text() == "☑ ルーンマスター"
         assert window.runemastered_tag.parentWidget() is window.filter_chip_container
         chips = [chip for _name, chip in window._filter_chips]
         assert chips.index(window.runemastered_tag) == chips.index(window.gem_quality_tag) + 1
@@ -8982,7 +9020,8 @@ def test_poe2_runemastered_chip_defaults_on_and_switches_trade_type(qapp):
         assert build_poe2_search_query(selected)["query"]["name"] == "Yriel's Fostering"
 
         window.runemastered_chip.setChecked(False)
-        assert window.runemastered_chip.text() == "☐ ルーンマスター"
+        assert window.runemastered_chip.text() == "ルーンマスター版"
+        assert not window.runemastered_chip.isChecked()
         assert window.runemastered_tag.property("active") is False
         selected = window._poe2_search_item(item)
         query = build_poe2_search_query(selected)["query"]
@@ -9246,7 +9285,8 @@ def test_poe2_wombgift_hiveblood_cost_does_not_show_metadata_warning(qapp):
         assert not window.item_level_tag.isHidden()
         assert window.item_level_edit.text() == "80"
         assert window._selected_item_level_range() == (80, None)
-        assert window.item_level_toggle.text() == "☑ ilvl："
+        assert window.item_level_toggle.text() == "ilvl："
+        assert window.item_level_toggle.isChecked()
     finally:
         window.close()
 
@@ -9347,7 +9387,8 @@ def test_poe2_weapon_quality_20_is_visible_but_initially_disabled(qapp):
         assert not window.gem_quality_tag.isHidden()
         assert window.gem_quality_edit.text() == "20"
         assert window._selected_quality() is None
-        assert window.gem_quality_toggle.text() == "☐ 品質："
+        assert window.gem_quality_toggle.text() == "品質："
+        assert not window.gem_quality_toggle.isChecked()
         assert flat.min_value == 28.0
         assert flat.read_value == 32.0
 
@@ -10216,7 +10257,7 @@ def test_gem_variant_is_shown_as_japanese_readonly_chip(qapp, metadata, name, ex
              patch("src.poetore.ui.resolve_trade_stat_filters", return_value=()):
             window._configure_special_filter_chips(item)
         assert window.gem_variant_chip.text() == expected
-        assert window.gem_variant_chip.isEnabled() is False
+        assert isinstance(window.gem_variant_chip, QLabel)
     finally:
         window.close()
 
@@ -10377,9 +10418,9 @@ def test_poe2_waystone_item_rarity_is_visible_and_tablet_copy_has_no_warning(qap
 @pytest.mark.parametrize(
     ("rarity_label", "expected_rarity", "expected_text"),
     (
-        ("ノーマル", "normal", "ノーマル限定"),
-        ("マジック", "magic", "マジック限定"),
-        ("レア", "rare", "レア限定"),
+        ("ノーマル", "normal", "ノーマルのみ"),
+        ("マジック", "magic", "マジックのみ"),
+        ("レア", "rare", "レアのみ"),
     ),
 )
 def test_poe2_nonunique_tablet_toggles_detected_rarity_and_nonunique(
@@ -10415,7 +10456,7 @@ def test_poe2_nonunique_tablet_toggles_detected_rarity_and_nonunique(
         assert window.tablet_rarity_combo.currentText() == expected_text
         window.tablet_rarity_combo.click()
         assert window.tablet_rarity_combo.currentData() == "nonunique"
-        assert window.tablet_rarity_combo.currentText() == "非ユニーク"
+        assert window.tablet_rarity_combo.currentText() == "ユニークを除外"
         window.parse_current_text()
         assert window.tablet_rarity_combo.currentData() == "nonunique"
         assert window.rarity_condition_chip.isHidden()

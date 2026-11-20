@@ -3077,6 +3077,27 @@ def test_aggregated_resistances_keep_exact_read_values_from_item():
     assert exact_rows["pseudo.pseudo_total_chaos_resistance"].min_value == 32.0
 
 
+@pytest.mark.parametrize("ref, stat_id, expected", [
+    ("+#% to all Elemental Resistances", "pseudo.pseudo_total_elemental_resistance",
+     (43, 48, 45, 48, None, ())),
+    ("+#% to Fire and Cold Resistances", "pseudo.pseudo_total_elemental_resistance",
+     (28, 32, 30, 32, None, ())),
+    ("+#% to Fire Resistance", "pseudo.pseudo_total_elemental_resistance",
+     (14, 16, 15, 16, 1, (1,))),
+    ("+# to maximum Life", "pseudo.pseudo_total_life",
+     (14, 16, 15, 16, 1, (1,))),
+])
+def test_single_source_pseudo_only_scales_metadata_for_combined_values(ref, stat_id, expected):
+    item = _pseudo_test_item((ItemModifier(
+        ref.replace("#", "16"), (16,), ref=ref, kind="explicit",
+        affix="suffix", tier=1, roll_min=15, roll_max=16,
+    ),))
+    row = next(row for row in resolve_trade_stat_filters(item) if row.stat_id == stat_id)
+
+    assert (row.min_value, row.read_value, row.roll_min, row.roll_max,
+            row.tier, row.tier_tags) == expected
+
+
 def test_unresolved_modifier_does_not_remove_unrelated_pseudos():
     item = _pseudo_test_item((
         ItemModifier("未解決Mod", (999,), ref=None, stat_id=None),

@@ -3880,7 +3880,8 @@ def _decorate_filters(item: ParsedItem, filters: tuple[TradeStatFilter, ...],
                           if effective_source_ref(modifier)
                           in pseudo_refs.get(row.stat_id, set())]
         property_sources = _property_tier_sources(item, row.stat_id)
-        if source is None and len(pseudo_sources) == 1:
+        single_pseudo_source = source is None and len(pseudo_sources) == 1
+        if single_pseudo_source:
             source = pseudo_sources[0]
         reason = row.selection_reason
         if not reason:
@@ -3908,6 +3909,21 @@ def _decorate_filters(item: ParsedItem, filters: tuple[TradeStatFilter, ...],
             row.min_value if fixed_foulborn else
             source.values[0] if source and source.values else row.read_value
         )
+        roll_min = source.roll_min if source else row.roll_min
+        roll_max = source.roll_max if source else row.roll_max
+        tier = source.tier if source else row.tier
+        scaled_pseudo = False
+        if row.kind == "pseudo" and single_pseudo_source and source.values and source.values[0]:
+            raw_value = source.values[0]
+            contribution = source_contribution(row.stat_id, source)
+            if contribution is not None and contribution != raw_value:
+                multiplier = contribution / raw_value
+                read_value = contribution
+                roll_min = roll_min * multiplier if roll_min is not None else None
+                roll_max = roll_max * multiplier if roll_max is not None else None
+                # The source tier describes the original mod, not the scaled total.
+                tier = None
+                scaled_pseudo = True
         if read_value is None:
             read_value = property_values.get(row.stat_id)
         if read_value is None and row.kind == "pseudo" and row.min_value is not None:
@@ -3950,9 +3966,9 @@ def _decorate_filters(item: ParsedItem, filters: tuple[TradeStatFilter, ...],
         decorated.append(replace(
             row,
             read_value=read_value,
-            tier=source.tier if source else row.tier,
-            roll_min=source.roll_min if source else row.roll_min,
-            roll_max=source.roll_max if source else row.roll_max,
+            tier=tier,
+            roll_min=roll_min,
+            roll_max=roll_max,
             affix=source.affix if source else row.affix,
             generation=("複数Mod集約" if len(pseudo_sources) > 1 else
                         ((source.generation or source.kind) if source else row.generation)),
@@ -3960,7 +3976,7 @@ def _decorate_filters(item: ParsedItem, filters: tuple[TradeStatFilter, ...],
             exact=exact,
             better=source.better if source else row.better,
             decimal=source.decimal if source else row.decimal,
-            tier_tags=(
+            tier_tags=() if scaled_pseudo else (
                 _awakened_tier_tags(property_sources or pseudo_sources or sources)
                 or row.tier_tags
             ),

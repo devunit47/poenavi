@@ -10,6 +10,7 @@ from .metadata import (
     gem_metadata,
     multi_value_rule,
     normalize_stat_text,
+    strip_stat_zero_width,
 )
 from .models import ItemModifier, ParsedItem, apply_roll_increase
 
@@ -258,6 +259,8 @@ _DIRECTIONAL_STAT_ALIASES = {
         "プレイヤーは適用されるフラスコの効果が#%上昇する",
 }
 _STAT_TEXT_ALIASES = {
+    normalize_stat_text("見つかるアイテムのレアリティが#%増加する"): "アイテムレアリティ +#%",
+    normalize_stat_text("近くの敵は焦げ状態になる"): "3m以内の敵は焦げ状態になる",
     # Nightmare Mapは確率100%の一部Modから確率部分を省略して表示する。
     normalize_stat_text("レアモンスターはボラタイルコアを持つ"):
         "レアモンスターは100%の確率でボラタイルコアを持つ",
@@ -291,7 +294,9 @@ _STAT_TEXT_ALIASES = {
     normalize_stat_text("モンスターはスペルによるヒット時に阻害を付与する"):
         "モンスターはスペルによるヒット時に100%の確率で阻害を付与する",
     normalize_stat_text("それぞれのレアモンスターはモッドを追加で#個持つ"):
-        "マップに出現するレアモンスターは追加のモッドを#個持つ",
+        "マップのレアモンスターはモッドを追加で1個持つ",
+    normalize_stat_text("マップに出現するレアモンスターは追加のモッドを#個持つ"):
+        "マップのレアモンスターはモッドを追加で1個持つ",
     normalize_stat_text("モンスターはヒットを受けた時にエンデュランスチャージを1個獲得する"):
         "モンスターはヒットを受けた時に100%の確率でエンデュランスチャージを1個獲得する",
     normalize_stat_text("モンスターの投射物は地形と衝突した時に連鎖することができる"):
@@ -540,7 +545,7 @@ def _normalized_modifier_line(line: str, item_category: str | None = None) -> st
         return None
     if line.strip() in _CATEGORY_HELP_LINES.get(item_category or "", set()):
         return None
-    normalized = _MUTATED_SUFFIX.sub("", line)
+    normalized = _MUTATED_SUFFIX.sub("", strip_stat_zero_width(line))
     normalized = _UNSCALABLE_VALUE_SUFFIX.sub("", normalized).rstrip()
     return normalized or None
 
@@ -1109,6 +1114,10 @@ def parse_item_text(text: str, *, english_mod_matching: bool = True) -> ParsedIt
             metadata_text = (
                 current_header_name if kind == "veiled" and current_header_name else line
             )
+            if current_header_generation == "foulborn" and normalize_stat_text(
+                metadata_text
+            ) == "ソケットされたジェムはレベル#投射物回帰によりサポートされる":
+                metadata_text = "ソケットされたジェムはレベル# 投射物回帰サポートによってサポートされる"
             metadata, option, confidence = metadata_index.match_for_item_category(
                 metadata_text, kind, item_category,
                 current_header_generation if from_header else (

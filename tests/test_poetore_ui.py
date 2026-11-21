@@ -3216,12 +3216,8 @@ def test_foulborn_xoph_uses_mutated_unique_returning_projectiles_stat(qapp):
                 "text": "ソケットされたジェムはレベル#投射物回帰によりサポートされる",
             },
             {
-                "id": "explicit.stat_1549219417", "type": "explicit",
-                "text": "ソケットされたジェムはレベル#投射物回帰によりサポートされる",
-            },
-            {
-                "id": "explicit.stat_52197415", "type": "explicit",
-                "text": "ソケットされたジェムはレベル#投射物回帰によりサポートされる",
+                "id": "explicit.effect_2714845045", "type": "explicit",
+                "text": "ソケットされたジェムはレベル# 投射物回帰サポートによってサポートされる",
             },
         )
         with patch(
@@ -3234,13 +3230,13 @@ def test_foulborn_xoph_uses_mutated_unique_returning_projectiles_stat(qapp):
             modifier for modifier in window._parsed_item.modifiers
             if "投射物回帰" in modifier.text
         )
-        assert parsed.stat_id == "explicit.stat_1549219417"
+        assert parsed.stat_id == "explicit.effect_2714845045"
         selected = [
             row for row in window._selected_stat_filters()
             if "投射物回帰" in row.text
         ]
         assert len(selected) == 1
-        assert selected[0].stat_id == "explicit.stat_1549219417"
+        assert selected[0].stat_id == "explicit.effect_2714845045"
         assert selected[0].min_value == 20
 
         query = build_search_query(
@@ -3251,7 +3247,7 @@ def test_foulborn_xoph_uses_mutated_unique_returning_projectiles_stat(qapp):
             trade_name=window._trade_item_name,
         )["query"]
         assert query["stats"][0]["filters"] == [{
-            "id": "explicit.stat_1549219417",
+            "id": "explicit.effect_2714845045",
             "value": {"min": 20},
         }]
     finally:

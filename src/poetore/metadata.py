@@ -198,7 +198,15 @@ def diff_pseudo_payloads(previous: dict, candidate: dict) -> dict[str, int]:
     }
 
 
+_STAT_ZERO_WIDTH = str.maketrans("", "", "\u200b\u200c\u200d\ufeff")
+
+
+def strip_stat_zero_width(text: str) -> str:
+    return text.translate(_STAT_ZERO_WIDTH)
+
+
 def normalize_stat_text(text: str) -> str:
+    text = strip_stat_zero_width(text)
     text = text.replace("（", "(").replace("）", ")")
     text = _TIMELESS_JEWEL_ADVANCED_RANGE.sub("", text)
     text = re.sub(r"\([^)]*(?:\d|implicit|crafted|enchant|ローカル)[^)]*\)", "", text, flags=re.I)

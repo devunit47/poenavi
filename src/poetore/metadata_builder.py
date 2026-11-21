@@ -53,6 +53,10 @@ def _trade_entries(payload: dict) -> dict[tuple[str, str], dict]:
     }
 
 
+def _is_skill_effect(kind: str, stat_id: str) -> bool:
+    return (kind in SUPPORTED_KINDS or kind == "scourge") and stat_id.startswith(f"{kind}.effect_")
+
+
 def add_english_matchers(payload: dict, awakened_lines: Iterable[str]) -> None:
     """固定済みAwakenedのTrade IDで、既存のModへ英語文型を追加する。"""
     matchers: dict[tuple[str, str], set[tuple[str, bool]]] = {}
@@ -575,17 +579,27 @@ def build_official_index(jp_trade: dict, stat_rules: dict,
 
     ``stat_rules`` は一度監査した意味判断だけを保持するPoENavi正本であり、
     Awakenedの稼働や取得可否に依存しない。公式APIに存在しない古いruleは出力せず、
-    未登録の公式statは ``unresolved_trade_entries`` で明示する。
+    スキル付与・サポートの公式effect IDは、台帳がない場合も公式文面で索引に加える。
+    その他の未登録の公式statは ``unresolved_trade_entries`` で明示する。
     """
     jp = _trade_entries(jp_trade)
     repoe = _repoe_by_ref(repoe_stats or {}, repoe_mods or {})
     records = []
     seen = set()
-    for rule in stat_rules.get("rules", ()):
+    rules = list(stat_rules.get("rules", ()))
+    rules.extend(
+        {"kind": kind, "stat_id": stat_id, "ref": text, "better": int("#" in text)}
+        for (kind, stat_id), entry in jp.items()
+        if _is_skill_effect(kind, stat_id) and (text := str(entry.get("text", "")))
+    )
+    for rule in rules:
         kind = str(rule.get("kind", ""))
         stat_id = str(rule.get("stat_id", ""))
         entry = jp.get((kind, stat_id))
-        if kind not in SUPPORTED_KINDS or not entry or (kind, stat_id) in seen:
+        if (
+            (kind not in SUPPORTED_KINDS and not _is_skill_effect(kind, stat_id))
+            or not entry or (kind, stat_id) in seen
+        ):
             continue
         seen.add((kind, stat_id))
         ref = str(rule.get("ref", ""))
@@ -797,7 +811,7 @@ def official_trade_entry_snapshot(jp_trade: dict) -> dict:
     entries = [
         {"kind": kind, "stat_id": stat_id, "japanese": str(entry.get("text", ""))}
         for (kind, stat_id), entry in sorted(_trade_entries(jp_trade).items())
-        if kind in SUPPORTED_KINDS
+        if kind in SUPPORTED_KINDS or _is_skill_effect(kind, stat_id)
     ]
     return {"schema_version": 1, "entries": entries}
 

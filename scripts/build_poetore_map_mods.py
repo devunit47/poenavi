@@ -27,6 +27,29 @@ NON_MAP_AREA_STAT_IDS = {
     "implicit.stat_3582759801",
 }
 
+# 固定Awakened revisionのArea Modに対応するMap Check表示文面。
+# Tradeから削除された2件も、既存の危険度設定と一覧を維持するため残す。
+RETIRED_TRADE_MAP_STATS = {"implicit.stat_3307533469", "implicit.stat_754268389"}
+MAP_STAT_JAPANESE = {
+    "enchant.stat_2436559047": "エリアにはマップ全体をカバーする強化ミラージュが出現する",
+    "implicit.stat_3307533469": "エリアには密輸人の貯蔵箱が追加で1個出現する",
+    "explicit.stat_1715784068": "エリアの全てのプレイヤーは#%のせん妄度になる",
+    "implicit.stat_754268389": "エリアはランダムなスカラベ効果を追加で1種類持つ",
+    "implicit.stat_299373046": (
+        "エリアは真菌に覆われている\n"
+        "マップのアイテムの数量のモッドはその数値の20%がブライトチェストにも影響する\n"
+        "3回アノイントすることができる"
+    ),
+    "explicit.stat_795138349": "ヒット時に#%の確率で敵に毒を付与する",
+    "explicit.stat_1260718722": "ブライトの宝箱に#%の確率で追加の報酬が入っている",
+    "explicit.stat_1871805225": "マップにあるレムナントは#%の確率でサフィックスモッドを追加で1個持つ",
+    "enchant.stat_2425554673": "マップに出現するリチュアルの祭壇では最初の#回の恩寵のリロールがコストなしで行える",
+    "explicit.stat_4219583418": "モンスターがドロップするアーティファクトの数量が#%増加する",
+    "explicit.stat_2517001139": "敵に対するスタンの持続時間が#%増加する",
+    "explicit.stat_2550456553": "マップに出現するレアモンスターは追加のモッドを#個持つ",
+    "explicit.stat_3555807120": "モンスターによる全てのダメージが毒を付与できる",
+}
+
 # Nightmare Mapの詳細コピーにのみ現れ、固定Awakened revision／公式Tradeの
 # Area Mod一覧には独立Statがない項目。類似する確率付きStatへ統合せず、
 # Map Checkの危険度設定を個別に保持する。
@@ -92,16 +115,17 @@ def build_catalog(
         pairs = []
         for kind, stat_ids in trade_ids.items():
             for stat_id in stat_ids:
-                if (kind, stat_id) in by_id:
+                if (kind, stat_id) in by_id or stat_id in RETIRED_TRADE_MAP_STATS:
                     pairs.append((kind, stat_id))
         if not pairs:
             raise ValueError(f"Area Mod has no poetore Trade ID: {stat.get('ref')}")
         preferred = next((pair for pair in pairs if pair[0] == "explicit"), pairs[0])
-        row = by_id[preferred]
+        row = by_id.get(preferred, {})
+        japanese = MAP_STAT_JAPANESE.get(preferred[1], (row.get("japanese") or [""])[0])
         entries.append({
             "key": preferred[1],
             "ref": str(stat.get("ref", "")),
-            "japanese": str((row.get("japanese") or [""])[0]),
+            "japanese": str(japanese),
             "scope": {
                 "yes": "normal",
                 "heist_exclusive": "heist_exclusive",

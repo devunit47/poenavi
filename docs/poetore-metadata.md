@@ -48,6 +48,8 @@ PYTHONPATH=. python scripts/build_poetore_metadata.py --official-mods-only
 
 既存の日本語文型やTierを保持し、固定済みAwakened statsから英語文型だけを再生成できる。
 この経路でも入力ハッシュ、索引の整合性、候補を使ったpytestを検査する。
+PoE1のスキル付与・サポートの新しい `effect_*` IDには、`scripts/poetore-effect-english.json` に固定した公式英語文型を使う。
+廃止IDのAwakened文型は、同じ種別とスキル名・サポート名で移行先が一意に決まる場合に引き継ぐ。
 
 ```bash
 PYTHONPATH=. python scripts/build_poetore_metadata.py --english-matchers-only --apply

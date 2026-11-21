@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import copy
 import json
+import re
+from collections import defaultdict
 from typing import Iterable
 
-from .metadata import normalize_stat_text
+from .metadata import _english_text, normalize_stat_text
 
 
 SUPPORTED_KINDS = {"explicit", "implicit", "crafted", "fractured", "enchant", "veiled"}
@@ -53,7 +55,64 @@ def _trade_entries(payload: dict) -> dict[tuple[str, str], dict]:
     }
 
 
-def add_english_matchers(payload: dict, awakened_lines: Iterable[str]) -> None:
+def _is_skill_effect(kind: str, stat_id: str) -> bool:
+    return (kind in SUPPORTED_KINDS or kind == "scourge") and stat_id.startswith(f"{kind}.effect_")
+
+
+def _skill_effect_english_key(template: str) -> str:
+    text = " ".join(template.casefold().split())
+    support_prefix = "socketed gems are supported by level # "
+    if text.startswith(support_prefix):
+        name = text.removeprefix(support_prefix).removesuffix(" support")
+        # RePoE keeps the same stat names for these renamed supports.
+        name = {
+            "cluster trap": "cluster traps",
+            "power charge on critical strike": "power charge on critical",
+        }.get(name, name)
+        return f"support:{name}"
+    if text.startswith("grants "):
+        name = re.sub(r"^grants (?:level (?:#|\d+) )?", "", text).removesuffix(" skill")
+        return f"grant:{name}"
+    return ""
+
+
+def _add_effect_english_matchers(
+    mods: list[dict],
+    matchers: dict[tuple[str, str], set[tuple[str, bool]]],
+    effect_english: dict[str, str],
+) -> None:
+    active = {(row["kind"], row["stat_id"]) for row in mods}
+    occupied = {
+        (row["kind"], _english_text(template))
+        for row in mods
+        if not row.get("category_select")
+        and not _is_skill_effect(row["kind"], row["stat_id"])
+        and not row["stat_id"].startswith("explicit.indexable_support_")
+        for template, _ in matchers.get((row["kind"], row["stat_id"]), ())
+    }
+    targets = defaultdict(list)
+    for kind, stat_id in active:
+        template = effect_english.get(stat_id)
+        if template and _is_skill_effect(kind, stat_id):
+            matchers.setdefault((kind, stat_id), set())
+            if (kind, _english_text(template)) not in occupied:
+                matchers[kind, stat_id].add((template, False))
+            if name := _skill_effect_english_key(template):
+                targets[kind, name].append(stat_id)
+
+    for kind, stat_id in tuple(matchers):
+        if (kind, stat_id) in active or not stat_id.startswith(f"{kind}.stat_"):
+            continue
+        for template, negated in matchers[kind, stat_id]:
+            name = _skill_effect_english_key(template)
+            candidates = targets.get((kind, name), ())
+            if len(candidates) == 1 and (kind, _english_text(template)) not in occupied:
+                matchers[kind, candidates[0]].add((template, negated))
+
+
+def add_english_matchers(
+    payload: dict, awakened_lines: Iterable[str], effect_english: dict[str, str] | None = None,
+) -> None:
     """固定済みAwakenedのTrade IDで、既存のModへ英語文型を追加する。"""
     matchers: dict[tuple[str, str], set[tuple[str, bool]]] = {}
     options: dict[tuple[str, str, str], set[str]] = {}
@@ -74,6 +133,9 @@ def add_english_matchers(payload: dict, awakened_lines: Iterable[str]) -> None:
                         negated = bool(matcher.get("negate", False))
                         # 同じ文型に相反する符号がある場合は両方残して実行時に曖昧扱いする。
                         matches.add((template, negated))
+
+    if effect_english:
+        _add_effect_english_matchers(payload["mods"], matchers, effect_english)
 
     compatibility_options = {
         (row["kind"], f"{row['stat_id']}|{option['value']}")
@@ -575,17 +637,27 @@ def build_official_index(jp_trade: dict, stat_rules: dict,
 
     ``stat_rules`` は一度監査した意味判断だけを保持するPoENavi正本であり、
     Awakenedの稼働や取得可否に依存しない。公式APIに存在しない古いruleは出力せず、
-    未登録の公式statは ``unresolved_trade_entries`` で明示する。
+    スキル付与・サポートの公式effect IDは、台帳がない場合も公式文面で索引に加える。
+    その他の未登録の公式statは ``unresolved_trade_entries`` で明示する。
     """
     jp = _trade_entries(jp_trade)
     repoe = _repoe_by_ref(repoe_stats or {}, repoe_mods or {})
     records = []
     seen = set()
-    for rule in stat_rules.get("rules", ()):
+    rules = list(stat_rules.get("rules", ()))
+    rules.extend(
+        {"kind": kind, "stat_id": stat_id, "ref": text, "better": int("#" in text)}
+        for (kind, stat_id), entry in jp.items()
+        if _is_skill_effect(kind, stat_id) and (text := str(entry.get("text", "")))
+    )
+    for rule in rules:
         kind = str(rule.get("kind", ""))
         stat_id = str(rule.get("stat_id", ""))
         entry = jp.get((kind, stat_id))
-        if kind not in SUPPORTED_KINDS or not entry or (kind, stat_id) in seen:
+        if (
+            (kind not in SUPPORTED_KINDS and not _is_skill_effect(kind, stat_id))
+            or not entry or (kind, stat_id) in seen
+        ):
             continue
         seen.add((kind, stat_id))
         ref = str(rule.get("ref", ""))
@@ -797,7 +869,7 @@ def official_trade_entry_snapshot(jp_trade: dict) -> dict:
     entries = [
         {"kind": kind, "stat_id": stat_id, "japanese": str(entry.get("text", ""))}
         for (kind, stat_id), entry in sorted(_trade_entries(jp_trade).items())
-        if kind in SUPPORTED_KINDS
+        if kind in SUPPORTED_KINDS or _is_skill_effect(kind, stat_id)
     ]
     return {"schema_version": 1, "entries": entries}
 

@@ -524,9 +524,9 @@
       "source_mod_count": 6,
       "filters": [
         {
-          "stat_id": "explicit.stat_3036440332",
-          "text_ja": "ソケットされたジェムはレベル#被ダメージ時キャストによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Cast when Damage Taken",
+          "stat_id": "explicit.effect_2581493934",
+          "text_ja": "ソケットされたジェムはレベル# 被ダメージ時キャストサポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Cast when Damage Taken Support",
           "inverted": false,
           "better": 1,
           "decimal": false
@@ -640,9 +640,9 @@
       "source_mod_count": 5,
       "filters": [
         {
-          "stat_id": "explicit.stat_1826753218",
-          "text_ja": "レベル#ウィンタータイドブランドスキルを付与する",
-          "ref": "Grants Level # Wintertide Brand Skill",
+          "stat_id": "explicit.effect_582742716",
+          "text_ja": "レベル# ウィンタータイドブランドを付与",
+          "ref": "Grants Level # Wintertide Brand",
           "inverted": false,
           "better": 1,
           "decimal": false
@@ -1008,41 +1008,41 @@
       "source_mod_count": 6,
       "filters": [
         {
-          "stat_id": "explicit.stat_1994143317",
-          "text_ja": "ソケットされたジェムはレベル#元素耐性貫通によりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Elemental Penetration",
+          "stat_id": "explicit.effect_3232631539",
+          "text_ja": "ソケットされたジェムはレベル# 元素耐性貫通サポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Elemental Penetration Support",
           "inverted": false,
           "better": 1,
           "decimal": false
         },
         {
-          "stat_id": "explicit.stat_2420410470",
-          "text_ja": "ソケットされたジェムはレベル#火炙りによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Immolate",
+          "stat_id": "explicit.effect_1199731147",
+          "text_ja": "ソケットされたジェムはレベル# 火炙りサポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Immolate Support",
           "inverted": false,
           "better": 1,
           "decimal": false
         },
         {
-          "stat_id": "explicit.stat_3699494172",
-          "text_ja": "ソケットされたジェムはレベル#状態異常解放によりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Unbound Ailments",
+          "stat_id": "explicit.effect_880096186",
+          "text_ja": "ソケットされたジェムはレベル# 状態異常解放サポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Unbound Ailments Support",
           "inverted": false,
           "better": 1,
           "decimal": false
         },
         {
-          "stat_id": "explicit.stat_1384629003",
-          "text_ja": "ソケットされたジェムはレベル#アイスバイトによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Ice Bite",
+          "stat_id": "explicit.effect_2409633913",
+          "text_ja": "ソケットされたジェムはレベル# アイスバイトサポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Ice Bite Support",
           "inverted": false,
           "better": 1,
           "decimal": false
         },
         {
-          "stat_id": "explicit.stat_1106668565",
-          "text_ja": "ソケットされたジェムはレベル#イナーヴェイトによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Innervate",
+          "stat_id": "explicit.effect_1994599451",
+          "text_ja": "ソケットされたジェムはレベル# 電気刺激サポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Innervate Support",
           "inverted": false,
           "better": 1,
           "decimal": false
@@ -1619,9 +1619,9 @@
       "source_mod_count": 4,
       "filters": [
         {
-          "stat_id": "explicit.stat_807186595",
-          "text_ja": "ソケットされたジェムはレベル#マルチトーテムによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Multiple Totems",
+          "stat_id": "explicit.effect_4083688802",
+          "text_ja": "ソケットされたジェムはレベル# マルチトーテムサポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Multiple Totems Support",
           "inverted": false,
           "better": 1,
           "decimal": false
@@ -2265,9 +2265,9 @@
       "source_mod_count": 5,
       "filters": [
         {
-          "stat_id": "explicit.stat_3356013982",
-          "text_ja": "ソケットされたジェムはレベル#アンリーシュによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Unleash",
+          "stat_id": "explicit.effect_1710445055",
+          "text_ja": "ソケットされたジェムはレベル# アンリーシュサポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Unleash Support",
           "inverted": false,
           "better": 1,
           "decimal": false
@@ -3137,9 +3137,9 @@
       "source_mod_count": 7,
       "filters": [
         {
-          "stat_id": "explicit.stat_1331336999",
-          "text_ja": "ソケットされたジェムはレベル#アローノヴァによりサポートされる",
-          "ref": "Socketed Gems are Supported by Level # Arrow Nova",
+          "stat_id": "explicit.effect_1405334938",
+          "text_ja": "ソケットされたジェムはレベル# アローノヴァサポートによってサポートされる",
+          "ref": "Socketed Gems are Supported by Level # Arrow Nova Support",
           "inverted": false,
           "better": 1,
           "decimal": false

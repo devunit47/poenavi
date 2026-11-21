@@ -25,7 +25,7 @@ from .performance import SearchPerformanceTrace, record_trade_api_event
 from .metadata import (
     base_armour_bounds, default_metadata_index, gem_metadata, multi_value_rule,
     normalize_stat_text,
-    pseudo_definitions, pseudo_relations, unique_fixed_stats, unique_icon_url,
+    pseudo_definitions, pseudo_relations, strip_stat_zero_width, unique_fixed_stats, unique_icon_url,
 )
 
 
@@ -2936,6 +2936,7 @@ def _normalized_stat_text(text: str) -> str:
     # 3.30の詳細コピーは一部の固定Map暗黙Modへ ``(...)`` を挿入するが、
     # 公式Trade stat本文にはこの省略記号がない。値や選択肢ではないため、
     # 照合時だけ除去し、UIに表示するコピー原文は維持する。
+    text = strip_stat_zero_width(text)
     text = re.sub(r"[（(]\s*(?:\.{3}|…)\s*[）)]", "", text)
     text = re.sub(r"\([^)]*(?:\d|implicit|crafted|enchant)[^)]*\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\d+(?:\.\d+)?", "#", text)

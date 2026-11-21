@@ -8,6 +8,7 @@ text has its own inspectors below rather than being silently skipped.
 import ast
 import importlib
 from contextlib import ExitStack
+from itertools import product
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -45,7 +46,12 @@ WIDTH_ALLOWLIST = {
 FONT_CASES = [("bundled", size) for size in (MIN_FONT_SIZE, 14, 18, MAX_FONT_SIZE)] + [("alternate", MAX_FONT_SIZE)]
 
 
-@pytest.fixture(autouse=True, params=FONT_CASES, ids=[f"{family}-{size}" for family, size in FONT_CASES])
+def _font_id(font):
+    family, size = font
+    return f"{family}-{size}"
+
+
+@pytest.fixture(autouse=True, params=FONT_CASES, ids=_font_id)
 def maximum_font(qapp, monkeypatch, request):
     screens = qapp.screens()  # Keep Windows offscreen screen wrappers alive.
     saved, requested = current_appearance(), requested_appearance()
@@ -259,17 +265,51 @@ def _audit_pages(qapp, root):
     return sorted(set(failures))
 
 
-@pytest.mark.parametrize("mode", ["poenavi", "poetore"])
-@pytest.mark.parametrize("version", ["poe1", "poe2"])
-@pytest.mark.parametrize("module,name", CASES, ids=[name for _, name in CASES])
+def _window_audit_cases():
+    for font, (module, name), version, mode in product(
+        FONT_CASES, CASES, ("poe1", "poe2"), ("poenavi", "poetore"),
+    ):
+        # Keep the Map Mod regressions and every window at maximum bundled size
+        # in both games and modes. Exercise the minimum and alternate fonts in
+        # opposite game/mode pairs for every window.
+        representative = (
+            module == "map_check"
+            or font == ("bundled", MAX_FONT_SIZE)
+            or (font == ("bundled", MIN_FONT_SIZE) and (version, mode) == ("poe1", "poenavi"))
+            or (font == ("alternate", MAX_FONT_SIZE) and (version, mode) == ("poe2", "poetore"))
+        )
+        yield pytest.param(
+            font, module, name, version, mode,
+            id=f"{_font_id(font)}-{name}-{version}-{mode}",
+            marks=() if representative else pytest.mark.qt_matrix,
+        )
+
+
+@pytest.mark.parametrize(
+    "maximum_font,module,name,version,mode", tuple(_window_audit_cases()), indirect=["maximum_font"],
+)
 def test_all_window_text_fits(qapp, tmp_path, module, name, version, mode):
     qapp.setProperty("appMode", mode)
     window = _window(module, name, version, tmp_path)
     assert not (failures := _audit_pages(qapp, window)), "\n" + "\n".join(failures)
 
 
-@pytest.mark.parametrize("version", ["poe1", "poe2"])
-@pytest.mark.parametrize("profile", ["small", "medium", "large"])
+def _trade_audit_cases():
+    for font, profile, version in product(
+        FONT_CASES, ("small", "medium", "large"), ("poe1", "poe2"),
+    ):
+        # Run the current filter and price geometry at both size limits in both
+        # games and all profiles, including the alternate maximum-size font.
+        representative = font[1] in (MIN_FONT_SIZE, MAX_FONT_SIZE)
+        yield pytest.param(
+            font, profile, version, id=f"{_font_id(font)}-{profile}-{version}",
+            marks=() if representative else pytest.mark.qt_matrix,
+        )
+
+
+@pytest.mark.parametrize(
+    "maximum_font,profile,version", tuple(_trade_audit_cases()), indirect=["maximum_font"],
+)
 def test_trade_text_fits_every_profile(qapp, version, profile):
     from src.poetore.ui import PoetoreWindow
     from src.poetore.trade import TradeStatFilter

@@ -13,6 +13,10 @@ os.environ.setdefault("POETORE_DISABLE_PERFORMANCE_LOG", "1")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "qt_matrix: exhaustive Qt geometry combinations")
+
+
 @pytest.fixture
 def isolated_bundled_font(qapp, monkeypatch):
     from PySide6.QtGui import QFontDatabase

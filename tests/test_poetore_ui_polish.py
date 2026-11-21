@@ -1,5 +1,6 @@
 """Peer controls and anchored overlays stay usable across themes and fonts."""
 
+from itertools import product
 from unittest.mock import Mock
 
 import pytest
@@ -1059,10 +1060,23 @@ def test_main_rate_paints_full_or_explicitly_elided_quote(
     assert not inspect_paint(value, (f"1 ＝ {wide_quote}",), centered=True)
 
 
-@pytest.mark.parametrize("preset", PRESETS)
-@pytest.mark.parametrize("size", [13, 24])
-@pytest.mark.parametrize("version", ["poe1", "poe2"])
-@pytest.mark.parametrize("key", ["settings", "exchange", "expedition", "desecration", "heist", "main", "trade", "category", "map_manager", "map"])
+def _peer_geometry_cases():
+    keys = (
+        "settings", "exchange", "expedition", "desecration", "heist",
+        "main", "trade", "category", "map_manager", "map",
+    )
+    for key, version, size, preset in product(keys, ("poe1", "poe2"), (13, 24), PRESETS):
+        # Keep both sizes and games for every screen in the default preset.
+        # Keep all presets for title-bar, OBS and Map Mod regressions, and
+        # sample every palette with the category buttons.
+        representative = preset == "default" or key in ("main", "trade", "category", "map_manager", "map")
+        yield pytest.param(
+            key, version, size, preset,
+            marks=() if representative else pytest.mark.qt_matrix,
+        )
+
+
+@pytest.mark.parametrize("key,version,size,preset", tuple(_peer_geometry_cases()))
 def test_peer_button_geometry(qapp, tmp_path, preset, size, version, key):
     apply_application_appearance(qapp, {"appearance": {"preset": preset, "overrides": {"base_font_size": size}}})
     window = build_scenario(key, tmp_path, version)
@@ -1649,6 +1663,7 @@ def assert_geometry_converges(app, window, refresh=None):
         assert state() == current
 
 
+# Keep the full resize-convergence regression across screen limits and row counts.
 @pytest.mark.parametrize("available", [QRect(0, 0, 800, 600), QRect(0, 0, 1920, 1080)])
 @pytest.mark.parametrize("count", [0, 1, 40])
 @pytest.mark.parametrize("profile", ["small", "medium", "large"])

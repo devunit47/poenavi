@@ -6,7 +6,8 @@ param(
     [int]$ShardCount = 1,
     [ValidateRange(1, 2147483)]
     [int]$TimeoutSeconds = 600,
-    [switch]$ListAssignments
+    [switch]$ListAssignments,
+    [string]$MarkExpression = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,10 +19,16 @@ if ($ShardIndex -gt $ShardCount) {
 $testFiles = @(Get-ChildItem tests/test_*.py -File | Sort-Object Name)
 if ($ShardCount -gt 1 -or $ListAssignments) {
     $durations = Get-Content -Raw (Join-Path $PSScriptRoot test_durations.json) | ConvertFrom-Json
+    $fastDurations = if ($MarkExpression -ceq 'not qt_matrix') {
+        Get-Content -Raw (Join-Path $PSScriptRoot test_durations_fast.json) | ConvertFrom-Json
+    }
     # The timing data is recorded to hundredths of a second. Keep sums exact at ties.
     $shardTotals = [long[]]::new($ShardCount)
     $estimatedFiles = foreach ($testFile in $testFiles) {
         $duration = $durations.PSObject.Properties[$testFile.Name]
+        if ($null -ne $fastDurations -and $null -ne $fastDurations.PSObject.Properties[$testFile.Name]) {
+            $duration = $fastDurations.PSObject.Properties[$testFile.Name]
+        }
         $seconds = if ($null -eq $duration) { 2.0 } else { [double]$duration.Value }
         [pscustomobject]@{
             Name = $testFile.Name
@@ -57,6 +64,12 @@ if ($ShardCount -gt 1 -or $ListAssignments) {
 $pythonPath = (Get-Command $Python -CommandType Application | Select-Object -First 1).Source
 $stackTimeout = [Math]::Max(0.5, $TimeoutSeconds - 30)
 $stackTimeout = $stackTimeout.ToString([Globalization.CultureInfo]::InvariantCulture)
+$markerArgs = ""
+if ($MarkExpression) {
+    # Quote a single native argument, including quotes and trailing backslashes.
+    $escapedExpression = $MarkExpression -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1'
+    $markerArgs = ' -m "' + $escapedExpression + '"'
+}
 $failedFiles = @()
 
 foreach ($testFile in $testFiles) {
@@ -64,7 +77,7 @@ foreach ($testFile in $testFiles) {
     $process = [Diagnostics.Process]::new()
     try {
         $process.StartInfo.FileName = $pythonPath
-        $process.StartInfo.Arguments = "-u -m pytest -q -o faulthandler_timeout=$stackTimeout `"$testFile`""
+        $process.StartInfo.Arguments = "-u -m pytest -q -o faulthandler_timeout=$stackTimeout$markerArgs `"$testFile`""
         $process.StartInfo.WorkingDirectory = (Get-Location).ProviderPath
         $process.StartInfo.UseShellExecute = $false
         [void]$process.Start()
@@ -86,6 +99,8 @@ foreach ($testFile in $testFiles) {
             if (-not $process.WaitForExit(5000)) {
                 Write-Warning "Test process did not exit after termination: $testFile"
             }
+        } elseif ($process.ExitCode -eq 5 -and $MarkExpression) {
+            Write-Host "$testFile had no tests selected"
         } elseif ($process.ExitCode -ne 0) {
             $failedFiles += $testFile
             Write-Host "$testFile failed with exit code $($process.ExitCode)"

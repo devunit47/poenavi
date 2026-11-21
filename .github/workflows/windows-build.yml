@@ -4,13 +4,23 @@ on:
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 18 * * 0"
   workflow_dispatch:
+    inputs:
+      full_qt_matrix:
+        description: Run all Qt geometry combinations
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -24,6 +34,9 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The PR merge checkout needs its base parent for the path comparison.
+          fetch-depth: 2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12.10"
@@ -36,7 +49,46 @@ jobs:
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
-        run: .\scripts\run_tests_by_file.ps1 -Python python -ShardIndex ${{ matrix.shard }} -ShardCount 3
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          FULL_QT_MATRIX: ${{ inputs.full_qt_matrix }}
+        run: |
+          $runnerArgs = @{}
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $appearancePaths = @(
+              'src/ui/', 'src/poetore/', 'src/update/', 'src/app_*.py', 'src/qt_platform.py',
+              'src/utils/area_notes.py', 'src/utils/config_manager.py', 'src/utils/feature_support.py',
+              'src/utils/gem_*.py', 'src/utils/global_hotkeys.py', 'src/utils/guide_data.py',
+              'src/utils/log_path_detector.py', 'src/utils/poe_*_data.py', 'src/utils/pob_importer.py',
+              'src/utils/search_query_patterns.py', 'src/utils/window_focus.py', 'src/utils/zone_*.py',
+              'assets/', 'data/', 'maps/', '.github/workflows/',
+              'main.py', 'updater_main.py', 'default_config.json',
+              'guide_data.json', 'guide_data_poe2.json', 'monster_levels.json',
+              ':(glob)**/*.qss', 'requirements*.txt',
+              'tests/conftest.py', 'tests/poetore_ui_scenarios.py',
+              'tests/test_theme_*.py', 'tests/test_poetore_ui*.py',
+              'scripts/run_tests_by_file.ps1', 'scripts/test_shard_assignments.ps1',
+              'scripts/test_durations*.json'
+            )
+            if (-not $env:PR_BASE_SHA) {
+              throw "Missing PR base SHA."
+            }
+            # Git pathspecs also match deleted files and both sides of renames.
+            $PSNativeCommandUseErrorActionPreference = $false
+            git diff --quiet --no-renames $env:PR_BASE_SHA HEAD -- @appearancePaths
+            switch ($LASTEXITCODE) {
+              0 { $runnerArgs.MarkExpression = 'not qt_matrix' }
+              1 { Write-Host "Appearance-related paths changed." }
+              default { throw "Could not compare the PR with its base (git exit $LASTEXITCODE)." }
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $env:FULL_QT_MATRIX -ne 'true') {
+            $runnerArgs.MarkExpression = 'not qt_matrix'
+          }
+          if ($runnerArgs.ContainsKey('MarkExpression')) {
+            Write-Host "Qt geometry mode: fast (-m not qt_matrix)"
+          } else {
+            Write-Host "Qt geometry mode: full"
+          }
+          .\scripts\run_tests_by_file.ps1 -Python python -ShardIndex ${{ matrix.shard }} -ShardCount 3 @runnerArgs
 
   package:
     name: Build release assets
@@ -74,6 +126,7 @@ jobs:
           }
 
       - name: Upload verification artifact
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v6
         with:
           name: PoENavi-unsigned-windows

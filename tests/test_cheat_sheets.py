@@ -80,25 +80,18 @@ def test_manager_saves_image_and_background_transparency_separately(qapp):
         assert manager.image_transparency_slider.value() == 25
         assert manager.background_transparency_slider.value() == 60
 
+        labels = {label.text() for label in manager.findChildren(QLabel)}
+        assert "透明率の調整" in labels
+        assert "画像の透明率" in labels
+        assert "背景の透明率" in labels
+        assert not any("透明度" in label for label in labels)
+
         manager.image_transparency_slider.setValue(35)
         manager.background_transparency_slider.setValue(70)
         result = manager.result_config()
 
         assert result["image_transparency"] == 35
         assert result["background_transparency"] == 70
-    finally:
-        manager.close()
-
-
-def test_manager_uses_transparency_rate_labels_consistently(qapp):
-    manager = CheatSheetManagerDialog({"images": []})
-    try:
-        labels = {label.text() for label in manager.findChildren(QLabel)}
-
-        assert "透明率の調整" in labels
-        assert "画像の透明率" in labels
-        assert "背景の透明率" in labels
-        assert not any("透明度" in label for label in labels)
     finally:
         manager.close()
 

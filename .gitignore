@@ -39,6 +39,8 @@ docs/superpowers/
 *.swo
 
 # Work files
+# Local-only notes and drafts (never committed)
+local/
 area_level_mapping.txt
 tasks/
 RULES.md

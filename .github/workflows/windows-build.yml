@@ -89,6 +89,8 @@ jobs:
             Write-Host "Qt geometry mode: full"
           }
           .\scripts\run_tests_by_file.ps1 -Python python -ShardIndex ${{ matrix.shard }} -ShardCount 3 @runnerArgs
+          # The runner throws on failure. Clear git diff's successful difference status.
+          exit 0
 
   package:
     name: Build release assets

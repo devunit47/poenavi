@@ -21,6 +21,7 @@ from src.ui.appearance import (
 )
 from src.ui.styles import Styles
 from src.ui.appearance_settings import AppearanceSettingsWidget
+from src.ui.minimize_settings import create_minimize_behavior_combo
 from src.ui.app_info_widget import AppInfoWidget
 from src.ui.app_theme import POENAVI_THEME, POETORE_THEME
 from src.ui.dialog_theme import (
@@ -2518,6 +2519,17 @@ class SettingsDialog(QDialog):
         Styles.apply_checkbox_style(self.always_on_top_check)
         self.always_on_top_check.setChecked(self.current_config.get("always_on_top", True))
         window_layout.addWidget(self.always_on_top_check)
+
+        minimize_row = QHBoxLayout()
+        minimize_label = QLabel("最小化時の動作")
+        minimize_label.setStyleSheet(f"color: {theme.text}; font-size: {theme_font_size(12)}px;")
+        self.minimize_behavior_combo = create_minimize_behavior_combo(self.current_config)
+        self.minimize_behavior_combo.setStyleSheet(combo_style)
+        minimize_label.setBuddy(self.minimize_behavior_combo)
+        minimize_row.addWidget(minimize_label)
+        minimize_row.addWidget(self.minimize_behavior_combo)
+        minimize_row.addStretch()
+        window_layout.addLayout(minimize_row)
         
         # 右端配置チェックボックス
         self.snap_right_edge_cb = QCheckBox("起動時にモニター右端に配置")
@@ -3550,6 +3562,7 @@ class SettingsDialog(QDialog):
         return {
             "startup": startup_config,
             "appearance": self.appearance_widget.settings(),
+            "minimize_behavior": self.minimize_behavior_combo.currentData(),
             "hotkeys": {
                 "start_stop": self.start_stop_btn.key_text,
                 "reset": self.reset_btn.key_text,

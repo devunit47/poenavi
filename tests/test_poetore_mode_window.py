@@ -1290,6 +1290,24 @@ def test_poetore_mode_minimize_falls_back_when_tray_is_unavailable():
     window.hide.assert_not_called()
 
 
+def test_poetore_mode_minimizes_to_taskbar_after_setting_changes():
+    window = MagicMock()
+    window.config = {}
+    window._tray_notification_shown = False
+    with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True):
+        PoetoreModeWindow.minimize_to_tray(window)
+        window.tray_icon.show.assert_called_once_with()
+        window.tray_icon.reset_mock()
+        window.hide.reset_mock()
+        window.config["minimize_behavior"] = "taskbar"
+        PoetoreModeWindow.minimize_to_tray(window)
+
+    window.showMinimized.assert_called_once_with()
+    window.hide.assert_not_called()
+    window.tray_icon.show.assert_not_called()
+    window.tray_icon.showMessage.assert_not_called()
+
+
 def test_poetore_mode_tray_settings_restores_before_opening_dialog():
     window = MagicMock()
     with patch.object(QTimer, "singleShot", side_effect=lambda _delay, callback: callback()):

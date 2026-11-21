@@ -1285,7 +1285,7 @@ class MainWindow(QMainWindow):
         minimize_btn = QPushButton("─")
         minimize_btn.setFixedSize(30, 22)
         minimize_btn.setStyleSheet(btn_style)
-        minimize_btn.setToolTip("最小化（みになび表示中は本体だけ隠します）")
+        minimize_btn.setToolTip("最小化（みになびの表示は維持します）")
         minimize_btn.clicked.connect(self.minimize_main_window)
         title_bar.addWidget(minimize_btn)
         
@@ -5318,8 +5318,11 @@ class MainWindow(QMainWindow):
         self._tray_notification_shown = False
 
     def minimize_main_window(self):
-        """本体をタスクトレイへ格納し、みになびの表示は維持する。"""
-        if not QSystemTrayIcon.isSystemTrayAvailable():
+        """設定とトレイの利用可否に応じて本体だけを最小化する。"""
+        if (
+            not QSystemTrayIcon.isSystemTrayAvailable()
+            or self.config.get("minimize_behavior") == "taskbar"
+        ):
             self.showMinimized()
             return
 
@@ -5341,10 +5344,10 @@ class MainWindow(QMainWindow):
     def restore_from_tray(self):
         if getattr(self, "_hidden_for_mini_navi", False):
             self.restore_from_mini_navi()
-        else:
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+            return
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
         self.tray_icon.hide()
 
     def quit_from_tray(self):
@@ -5359,6 +5362,9 @@ class MainWindow(QMainWindow):
 
     def hide_for_mini_navi(self):
         """ぽえなび本体だけを隠し、みになびの表示を維持する。"""
+        if self.config.get("minimize_behavior") == "taskbar":
+            self.showMinimized()
+            return
         self._hidden_for_mini_navi = True
         self.hide()
         overlay = getattr(self, "mini_navi_overlay", None)
@@ -5370,6 +5376,7 @@ class MainWindow(QMainWindow):
     def restore_from_mini_navi(self):
         """みになびだけの表示状態から、ぽえなび本体を復帰する。"""
         self._hidden_for_mini_navi = False
+        self.tray_icon.hide()
         self.showNormal()
         self.raise_()
         self.activateWindow()

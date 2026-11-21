@@ -1,9 +1,12 @@
+import json
 from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel
 
+from src.ui.poetore_settings_dialog import PoetoreSettingsDialog
 from src.ui.settings_dialog import SettingsDialog
+from src.utils.config_manager import ConfigManager
 from src.utils.poe_version_data import POE1, POE2
 
 
@@ -18,6 +21,37 @@ def prevent_zone_master_write(monkeypatch):
     monkeypatch.setattr(
         "src.ui.settings_dialog.save_zone_master_data", lambda *_args: None
     )
+
+
+def test_minimize_behavior_is_shared_and_persists(monkeypatch, qapp, tmp_path):
+    monkeypatch.setenv("POENAVI_USER_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(ConfigManager, "_migrate_legacy_config_if_needed", lambda: None)
+    monkeypatch.setattr(ConfigManager, "migrate_startup_legacy_user_files", lambda: None)
+    (tmp_path / ConfigManager.CONFIG_FILE).write_text(
+        json.dumps({"schemaVersion": ConfigManager.CURRENT_SCHEMA_VERSION}),
+        encoding="utf-8",
+    )
+    config = ConfigManager.load_config()
+    assert config["minimize_behavior"] == "tray"
+
+    main_dialog = SettingsDialog(current_config=config)
+    try:
+        combo = main_dialog.minimize_behavior_combo
+        assert combo.currentData() == "tray"
+        combo.setCurrentIndex(combo.findData("taskbar"))
+        config.update(main_dialog.get_settings())
+        ConfigManager.save_config(config)
+    finally:
+        main_dialog.close()
+
+    poetore_dialog = PoetoreSettingsDialog(current_config=ConfigManager.load_config())
+    try:
+        combo = poetore_dialog.minimize_behavior_combo
+        assert combo.currentData() == "taskbar"
+        combo.setCurrentIndex(combo.findData("tray"))
+        assert poetore_dialog.get_settings()["minimize_behavior"] == "tray"
+    finally:
+        poetore_dialog.close()
 
 
 def test_settings_app_mode_uses_one_shared_startup_checkbox(monkeypatch, qapp):

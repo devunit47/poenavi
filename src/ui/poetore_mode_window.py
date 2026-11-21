@@ -412,8 +412,11 @@ class PoetoreModeWindow(QMainWindow):
         self._tray_notification_shown = False
 
     def minimize_to_tray(self):
-        """トレイ非対応環境では、従来どおりタスクバーへ最小化する。"""
-        if not QSystemTrayIcon.isSystemTrayAvailable():
+        """設定とトレイの利用可否に応じて最小化する。"""
+        if (
+            not QSystemTrayIcon.isSystemTrayAvailable()
+            or self.config.get("minimize_behavior") == "taskbar"
+        ):
             self.showMinimized()
             return
         self.tray_icon.show()

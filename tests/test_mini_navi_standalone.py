@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QWidget
 
 from src.ui.main_window import MainWindow, MiniNaviOverlay
 from src.ui.window_flags import set_native_window_topmost
@@ -414,6 +414,7 @@ class MiniNaviStandaloneTest(unittest.TestCase):
 
     def test_minimize_hides_only_main_when_mini_navi_is_visible(self):
         window = MainWindow.__new__(MainWindow)
+        window.config = {}
         window._hidden_for_mini_navi = False
         window._tray_notification_shown = False
         window.hide = Mock()
@@ -436,6 +437,7 @@ class MiniNaviStandaloneTest(unittest.TestCase):
 
     def test_minimize_hides_to_tray_without_visible_mini_navi(self):
         window = MainWindow.__new__(MainWindow)
+        window.config = {}
         window._tray_notification_shown = True
         window.hide = Mock()
         window.showMinimized = Mock()
@@ -468,7 +470,41 @@ class MiniNaviStandaloneTest(unittest.TestCase):
 
         window.restore_from_mini_navi.assert_called_once_with()
         window.showNormal.assert_not_called()
-        window.tray_icon.hide.assert_called_once_with()
+    def test_taskbar_minimize_preserves_mini_navi_and_both_restore_paths(self):
+        for overlay_visible in (False, True):
+            with self.subTest(overlay_visible=overlay_visible):
+                window = MainWindow.__new__(MainWindow)
+                QMainWindow.__init__(window)
+                window.config = {"mini_guide_overlay": {"enabled": True}}
+                window.tray_icon = QSystemTrayIcon(window)
+                overlay = window.mini_navi_overlay = MiniNaviOverlay(window)
+                try:
+                    window.show()
+                    overlay.setVisible(overlay_visible)
+                    window.config["minimize_behavior"] = "taskbar"
+                    with (
+                        patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True),
+                        patch.object(window.tray_icon, "showMessage") as notify,
+                    ):
+                        window.minimize_main_window()
+
+                    self.assertTrue(window.isMinimized())
+                    self.assertEqual(overlay.isVisible(), overlay_visible)
+                    self.assertFalse(window.tray_icon.isVisible())
+                    notify.assert_not_called()
+
+                    window.showNormal()
+                    self.assertFalse(overlay.is_main_window_hidden())
+
+                    if overlay_visible:
+                        overlay.toggle_main_window()
+                        self.assertTrue(window.isMinimized())
+                        self.assertTrue(overlay.is_main_window_hidden())
+                        overlay.toggle_main_window()
+                        self.assertFalse(window.isMinimized())
+                        self.assertFalse(overlay.is_main_window_hidden())
+                finally:
+                    self._dispose_overlay(overlay, window)
 
     def test_tray_activation_restores_normal_main_window(self):
         window = Mock()

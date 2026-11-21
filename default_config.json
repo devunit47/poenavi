@@ -43,6 +43,7 @@
     "lap_expanded": false,
     "timer_size": "medium",
     "always_on_top": true,
+    "minimize_behavior": "tray",
     "notified_update_version": "",
     "window_locked": false,
     "window_opacity": 80,

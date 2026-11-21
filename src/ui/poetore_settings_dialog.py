@@ -49,6 +49,7 @@ from src.poetore.trade import (
 )
 from src.ui.app_info_widget import AppInfoWidget
 from src.ui.appearance_settings import AppearanceSettingsWidget
+from src.ui.minimize_settings import create_minimize_behavior_combo
 from src.ui.custom_command_settings import CustomCommandSettingsWidget
 from src.ui.dialog_theme import (
     UI_METRICS, equalize_button_sizes, fit_scroll_content_width,
@@ -516,6 +517,8 @@ class PoetoreSettingsDialog(QDialog):
         window_layout.addWidget(self.snap_right_edge_cb)
 
         monitor_row = QFormLayout()
+        self.minimize_behavior_combo = create_minimize_behavior_combo(self.current_config)
+        monitor_row.addRow("最小化時の動作", self.minimize_behavior_combo)
         self.monitor_combo = QComboBox()
         screens = QApplication.screens()
         for index, screen in enumerate(screens):
@@ -807,6 +810,7 @@ class PoetoreSettingsDialog(QDialog):
             "stash_tab_scroll_enabled": self.stash_tab_scroll_cb.isChecked(),
             "poetore": poetore,
             "appearance": self.appearance_widget.settings(),
+            "minimize_behavior": self.minimize_behavior_combo.currentData(),
             "client_log_paths": dict(self._client_log_paths),
             "poe_version": selected_poe_version,
             "poe_version_mode": selected_poe_version if skip_selector else "ask",

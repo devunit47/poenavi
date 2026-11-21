@@ -536,7 +536,13 @@ class MiniNaviOverlay(QWidget):
                 self.main_window._refresh_mini_navi_toggle()
 
     def is_main_window_hidden(self) -> bool:
-        return bool(self.main_window and getattr(self.main_window, "_hidden_for_mini_navi", False))
+        return bool(
+            self.main_window
+            and (
+                getattr(self.main_window, "_hidden_for_mini_navi", False)
+                or self.main_window.isMinimized()
+            )
+        )
 
     def toggle_main_window(self):
         if not self.main_window:

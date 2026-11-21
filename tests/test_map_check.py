@@ -534,6 +534,24 @@ def test_manager_regex_search_matches_names_and_scope_and_reports_invalid_patter
     dialog.close()
 
 
+def test_manager_regex_search_accepts_poe_quoted_and_negated_terms(qapp):
+    dialog = MapModManagerDialog(default_map_check_config())
+    dialog.regex_search.click()
+    dialog.search.setText('"!ter e|son,|from$"')
+    visible = {dialog._entries[row].ref for row in range(dialog.table.rowCount())
+               if not dialog.table.isRowHidden(row)}
+    assert visible == {
+        "+#% Monster Elemental Resistances",
+        "Monsters cannot be Leeched from",
+        "Monsters have a #% chance to avoid Poison, Impale, and Bleeding",
+    }
+    assert not dialog.search.property("error")
+
+    dialog.search.setText('"cannot be leeched from" "[" ')
+    assert dialog.count_label.text() == "Regexの構文エラー"
+    dialog.close()
+
+
 @pytest.mark.parametrize("mode", [POENAVI_MODE, POETORE_MODE])
 def test_map_check_uses_mode_theme_and_shared_profile_controls(qapp, mode):
     dialog = MapModManagerDialog(default_map_check_config())

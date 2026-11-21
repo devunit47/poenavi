@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import partial
 
 from PySide6.QtCore import (
@@ -75,6 +76,15 @@ _SCOPE_LABELS = {
     "heist_exclusive": "Heist限定",
     "outdated": "更新確認が必要",
 }
+
+# PoE search syntax: space-separated terms, "quoted" terms may contain spaces,
+# and a leading ! excludes matches in game. Here every term lists the mods it targets.
+_POE_SEARCH_TERM = re.compile(r'"([^"]*)"?|(\S+)')
+
+
+def _poe_search_patterns(text):
+    terms = (quoted or bare for quoted, bare in _POE_SEARCH_TERM.findall(text))
+    return [term.removeprefix("!") for term in terms if term.removeprefix("!")]
 
 
 def _decision_icon(value, color):
@@ -415,13 +425,17 @@ class MapModManagerDialog(QDialog):
 
     def _apply_filters(self):
         text = self.search.text()
-        regex = None
+        regexes = None
         if text and self.regex_search.isChecked():
-            regex = QRegularExpression(
-                text,
-                QRegularExpression.CaseInsensitiveOption | QRegularExpression.UseUnicodePropertiesOption,
-            )
-        invalid = regex is not None and not regex.isValid()
+            regexes = [
+                QRegularExpression(
+                    pattern,
+                    QRegularExpression.CaseInsensitiveOption | QRegularExpression.UseUnicodePropertiesOption,
+                )
+                for pattern in _poe_search_patterns(text)
+            ]
+        invalid_regex = next((regex for regex in regexes or () if not regex.isValid()), None)
+        invalid = invalid_regex is not None
         if self.search.property("error") != invalid:
             self.search.setProperty("error", invalid)
             self.search.style().unpolish(self.search)
@@ -429,7 +443,7 @@ class MapModManagerDialog(QDialog):
             self.search.update()
         if invalid:
             self.count_label.setText("Regexの構文エラー")
-            self.count_label.setToolTip(regex.errorString())
+            self.count_label.setToolTip(invalid_regex.errorString())
             return
 
         self.count_label.setToolTip("")
@@ -440,10 +454,12 @@ class MapModManagerDialog(QDialog):
         visible = 0
         for row, entry in enumerate(self._entries):
             fields = (entry.japanese, entry.ref, _SCOPE_LABELS.get(entry.scope, ""))
-            if regex is None:
+            if regexes is None:
                 matches_search = query in " ".join(fields).casefold()
             else:
-                matches_search = any(regex.match(field).hasMatch() for field in fields if field)
+                matches_search = any(
+                    regex.match(field).hasMatch() for regex in regexes for field in fields if field
+                )
             matched = matches_search and (
                 not selected_only or decision_for(self.config, entry.key) in {"d", "w", "g"}
             )

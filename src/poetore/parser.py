@@ -1231,6 +1231,7 @@ def parse_item_text(text: str, *, english_mod_matching: bool = True) -> ParsedIt
                     current_header_generation if from_header else (
                         "foulborn" if is_mutated else None
                     ),
+                    random_support=name in {"Forbidden Shako", "Replica Forbidden Shako"},
                 )
                 english_match = metadata is not None
             if (

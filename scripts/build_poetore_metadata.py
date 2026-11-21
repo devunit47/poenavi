@@ -30,6 +30,7 @@ DEFAULT_REPORT = Path("build/poetore-metadata-report.json")
 DEFAULT_STAT_RULES = Path("scripts/poetore-stat-rules.json")
 DEFAULT_OFFICIAL_BASELINE = Path("scripts/poetore-official-stats-baseline.json")
 DEFAULT_JAPANESE_OVERRIDES = Path("scripts/poetore-japanese-overrides.json")
+DEFAULT_EFFECT_ENGLISH = Path("scripts/poetore-effect-english.json")
 
 
 def _get(url: str) -> bytes:
@@ -96,6 +97,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--stat-rules", type=Path, default=DEFAULT_STAT_RULES)
+    parser.add_argument("--effect-english", type=Path, default=DEFAULT_EFFECT_ENGLISH)
     parser.add_argument(
         "--official-baseline", type=Path, default=DEFAULT_OFFICIAL_BASELINE,
         help="前回確認済みの公式Trade Stat一覧",
@@ -142,7 +144,10 @@ def main() -> int:
         if hashlib.sha256(blob).hexdigest() != source["sha256"]:
             raise SystemExit("locked source hash changed: awakened_poe_trade")
         payload = _load_json(args.output)
-        add_english_matchers(payload, blob.decode("utf-8").splitlines())
+        add_english_matchers(
+            payload, blob.decode("utf-8").splitlines(),
+            _load_json(args.effect_english)["templates"],
+        )
         payload["sources"]["awakened_poe_trade"] = source
         integrity = validate_minimal_index(payload)
         if integrity["errors"]:
@@ -263,7 +268,7 @@ def main() -> int:
                 if not option.get("english") and str(option["value"]) in english_options:
                     option["english"] = english_options[str(option["value"])]
     else:
-        add_english_matchers(candidate, awakened)
+        add_english_matchers(candidate, awakened, _load_json(args.effect_english)["templates"])
     integrity = validate_minimal_index(candidate)
     differences = diff_minimal_indexes(previous, candidate)
     unresolved = unresolved_trade_entries(candidate, jp_trade)

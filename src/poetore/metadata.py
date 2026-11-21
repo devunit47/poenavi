@@ -403,7 +403,7 @@ class MetadataIndex:
 
     def match_english(
         self, text: str, kind: str, item_category: str = "",
-        generation: str | None = None,
+        generation: str | None = None, *, random_support: bool | None = None,
     ) -> tuple[ModMetadata | None, OptionValue | None, float]:
         api_kind = "explicit" if kind in {"prefix", "suffix"} else kind
         key = (api_kind, _english_match_key(text))
@@ -415,6 +415,12 @@ class MetadataIndex:
                     record, option, negated,
                 )
         matches = list(candidates.values())
+        if random_support is not None:
+            indexable = [row for row in matches if row[0].stat_id.startswith("explicit.indexable_support_")]
+            if random_support:
+                matches = indexable or matches
+            elif indexable:
+                matches = [row for row in matches if row not in indexable]
         if item_category:
             category = _MATCH_CATEGORIES.get(item_category)
             scoped = [row for row in matches if category and row[0].category_select == category]

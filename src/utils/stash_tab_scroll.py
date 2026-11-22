@@ -3,6 +3,7 @@
 import sys
 from collections.abc import Callable
 
+from src.utils.raw_input_wheel import _Win32RawInputWheelListener
 from src.utils.window_focus import (
     get_foreground_window,
     get_window_rect,
@@ -33,6 +34,7 @@ class StashTabScrollController:
         window_rect: Callable = get_window_rect,
         ctrl_pressed: Callable[[], bool] | None = None,
         tap_key: Callable[[str], None] | None = None,
+        listener_factory: Callable | None = None,
     ):
         self.enabled = bool(enabled)
         self._foreground_window = foreground_window
@@ -40,28 +42,40 @@ class StashTabScrollController:
         self._window_rect = window_rect
         self._ctrl_pressed = ctrl_pressed or self._default_ctrl_pressed
         self._tap_key = tap_key or self._default_tap_key
+        self._listener_factory = listener_factory
         self._mouse_listener = None
+        self._started = False
 
     def set_enabled(self, enabled: bool):
         self.enabled = bool(enabled)
+        if self._started:
+            if self.enabled:
+                self._start_listener()
+            elif self._mouse_listener is not None:
+                self._mouse_listener.stop()
 
     def start(self):
-        if sys.platform != "win32" or self._mouse_listener is not None:
-            return
-        try:
-            from pynput import mouse
+        self._started = True
+        if self.enabled:
+            self._start_listener()
 
-            self._mouse_listener = mouse.Listener(on_scroll=self.handle_scroll)
+    def _start_listener(self):
+        factory = self._listener_factory
+        if factory is None:
+            if sys.platform != "win32":
+                return
+            factory = _Win32RawInputWheelListener
+        try:
+            if self._mouse_listener is None:
+                self._mouse_listener = factory(on_scroll=self.handle_scroll)
             self._mouse_listener.start()
         except Exception as exc:
-            self._mouse_listener = None
             print(f"[STASH SCROLL] Failed to start mouse listener: {exc}")
 
     def stop(self):
-        listener = self._mouse_listener
-        self._mouse_listener = None
-        if listener is not None:
-            listener.stop()
+        self._started = False
+        if self._mouse_listener is not None:
+            self._mouse_listener.stop()
 
     def handle_scroll(self, x: int, y: int, _dx: int, dy: int):
         if not self.enabled or not self._ctrl_pressed() or not dy:

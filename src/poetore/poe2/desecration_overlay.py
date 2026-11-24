@@ -1041,8 +1041,8 @@ class DesecrationTierController(QObject):
         self.hide()
         self._release_scan()
         if self._owns_ocr:
-            self._ocr.close()
+            self._ocr.close(permanent=True)
         if self._owns_numeric_ocr:
-            self._numeric_ocr.close()
+            self._numeric_ocr.close(permanent=True)
         if self._owns_ndl_ocr:
-            self._ndl_ocr.close()
+            self._ndl_ocr.close(permanent=True)

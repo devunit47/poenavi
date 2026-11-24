@@ -211,7 +211,7 @@ class CustomExchangeRatePanel(QWidget):
         self.refresh_callback = refresh_callback or self.refresh
         self.catalog = exchange_catalog_by_id(poe_version)
         self.row_widgets: list[QWidget] = []
-        self._signals = _PanelSignals(self)
+        self._signals = _PanelSignals()
         self._signals.checked.connect(self._sync_checked)
         # A disk-cache hit can complete before the row has been attached to this
         # panel. Queue delivery so the label is discoverable when the icon is
@@ -546,3 +546,5 @@ class CustomExchangeRatePanel(QWidget):
 
     def stop(self) -> None:
         self.check_timer.stop()
+        self._active_check = None
+        self._signals.blockSignals(True)

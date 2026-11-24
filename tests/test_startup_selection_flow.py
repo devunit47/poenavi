@@ -1,5 +1,10 @@
 import unittest
+from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
+import pytest
+
+import main
+from src.app_mode import POENAVI_MODE, POETORE_MODE
 
 try:
     from src.ui.main_window import MainWindow
@@ -10,6 +15,32 @@ else:
     IMPORT_ERROR = None
 
 from src.utils.poe_version_data import POE1, POE2
+
+
+@pytest.mark.parametrize("version_mode", ["", "ask", POE1])
+def test_switch_restart_uses_saved_target_even_when_normal_startup_would_prompt(version_mode):
+    config = {
+        "poe_version": POE2,
+        "poe_version_mode": version_mode,
+        "startup": {"preferred_mode": POETORE_MODE, "show_mode_selector": True},
+    }
+    with patch("src.ui.startup_dialogs.StartupSelectionDialog") as dialog:
+        assert main.select_startup_options(config, skip_selector=True) == (config, POETORE_MODE)
+    dialog.assert_not_called()
+
+
+def test_default_startup_uses_last_selection_without_a_dialog():
+    config = {"poe_version": POE2, "startup": {"preferred_mode": POETORE_MODE}}
+    with patch("src.ui.startup_dialogs.StartupSelectionDialog") as dialog:
+        assert main.select_startup_options(config) == (config, POETORE_MODE)
+    dialog.assert_not_called()
+
+
+def test_poetore_autostart_takes_priority_over_one_shot_skip():
+    config = {"poe_version": POE2, "startup": {"preferred_mode": POENAVI_MODE}}
+    assert main.select_startup_options(config, force_poetore=True, skip_selector=True) == (
+        config, POETORE_MODE,
+    )
 
 
 @unittest.skipIf(MainWindow is None, f"GUI dependencies unavailable: {IMPORT_ERROR}")

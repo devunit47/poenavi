@@ -1,14 +1,38 @@
 import pytest
 from PySide6.QtCore import QSize
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from src.ui.main_window import MainWindow
 from src.ui.toolbar_icons import (
     image_manager_icon,
+    map_mod_manager_icon,
     memo_icon,
+    poenavi_mode_icon,
+    poetore_mode_icon,
     settings_icon,
     vendor_presets_icon,
 )
+
+
+@pytest.mark.parametrize("size", [15, 18, 24, 32])
+def test_mode_icons_render_distinct_line_art_at_small_sizes(qapp, size):
+    color = "#b0ff7b"
+    dimensions = QSize(size, size)
+    compass = poenavi_mode_icon(color, size=size)
+    scale = poetore_mode_icon(color, size=size)
+    images = [icon.pixmap(dimensions).toImage() for icon in (compass, scale)]
+
+    for icon, normal in zip((compass, scale), images):
+        disabled = icon.pixmap(dimensions, QIcon.Disabled).toImage()
+        assert normal.size() == dimensions
+        assert normal.pixelColor(0, 0).alpha() == 0
+        assert any(normal.pixelColor(x, y).alpha() > 180
+                   for x in range(size) for y in range(size))
+        assert max(disabled.pixelColor(x, y).alpha()
+                   for x in range(size) for y in range(size)) <= 115
+    assert images[0] != images[1]
+    assert images[0] != map_mod_manager_icon(color).pixmap(dimensions).toImage()
 
 
 def test_poennavi_toolbar_icons_are_distinct_and_render_at_compact_size():

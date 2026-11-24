@@ -14,6 +14,7 @@ class ScreenReadingCoordinator:
         self.ocr = ocr_server or WindowsOcrServer()
         self._lock = threading.Lock()
         self._owner: str | None = None
+        self._closed = False
 
     @property
     def owner(self) -> str | None:
@@ -22,7 +23,7 @@ class ScreenReadingCoordinator:
 
     def try_begin(self, owner: str) -> bool:
         with self._lock:
-            if self._owner is not None:
+            if self._closed or self._owner is not None:
                 return False
             self._owner = owner
             return True
@@ -40,5 +41,8 @@ class ScreenReadingCoordinator:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             self._owner = None
-        self.ocr.close()
+        self.ocr.close(permanent=True)

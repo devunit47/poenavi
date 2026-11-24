@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from src.ui import app_info_widget
 from src.ui.settings_dialog import SettingsDialog
+from src.version import APP_VERSION
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +50,9 @@ def test_app_information_update_button_uses_injected_callback(qapp):
 
 def test_app_information_displays_disclaimer_and_ndlocr_attribution(qapp):
     dialog = SettingsDialog(current_config={})
+
+    assert dialog.findChild(QLabel, "appInfoVersion").text() == f"ぽえなび v{APP_VERSION} (Fork)"
+    assert any("buri34/poenavi" in label.text() for label in dialog.findChildren(QLabel))
 
     disclaimer = dialog.findChild(QLabel, "appDisclaimerLabel")
     assert disclaimer is not None

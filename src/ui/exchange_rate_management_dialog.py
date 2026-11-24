@@ -244,7 +244,7 @@ class ExchangeRateManagementDialog(QDialog):
             label: category
             for category, label in self._category_label_pairs()
         }
-        self._icon_signals = _IconSignals(self)
+        self._icon_signals = _IconSignals()
         self._icon_signals.ready.connect(self._apply_icon)
         self._icon_requested: set[str] = set()
 

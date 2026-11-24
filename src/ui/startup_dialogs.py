@@ -21,9 +21,11 @@ from src.ui.appearance import theme_color, theme_font_size, theme_rgba
 from src.ui.styles import Styles
 from src.app_mode import POENAVI_MODE, POETORE_MODE, normalize_app_mode
 from src.ui.app_theme import theme_for_mode
+from src.ui.toolbar_icons import poenavi_mode_icon, poetore_mode_icon
 from src.utils.config_manager import ConfigManager
 from src.utils.feature_support import POETORE, is_feature_supported
 from src.utils.poe_version_data import POE1, POE2
+from src.version import with_fork_label
 
 
 class StartupSelectionDialog(QDialog):
@@ -36,23 +38,26 @@ class StartupSelectionDialog(QDialog):
         poetore_supported = is_feature_supported(POETORE, self.selected_version)
         if self.selected_mode == POETORE_MODE and not poetore_supported:
             self.selected_mode = POENAVI_MODE
-        self.setWindowTitle("起動設定")
+        self.setWindowTitle(with_fork_label("起動設定"))
         self.setModal(True)
-        self.setFixedSize(760, 760)
-        self.setStyleSheet(Styles.MAIN_WINDOW)
+        self.setObjectName("startupSelectionDialog")
+        theme = theme_for_mode(POENAVI_MODE)
+        self.setStyleSheet(Styles.MAIN_WINDOW + f"""
+            QDialog#startupSelectionDialog {{ background-color: {theme.background}; }}
+        """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
 
-        title = QLabel("起動するPoEバージョンと機能を選んでください")
-        title.setStyleSheet(f"color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(20)}px; font-weight: bold;")
+        title = QLabel("PoEバージョン")
+        title.setStyleSheet(f"color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(16)}px; font-weight: bold;")
         layout.addWidget(title)
 
         self.version_group = QButtonGroup(self)
         self.version_group.setExclusive(True)
         version_cards = QHBoxLayout()
-        version_cards.setSpacing(16)
+        version_cards.setSpacing(8)
         self.poe1_tile = self._create_version_tile(POE1, "PoE1", self.selected_version == POE1)
         self.poe2_tile = self._create_version_tile(POE2, "PoE2", self.selected_version == POE2)
         self.version_group.buttonToggled.connect(self._on_version_toggled)
@@ -60,41 +65,32 @@ class StartupSelectionDialog(QDialog):
         version_cards.addWidget(self.poe2_tile)
         layout.addLayout(version_cards)
 
-        feature_title = QLabel("使う機能を選んでください")
-        feature_title.setStyleSheet(f"color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(18)}px; font-weight: bold;")
+        feature_title = QLabel("起動モード")
+        feature_title.setStyleSheet(title.styleSheet())
         layout.addWidget(feature_title)
 
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         cards = QHBoxLayout()
-        cards.setSpacing(16)
+        cards.setSpacing(8)
         self.poenavi_card = self._create_card(
             POENAVI_MODE,
             "ぽえなび",
             "Act攻略支援",
-            theme_for_mode(POENAVI_MODE).accent,
-            "icon.ico",
+            poenavi_mode_icon,
             self.selected_mode == POENAVI_MODE,
         )
         self.poetore_card = self._create_card(
             POETORE_MODE,
             "ぽえとれ",
             "価格チェック・トレード支援",
-            Styles.TEXT_COLOR,
-            "icon2.ico",
+            poetore_mode_icon,
             self.selected_mode == POETORE_MODE,
         )
         self._set_poetore_supported(poetore_supported)
         cards.addWidget(self.poenavi_card)
         cards.addWidget(self.poetore_card)
         layout.addLayout(cards)
-
-        notice = QLabel(
-            "※デフォルトでは起動時に毎回確認します。以下のチェックボックスをONにすると固定にもできます。設定画面からも変更可能です。"
-        )
-        notice.setWordWrap(True)
-        notice.setStyleSheet(f"color: {theme_rgba('accent', 176, 255, 123, 0.78)}; font-size: {theme_font_size(13)}px;")
-        layout.addWidget(notice)
 
         self.skip_selector_checkbox = QCheckBox("次回からこの設定で直接起動")
         self.skip_selector_checkbox.setChecked(False)
@@ -121,54 +117,40 @@ class StartupSelectionDialog(QDialog):
         cancel_button = QPushButton("キャンセル")
         cancel_button.setStyleSheet(Styles.BUTTON)
         cancel_button.clicked.connect(self.reject)
-        buttons.addWidget(start_button)
         buttons.addWidget(cancel_button)
+        buttons.addWidget(start_button)
+        start_button.setDefault(True)
         layout.addLayout(buttons)
+        self.resize(max(460, self.sizeHint().width()), self.sizeHint().height())
 
-    @staticmethod
-    def _app_icon_path(filename):
-        if getattr(sys, "frozen", False):
-            exe_dir = os.path.dirname(sys.executable)
-            bundled = os.path.join(exe_dir, "assets", "app", filename)
-            if os.path.exists(bundled):
-                return bundled
-            base = getattr(sys, "_MEIPASS", exe_dir)
-            return os.path.join(base, "assets", "app", filename)
-        project_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-        return os.path.join(project_root, "assets", "app", filename)
-
-    def _create_card(self, mode, title, description, accent, icon_name, checked):
+    def _create_card(self, mode, title, description, make_icon, checked):
         button = QToolButton()
         button.setText(f"{title}\n{description}")
         button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        icon_path = self._app_icon_path(icon_name)
-        if os.path.exists(icon_path):
-            button.setIcon(QIcon(icon_path))
-            button.setIconSize(QSize(128, 128))
+        button.setIcon(make_icon(Styles.TEXT_COLOR, size=30))
+        button.setIconSize(QSize(30, 30))
         button.setProperty("app_mode", mode)
         button.setCheckable(True)
         button.setChecked(checked)
         button.setCursor(QCursor(Qt.PointingHandCursor))
-        button.setMinimumHeight(205)
+        button.setMinimumHeight(82)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         button.setStyleSheet(f"""
             QToolButton {{
-                color: {accent};
+                color: {Styles.TEXT_COLOR};
                 background-color: {theme_rgba('control', 15, 18, 17, 245)};
                 border: 1px solid {theme_rgba('border', 190, 200, 190, 0.28)};
-                border-radius: 14px;
-                padding: 12px 18px 16px 18px;
-                font-size: {theme_font_size(17)}px;
+                border-radius: 8px;
+                padding: 5px 8px;
+                font-size: {theme_font_size(14)}px;
                 font-weight: bold;
             }}
-            QToolButton:hover {{
-                border: 2px solid {accent};
+            QToolButton:hover, QToolButton:focus {{
+                border-color: {Styles.TEXT_COLOR};
                 background-color: {theme_rgba('surface', 30, 34, 32, 250)};
             }}
             QToolButton:checked {{
-                border: 3px solid {accent};
+                border-color: {Styles.TEXT_COLOR};
                 background-color: {theme_rgba('surface', 42, 46, 43, 250)};
             }}
             QToolButton:disabled {{
@@ -191,11 +173,7 @@ class StartupSelectionDialog(QDialog):
 
     def _set_poetore_supported(self, supported):
         self.poetore_card.setEnabled(supported)
-        self.poetore_card.setToolTip("" if supported else "PoE2版は現在テスト中です")
-        description = "価格チェック・トレード支援"
-        if not supported:
-            description += "\nPoE2版は現在テスト中です"
-        self.poetore_card.setText(f"ぽえとれ\n{description}")
+        self.poetore_card.setToolTip("" if supported else "選択中のPoE版には対応していません")
 
     def _assets_dir(self):
         if getattr(sys, "frozen", False):
@@ -225,27 +203,25 @@ class StartupSelectionDialog(QDialog):
         button.setCheckable(True)
         button.setChecked(checked)
         button.setCursor(QCursor(Qt.PointingHandCursor))
-        button.setMinimumHeight(170)
+        button.setMinimumHeight(76)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         button.setStyleSheet(f"""
             QToolButton {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {theme_rgba('control', 26, 35, 24, 235)}, stop:1 {theme_rgba('control', 5, 8, 6, 245)});
+                background: {theme_rgba('control', 15, 18, 17, 245)};
                 color: {Styles.TEXT_COLOR}; border: 1px solid {theme_rgba('accent', 176, 255, 123, 0.28)};
-                border-radius: 12px; padding: 8px 12px 10px 12px;
-                font-size: {theme_font_size(26)}px; font-weight: bold;
+                border-radius: 8px; padding: 4px 8px;
+                font-size: {theme_font_size(15)}px; font-weight: bold;
             }}
-            QToolButton:hover {{ border: 2px solid {theme_rgba('accent', 176, 255, 123, 0.72)}; }}
+            QToolButton:hover, QToolButton:focus {{ border-color: {Styles.TEXT_COLOR}; }}
             QToolButton:checked {{
-                border: 3px solid {Styles.TEXT_COLOR};
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {theme_rgba('accent_soft', 73, 110, 50, 245)}, stop:1 {theme_rgba('surface', 15, 27, 16, 250)});
+                border-color: {Styles.TEXT_COLOR};
+                background: {theme_rgba('surface', 42, 46, 43, 250)};
             }}
         """)
         icon_path = self._version_icon_path(version)
         if icon_path:
             button.setIcon(QIcon(icon_path))
-            button.setIconSize(QSize(130, 130))
+            button.setIconSize(QSize(40, 40))
         self.version_group.addButton(button)
         return button
 

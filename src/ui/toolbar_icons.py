@@ -90,6 +90,36 @@ def map_mod_manager_icon(color) -> QIcon:
     return finish_line_icon(pixmap, painter)
 
 
+def poenavi_mode_icon(color, *, size=24) -> QIcon:
+    """A compass with a diagonal needle."""
+    pixmap, painter = line_icon_canvas(color, size=size)
+    painter.drawEllipse(QPointF(12, 12), 9, 9)
+    painter.drawPolygon(QPolygonF([
+        QPointF(16.5, 7.5), QPointF(14, 14),
+        QPointF(7.5, 16.5), QPointF(10, 10),
+    ]))
+    return finish_line_icon(pixmap, painter)
+
+
+def poetore_mode_icon(color, *, size=24) -> QIcon:
+    """A balance with a central post and two suspended pans."""
+    pixmap, painter = line_icon_canvas(color, size=size)
+    painter.drawLine(QPointF(12, 3.5), QPointF(12, 20))
+    painter.drawLine(QPointF(7.5, 20), QPointF(16.5, 20))
+    painter.drawLine(QPointF(5.5, 6), QPointF(18.5, 6))
+    for center in (5.5, 18.5):
+        left, right = center - 3.5, center + 3.5
+        pan = QPainterPath(QPointF(center, 6))
+        pan.lineTo(left, 13.5)
+        pan.lineTo(right, 13.5)
+        pan.closeSubpath()
+        painter.drawPath(pan)
+        bowl = QPainterPath(QPointF(left, 13.5))
+        bowl.cubicTo(left, 18, right, 18, right, 13.5)
+        painter.drawPath(bowl)
+    return finish_line_icon(pixmap, painter)
+
+
 def reload_icon(color, *, size=24) -> QIcon:
     pixmap, painter = line_icon_canvas(color, size=size)
     painter.drawArc(QRectF(4.5, 4.5, 15, 15), 30 * 16, 300 * 16)

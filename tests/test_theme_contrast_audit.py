@@ -7,13 +7,15 @@ contrast requirements. Essential borders, selection marks and handles are not.
 import re
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtWidgets import QCheckBox, QDialog, QPushButton
 
-from src.ui.appearance import configure_appearance, current_appearance, resolve_tokens
+from src.ui.appearance import configure_appearance, current_appearance, resolve_tokens, theme_color
 from src.ui.app_info_widget import AppInfoWidget
 from src.ui.app_theme import theme_for_mode
 from src.ui.dialog_theme import apply_dialog_theme, dialog_theme_for_mode
+from src.ui.mode_switcher import ModeSwitcherWidget
 from src.ui.styles import Styles
 
 
@@ -79,3 +81,38 @@ def test_actual_checkbox_ink_and_fill(qapp, preset):
     best = max(contrast(image.pixelColor(x, y), background)
                for x in range(image.width()) for y in range(image.height()))
     assert best >= 3, (preset, best)
+
+
+@pytest.mark.parametrize("switcher_preset", ["default", "poenavi", "poetore", "tokyo_night", "vscode_dark_2026"])
+@pytest.mark.parametrize("mode", ["poenavi", "poetore"])
+def test_mode_switcher_button_foregrounds(qtbot, switcher_preset, mode):
+    previous = current_appearance()
+    configure_appearance({"preset": switcher_preset})
+    switcher = ModeSwitcherWidget(mode, "poe1")
+    qtbot.addWidget(switcher)
+    try:
+        theme = theme_for_mode(mode)
+        surface = theme_color("surface", "#171B1D")
+        accent_soft = theme_color("accent_soft", "#22321D")
+        for width in (520, 240):
+            switcher.set_available_width(width, width)
+            switcher.adjustSize()
+            switcher.show()
+            for button in (*switcher.mode_buttons.values(), switcher.version_button, switcher.compact_button):
+                if not button.isVisible():
+                    continue
+                button.clearFocus()
+                selected = button.property("currentMode")
+                expected_ink = theme.accent if selected else (
+                    theme.text if button is switcher.version_button else theme.muted_text
+                )
+                ink = button.palette().color(QPalette.ButtonText)
+                image = switcher.grab().toImage()
+                point = button.mapTo(switcher, QPoint(button.width() // 2, 1))
+                fill = image.pixelColor(point * image.devicePixelRatio())
+                assert ink == QColor(expected_ink)
+                assert fill == QColor(accent_soft if selected else surface)
+                assert contrast(ink, fill) >= 4.5
+    finally:
+        switcher.close()
+        configure_appearance(previous)

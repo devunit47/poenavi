@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.appearance import resolve_dialog_theme
-from src.app_mode import POENAVI_MODE, POETORE_MODE, normalize_app_mode
+from src.app_mode import POENAVI_MODE, POETORE_MODE, normalize_app_mode, startup_preferences
 from src.poetore.hideout_notification import (
     BUNDLED_SOUND_OPTIONS,
     DEFAULT_BUNDLED_SOUND_ID,
@@ -137,7 +137,6 @@ class PoetoreSettingsDialog(QDialog):
             version_row.addWidget(radio)
         version_row.addStretch()
         startup_layout.addLayout(version_row)
-        saved_version_mode = str(self.current_config.get("poe_version_mode", "ask"))
 
         startup = self.current_config.get("startup")
         startup = startup if isinstance(startup, dict) else {}
@@ -161,10 +160,9 @@ class PoetoreSettingsDialog(QDialog):
         mode_row.addStretch()
         startup_layout.addLayout(mode_row)
         self.skip_startup_selector_checkbox = QCheckBox("次回からこの設定で直接起動")
-        self.skip_startup_selector_checkbox.setChecked(
-            saved_version_mode in POE_VERSION_ORDER
-            and not bool(startup.get("show_mode_selector", True))
-        )
+        _, show_selector = startup_preferences(self.current_config)
+        self.skip_startup_selector_checkbox.setChecked(not show_selector)
+        self.skip_startup_selector_checkbox.setToolTip("オフにすると起動時に毎回確認します")
         startup_layout.addWidget(self.skip_startup_selector_checkbox)
         self.startup_change_note = QLabel(
             "PoEバージョン・起動モードは次回起動時に適用されます。"

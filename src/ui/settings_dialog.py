@@ -49,7 +49,7 @@ from src.ui.window_flags import (
     mini_topmost_mode_from_config,
 )
 
-from src.app_mode import POENAVI_MODE, POETORE_MODE, normalize_app_mode
+from src.app_mode import POENAVI_MODE, POETORE_MODE, normalize_app_mode, startup_preferences
 from src.utils.feature_support import POETORE, is_feature_supported
 
 
@@ -1986,7 +1986,6 @@ class SettingsDialog(QDialog):
             "cheat_sheets_toggle": "shift+space",
         })
         self.poe_version = self.current_config.get("poe_version", POE1)
-        self.poe_version_mode = self.current_config.get("poe_version_mode", "ask")
         zone_master_data = load_zone_master_data()
         self.zone_data_by_version = zone_master_data["zone_data_by_version"]
         self.town_zones_by_version = zone_master_data["town_zones_by_version"]
@@ -2102,10 +2101,9 @@ class SettingsDialog(QDialog):
             self.app_mode_radios[mode] = radio
 
         self.skip_startup_selector_checkbox = QCheckBox("次回からこの設定で直接起動")
-        self.skip_startup_selector_checkbox.setChecked(
-            self.poe_version_mode in POE_VERSION_ORDER
-            and not bool(startup_config.get("show_mode_selector", True))
-        )
+        _, show_selector = startup_preferences(self.current_config)
+        self.skip_startup_selector_checkbox.setChecked(not show_selector)
+        self.skip_startup_selector_checkbox.setToolTip("オフにすると起動時に毎回確認します")
         Styles.apply_checkbox_style(self.skip_startup_selector_checkbox)
         startup_layout.addWidget(self.skip_startup_selector_checkbox)
         self.startup_change_note = QLabel(

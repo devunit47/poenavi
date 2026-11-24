@@ -5,8 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 import main
@@ -27,8 +27,8 @@ class AppModeTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_missing_startup_settings_show_selector_with_safe_default(self):
-        self.assertEqual(startup_preferences({}), (POENAVI_MODE, True))
+    def test_missing_startup_settings_skip_selector_with_safe_default(self):
+        self.assertEqual(startup_preferences({}), (POENAVI_MODE, False))
 
     def test_audio_smoke_test_writes_success_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -84,14 +84,12 @@ class AppModeTest(unittest.TestCase):
     def test_dialog_uses_previous_mode_but_does_not_skip_by_default(self):
         dialog = StartupSelectionDialog(current_mode=POETORE_MODE)
 
+        self.assertEqual(dialog.windowTitle(), "起動設定 (Fork)")
         self.assertTrue(dialog.poetore_card.isChecked())
         self.assertFalse(dialog.skip_selector)
         self.assertIn("border: 2px solid", dialog.skip_selector_checkbox.styleSheet())
         self.assertFalse(dialog.poenavi_card.icon().isNull())
         self.assertFalse(dialog.poetore_card.icon().isNull())
-        for icon_name in ("icon.ico", "icon2.ico"):
-            icon_path = Path(StartupSelectionDialog._app_icon_path(icon_name))
-            self.assertEqual(icon_path.parts[-3:], ("assets", "app", icon_name))
 
     def test_dialog_accepts_poetore_when_poe2_is_selected(self):
         dialog = StartupSelectionDialog(current_mode=POENAVI_MODE)
@@ -102,7 +100,7 @@ class AppModeTest(unittest.TestCase):
         self.assertEqual(dialog.selected_version, POE2)
         self.assertEqual(dialog.selected_mode, POETORE_MODE)
 
-    def test_dialog_has_one_shared_fix_checkbox_and_requested_notice(self):
+    def test_dialog_has_one_shared_fix_checkbox_and_compact_layout(self):
         dialog = StartupSelectionDialog()
 
         checkboxes = dialog.findChildren(type(dialog.skip_selector_checkbox))
@@ -112,16 +110,9 @@ class AppModeTest(unittest.TestCase):
             "次回からこの設定で直接起動",
         )
         labels = [label.text() for label in dialog.findChildren(QLabel)]
-        self.assertIn(
-            "※デフォルトでは起動時に毎回確認します。以下のチェックボックスをONにすると固定にもできます。設定画面からも変更可能です。",
-            labels,
-        )
-        notice = next(
-            label
-            for label in dialog.findChildren(QLabel)
-            if label.text().startswith("※デフォルトでは")
-        )
-        self.assertIn("font-size: 13px", notice.styleSheet())
+        self.assertEqual(labels, ["PoEバージョン", "起動モード"])
+        self.assertLess(dialog.width(), 600)
+        self.assertLess(dialog.height(), 400)
         self.assertIn("font-size: 13px", dialog.skip_selector_checkbox.styleSheet())
 
     def test_version_labels_are_centered_below_their_logos(self):
@@ -220,7 +211,9 @@ class AppModeTest(unittest.TestCase):
 
         with patch("src.ui.startup_dialogs.StartupSelectionDialog", return_value=dialog), \
              patch.object(main.ConfigManager, "save_config"):
-            selected, _ = main.select_startup_options({"poe_version_mode": POE1})
+            selected, _ = main.select_startup_options({
+                "poe_version_mode": POE1, "startup": {"show_mode_selector": True},
+            })
 
         self.assertEqual(selected["poe_version_mode"], "ask")
         self.assertTrue(selected["startup"]["show_mode_selector"])
@@ -238,21 +231,15 @@ class AppModeTest(unittest.TestCase):
         self.assertIsNone(selected)
         save_config.assert_not_called()
 
-    def test_mode_icons_have_transparent_corners(self):
-        for icon_name in ("icon.ico", "icon2.ico"):
-            pixmap = QPixmap(StartupSelectionDialog._app_icon_path(icon_name))
-            self.assertFalse(pixmap.isNull())
+    def test_tray_icons_have_transparent_corners(self):
+        assets = Path(__file__).resolve().parents[1] / "assets" / "app"
+        for name in ("icon.ico", "icon2.ico"):
+            pixmap = QPixmap(str(assets / name))
+            self.assertFalse(pixmap.isNull(), name)
             image = pixmap.toImage()
-            corners = (
-                (0, 0),
-                (image.width() - 1, 0),
-                (0, image.height() - 1),
-                (image.width() - 1, image.height() - 1),
-            )
-            self.assertTrue(
-                all(image.pixelColor(x, y).alpha() < 64 for x, y in corners),
-                icon_name,
-            )
+            for x in (0, image.width() - 1):
+                for y in (0, image.height() - 1):
+                    self.assertLess(image.pixelColor(x, y).alpha(), 64, name)
 
     def test_update_gate_runs_before_mode_selection(self):
         events = []
@@ -268,7 +255,10 @@ class AppModeTest(unittest.TestCase):
             events.append("update_gate")
             return True
 
-        def select_startup(config):
+        def select_startup(config, *, force_poetore, skip_selector):
+            self.assertTrue(force_poetore)
+            self.assertTrue(skip_selector)
+            self.assertEqual(main.sys.argv, ["main.py"])
             events.append("select_startup")
             return config, POENAVI_MODE
 
@@ -283,6 +273,7 @@ class AppModeTest(unittest.TestCase):
              patch.object(main, "SingleInstanceGuard", return_value=single_instance), \
              patch.object(main.ConfigManager, "load_config", side_effect=load_config), \
              patch.object(main, "select_startup_options", side_effect=select_startup), \
+             patch.object(main.sys, "argv", ["main.py", "--poetore", "--skip-startup-selector"]), \
              patch.object(main.QTimer, "singleShot"), \
              patch.dict(
                  "sys.modules",

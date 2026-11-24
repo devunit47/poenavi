@@ -260,10 +260,13 @@ def test_trade_results_use_shared_colors_and_scale_existing_size_profile(qapp):
 
 
 def test_mode_title_bar_uses_startup_snapshot_even_when_imported_earlier(qapp):
+    from PySide6.QtCore import Signal
     from PySide6.QtWidgets import QWidget
     from src.ui.poetore_mode_window import _PoetoreModeTitleBar
 
     class Owner(QWidget):
+        switch_requested = Signal(str, str)
+
         def minimize_to_tray(self):
             pass
 

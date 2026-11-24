@@ -107,6 +107,7 @@ class NdlOcrLiteServer:
         self._session_dir: Path | None = None
         self._request_number = 0
         self._ready = False
+        self._retired = False
         self.last_metrics: NdlOcrRequestMetrics | None = None
 
     @property
@@ -180,6 +181,8 @@ class NdlOcrLiteServer:
         if self.is_ready:
             return False
         with self._state_lock:
+            if self._retired:
+                raise RuntimeError("NDLOCRは終了済みです。")
             old_process = self._process
             old_session_dir = self._session_dir
         if old_process is not None:
@@ -196,32 +199,34 @@ class NdlOcrLiteServer:
         environment = os.environ.copy()
         environment["PYTHONUTF8"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
+        responses: queue.Queue[dict[str, object] | None] = queue.Queue()
+        stderr_tail: deque[str] = deque(maxlen=20)
         try:
-            process = self._process_factory(
-                [str(helper), "--server"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                cwd=str(helper.parent),
-                env=environment,
-                creationflags=creationflags,
-            )
+            with self._state_lock:
+                if self._retired:
+                    raise RuntimeError("NDLOCRは終了済みです。")
+                process = self._process_factory(
+                    [str(helper), "--server"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    cwd=str(helper.parent),
+                    env=environment,
+                    creationflags=creationflags,
+                )
+                self._process = process
+                self._session_dir = session_dir
+                self._ready = False
+                self._responses = responses
+                self._stderr_tail = stderr_tail
         except Exception:
             shutil.rmtree(session_dir, ignore_errors=True)
             self._emit("ndl_resident_stopped", reason="startup_failed")
             raise
-        responses: queue.Queue[dict[str, object] | None] = queue.Queue()
-        stderr_tail: deque[str] = deque(maxlen=20)
-        with self._state_lock:
-            self._process = process
-            self._session_dir = session_dir
-            self._ready = False
-            self._responses = responses
-            self._stderr_tail = stderr_tail
         threading.Thread(
             target=self._read_stdout,
             args=(process, responses),
@@ -420,9 +425,10 @@ class NdlOcrLiteServer:
             if process is not None:
                 self._shutdown_process(process, session_dir, reason=reason)
 
-    def close(self) -> None:
+    def close(self, *, permanent: bool = False) -> None:
         # Explicit application/mode shutdown must not wait for a long inference.
         with self._state_lock:
+            self._retired = self._retired or permanent
             timer = self._timer
             self._timer = None
             self._timer_generation += 1

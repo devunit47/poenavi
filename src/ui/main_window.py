@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import sys
@@ -13,11 +14,14 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QStyle, QSystemTrayIcon, QToolTip)
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, QRect, QEvent, QEventLoop, QPoint, QSize, QUrl
 from PySide6.QtGui import QAction, QCursor, QMouseEvent, QIcon, QDesktopServices, QKeySequence
+from src.app_mode import POENAVI_MODE
+from src.version import with_fork_label
 from src.ui.appearance import (
     fit_theme_fixed_geometry, has_custom_theme_font, theme_color,
     theme_font_family, theme_font_size, theme_rgba,
 )
 from src.ui.styles import Styles
+from src.ui.mode_switcher import ModeSwitcherWidget, add_mode_switch_menu
 from src.ui.detached_panel import DetachedPanelWindow
 from src.ui.settings_dialog import AreaNoteDialog, SettingsDialog
 from src.ui.map_viewer import MapThumbnailWidget
@@ -135,6 +139,11 @@ def _gem_shop_hotkey_matches(configured: str, actual: str) -> bool:
     return configured == actual
 
 
+class _MainWindowWorkerSignals(QObject):
+    hotkey = Signal(str)
+    history_checked = Signal(object)
+
+
 class MainWindow(QMainWindow):
     # Qt may call an overridden showEvent from QMainWindow.__init__ before
     # this class' __init__ body can initialize instance attributes.
@@ -149,10 +158,9 @@ class MainWindow(QMainWindow):
     }
 
     # ホットキーイベントをメインスレッドで処理するためのシグナル
-    hotkey_signal = Signal(str)
+    switch_requested = Signal(str, str)
     poelab_url_resolved = Signal(str)
     poelab_url_failed = Signal(str)
-    historical_progress_check_finished = Signal(object)
 
     def _detached_panel_config(self, panel_id: str) -> dict:
         panels = self.config.setdefault("detached_panels", {})
@@ -183,12 +191,14 @@ class MainWindow(QMainWindow):
             save_config = ConfigManager.save_config
             QTimer.singleShot(
                 250,
+                self,
                 lambda: self._flush_detached_panel_state(save_config),
             )
 
     def _flush_detached_panel_state(self, save_config=None):
         self._detached_state_save_scheduled = False
-        (save_config or ConfigManager.save_config)(self.config)
+        if not getattr(self, "_session_closed", False):
+            (save_config or ConfigManager.save_config)(self.config)
 
     def _set_panel_minimized_state(self, panel_id: str, minimized: bool, persist: bool = True):
         self._detached_panel_config(panel_id)["minimized"] = minimized
@@ -219,7 +229,7 @@ class MainWindow(QMainWindow):
         self.guide_body_splitter.insertWidget(1, lower_section)
         sizes = getattr(self, "_guide_lower_splitter_sizes", None)
         if isinstance(sizes, list) and len(sizes) == 2:
-            QTimer.singleShot(0, lambda: self.guide_body_splitter.setSizes(sizes))
+            QTimer.singleShot(0, self, lambda: self.guide_body_splitter.setSizes(sizes))
         self._guide_lower_in_main = False
 
     def detach_panel(self, panel_id: str):
@@ -484,6 +494,8 @@ class MainWindow(QMainWindow):
             self._save_detached_panel_state(panel_window.panel_id, persist=True)
             panel_window._returning = True
             panel_window.close()
+            panel_window.deleteLater()
+        getattr(self, "detached_panel_windows", {}).clear()
 
     def _apply_detached_panel_window_settings(self):
         for panel_window in getattr(self, "detached_panel_windows", {}).values():
@@ -491,6 +503,21 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._session_closed = False
+        try:
+            self._initialize()
+        except Exception:
+            try:
+                self._shutdown()
+            except Exception:
+                logging.getLogger(__name__).exception("ぽえなびの初期化失敗後に終了処理が失敗しました")
+            raise
+
+    def _initialize(self):
+        # The listener and log scan can finish after the Qt window is deleted.
+        self._worker_signals = _MainWindowWorkerSignals()
+        self.hotkey_signal = self._worker_signals.hotkey
+        self.historical_progress_check_finished = self._worker_signals.history_checked
 
         # Qt can deliver showEvent while startup dialogs are running.  Keep
         # showEvent side-effect free until every widget/state it uses exists.
@@ -498,7 +525,7 @@ class MainWindow(QMainWindow):
 
         # 設定読み込み
         self.config = ConfigManager.load_config()
-        self.setWindowTitle(f"ぽえなび [{get_poe_label(self.config.get('poe_version', POE1))}]")
+        self.setWindowTitle(with_fork_label(f"ぽえなび [{get_poe_label(self.config.get('poe_version', POE1))}]"))
 
         # config の display_monitor で指定されたモニターの右端に縦長で配置
         from PySide6.QtWidgets import QApplication
@@ -523,7 +550,7 @@ class MainWindow(QMainWindow):
         
         # 設定読み込み
         self.config = ConfigManager.load_config()
-        self.update_controller = UpdateController(self)
+        self.update_controller = UpdateController()
         self._update_progress_dialog = None
         app = QApplication.instance()
         if (
@@ -763,12 +790,15 @@ class MainWindow(QMainWindow):
 
     def _connect_update_controller(self):
         """Connect handlers used after the startup update gate."""
-        self.update_controller.check_finished.connect(self._on_update_check_finished)
-        self.update_controller.check_failed.connect(self._on_update_check_failed)
-        self.update_controller.download_progress.connect(self._on_update_download_progress)
-        self.update_controller.download_ready.connect(self._on_update_download_ready)
-        self.update_controller.download_failed.connect(self._on_update_download_failed)
-        self.update_controller.download_cancelled.connect(self._on_update_download_cancelled)
+        controller = self.update_controller
+        self._update_connections = (
+            controller.check_finished.connect(self._on_update_check_finished),
+            controller.check_failed.connect(self._on_update_check_failed),
+            controller.download_progress.connect(self._on_update_download_progress),
+            controller.download_ready.connect(self._on_update_download_ready),
+            controller.download_failed.connect(self._on_update_download_failed),
+            controller.download_cancelled.connect(self._on_update_download_cancelled),
+        )
 
     def _run_startup_update_gate(self):
         """Finish the startup update decision before showing setup dialogs."""
@@ -1252,18 +1282,23 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # === タイトルバー（最小化・閉じる） ===
+        # === タイトルバー ===
         title_bar = QHBoxLayout()
-        # リサイズ用の端つかみ範囲（EDGE_MARGIN=14）は維持しつつ、
-        # 最小化/閉じるボタンが上端・右端の判定に被らないよう少し内側へ逃がす。
-        title_bar.setContentsMargins(5, 16, 16, 0)
+        # 操作ボタンを端リサイズの判定範囲から外す。
+        inset = self.EDGE_MARGIN + 2
+        title_bar.setContentsMargins(inset, inset, inset, 0)
+        title_bar.setSpacing(6)
+        self.mode_switcher = ModeSwitcherWidget(POENAVI_MODE, self.poe_version, central_widget)
+        self.mode_switcher.switch_requested.connect(self.switch_requested)
+        title_bar.addWidget(self.mode_switcher)
+        title_bar.addStretch()
         
         # クリックスルー状態表示
         self.click_through = False
         self.click_through_label = QLabel("")
+        self.click_through_label.setWordWrap(True)
+        self.click_through_label.setContentsMargins(inset, 2, inset, 0)
         self._update_click_through_label()
-        title_bar.addWidget(self.click_through_label)
-        title_bar.addStretch()
         
         btn_style = f"""
             QPushButton {{
@@ -1297,6 +1332,8 @@ class MainWindow(QMainWindow):
         title_bar.addWidget(close_btn)
         
         layout.addLayout(title_bar)
+        layout.addWidget(self.click_through_label)
+        self._update_mode_switcher_width()
         
         # === タイマー折りたたみトグル ===
         self.timer_expanded = self.config.get("timer_expanded", True)
@@ -1945,7 +1982,7 @@ class MainWindow(QMainWindow):
             and len(saved_splitter_sizes) == 2
             and all(isinstance(v, int) and v > 0 for v in saved_splitter_sizes)
         ):
-            QTimer.singleShot(0, lambda sizes=saved_splitter_sizes: self.guide_body_splitter.setSizes(sizes))
+            QTimer.singleShot(0, self, lambda: self.guide_body_splitter.setSizes(saved_splitter_sizes))
         
         layout.addWidget(self.guide_container, stretch=1)
 
@@ -1986,8 +2023,15 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "mode_switcher"):
+            self._update_mode_switcher_width()
         if hasattr(self, 'size_grip'):
             self.size_grip.move(self.width() - 18, self.height() - 18)
+
+    def _update_mode_switcher_width(self):
+        # 左右マージン、ウィンドウ操作ボタン2個、レイアウトの間隔。
+        reserved = 2 * (self.EDGE_MARGIN + 2) + 2 * 30 + 3 * 6
+        self.mode_switcher.set_available_width(self.width(), self.width() - reserved)
 
     def _adjust_height_keep_width(self):
         """折りたたみ操作時に、現在の横幅を維持したまま高さだけ再調整する。"""
@@ -3434,6 +3478,8 @@ class MainWindow(QMainWindow):
         return getattr(window, "_poe_window_hwnd", None) if window is not None else None
 
     def handle_hotkey(self, command):
+        if getattr(self, "_session_closed", False) is True:
+            return
         print(f"[HOTKEY DEBUG] handle command={command} search_in_progress={getattr(self, '_search_paste_in_progress', False)}")
         if command.startswith("custom_command:"):
             index = int(command.split(":", 1)[1])
@@ -3496,7 +3542,7 @@ class MainWindow(QMainWindow):
         if not is_feature_supported(GEM_SHOP_SEARCH, self.poe_version):
             return None
         generation = self._gem_shop_search_hold.start()
-        QTimer.singleShot(self._gem_shop_search_hold_delay_ms(), lambda: self._run_gem_shop_search_hold(generation))
+        QTimer.singleShot(self._gem_shop_search_hold_delay_ms(), self, lambda: self._run_gem_shop_search_hold(generation))
 
     def _finish_gem_shop_search_hold(self):
         self._gem_shop_search_hold.release()
@@ -3541,7 +3587,7 @@ class MainWindow(QMainWindow):
             return
         QApplication.clipboard().setText(query)
         self.gem_shop_search_copy_btn.setText("コピー済み")
-        QTimer.singleShot(1200, lambda: self.gem_shop_search_copy_btn.setText("Regexをコピー"))
+        QTimer.singleShot(1200, self, lambda: self.gem_shop_search_copy_btn.setText("Regexをコピー"))
 
     def _show_gem_shop_search_status(self, message: str):
         QToolTip.showText(QCursor.pos(), message, self, QRect(), 2500)
@@ -3753,9 +3799,11 @@ class MainWindow(QMainWindow):
             return
 
         self._last_search_target_hwnd = target_hwnd
-        QTimer.singleShot(450, lambda: self._paste_to_poe_search_field(text))
+        QTimer.singleShot(450, self, lambda: self._paste_to_poe_search_field(text))
 
     def _paste_to_poe_search_field(self, text: str):
+        if getattr(self, "_session_closed", False) is True:
+            return
         from src.utils.internal_key_input import internal_key_input
 
         try:
@@ -3947,6 +3995,8 @@ class MainWindow(QMainWindow):
         self._save_progress_flags()
 
     def _handle_historical_progress_check_result(self, payload):
+        if getattr(self, "_session_closed", False):
+            return
         inspected_version, anchor_zone, result = payload
         if (
             not isinstance(result, NewCharacterHistoryResult)
@@ -3979,6 +4029,8 @@ class MainWindow(QMainWindow):
             message_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             message_box.setDefaultButton(QMessageBox.Yes)
             should_reset = message_box.exec() == QMessageBox.Yes
+            if getattr(self, "_session_closed", False):
+                return
 
         if should_reset:
             self._reset_guide_progress_from_settings()
@@ -5088,7 +5140,8 @@ class MainWindow(QMainWindow):
             if poe_version_changed:
                 self.lap_labels = get_lap_labels(self.poe_version)
                 self.log_watcher.set_poe_version(self.poe_version)
-                self.setWindowTitle(f"ぽえなび [{get_poe_label(self.poe_version)}]")
+                self.setWindowTitle(with_fork_label(f"ぽえなび [{get_poe_label(self.poe_version)}]"))
+                self.tray_icon.setToolTip(self.windowTitle())
             if prev_version != self.poe_version:
                 self.lap_times = [None] * len(self.lap_labels)
                 self.current_act = 1
@@ -5303,13 +5356,14 @@ class MainWindow(QMainWindow):
             icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
 
         self.tray_icon = QSystemTrayIcon(icon, self)
-        self.tray_icon.setToolTip("ぽえなび")
+        self.tray_icon.setToolTip(self.windowTitle())
         self.tray_icon.activated.connect(self._handle_tray_activation)
 
         menu = QMenu(self)
         self.tray_show_action = QAction("ぽえなびを表示", menu)
         self.tray_show_action.triggered.connect(self.restore_from_tray)
         menu.addAction(self.tray_show_action)
+        add_mode_switch_menu(menu, POENAVI_MODE, self.poe_version, self.switch_requested.emit)
         menu.addSeparator()
         self.tray_exit_action = QAction("終了", menu)
         self.tray_exit_action.triggered.connect(self.quit_from_tray)
@@ -5349,6 +5403,16 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.tray_icon.hide()
+
+    def save_session_state(self):
+        if self.is_running:
+            self.stop_timer()
+        elif (
+            self.accumulated_time > 0
+            or any(lap is not None for lap in self.lap_times)
+            or self.segment_recorder.segments
+        ):
+            self._save_timer_state()
 
     def quit_from_tray(self):
         self.close()
@@ -5454,7 +5518,7 @@ class MainWindow(QMainWindow):
 
             if getattr(self, "_pending_initial_map_auto_open", False):
                 self._pending_initial_map_auto_open = False
-                QTimer.singleShot(50, self.map_thumbnail.open_first_map)
+                QTimer.singleShot(50, self.map_thumbnail, self.map_thumbnail.open_first_map)
     
     def _target_display_screen(self):
         """Return the configured screen, falling back to the primary screen."""
@@ -5524,6 +5588,12 @@ class MainWindow(QMainWindow):
         return frozenset(names)
 
     def closeEvent(self, event):
+        self._shutdown()
+        super().closeEvent(event)
+
+    def _shutdown(self):
+        if getattr(self, "_session_closed", False):
+            return
         # 起動時アップデートでは、保存済みジオメトリを復元する前の仮サイズ
         # (420x1200) のまま終了する。初期化・初期配置が完了した通常終了時だけ
         # 位置とサイズを保存し、ユーザー設定を仮サイズで上書きしない。
@@ -5549,26 +5619,48 @@ class MainWindow(QMainWindow):
             tray_icon.hide()
 
         self._close_detached_panels()
+        self._session_closed = True
+        QApplication.instance().removeEventFilter(self)
+        hold = getattr(self, "_gem_shop_search_hold", None)
+        if hold is not None:
+            hold.release()
+        for timer in self.findChildren(QTimer):
+            timer.stop()
+        signals = getattr(self, "_worker_signals", None)
+        if signals is not None:
+            signals.blockSignals(True)
+        controller = getattr(self, "update_controller", None)
+        if controller is not None:
+            for connection in getattr(self, "_update_connections", ()):
+                QObject.disconnect(connection)
+            controller.discard_download()
 
         # みになびは本体と独立したトップレベルウィンドウなので、アプリ終了時は
         # 明示的に一緒に閉じる。
         overlay = getattr(self, "mini_navi_overlay", None)
         if overlay is not None:
             overlay.close()
+            overlay.lock_button_window.deleteLater()
+            overlay.deleteLater()
 
         checklist = getattr(self, "act4_checklist_window", None)
         if checklist is not None:
             checklist.close()
+            checklist.deleteLater()
+
+        map_thumbnail = getattr(self, "map_thumbnail", None)
+        if map_thumbnail is not None:
+            map_thumbnail.clear()
 
         cheat_sheet_overlay = getattr(self, "_cheat_sheet_overlay", None)
         if cheat_sheet_overlay is not None:
             cheat_sheet_overlay.hide_and_save()
             cheat_sheet_overlay.close()
+            cheat_sheet_overlay.deleteLater()
 
         poetore_window = getattr(self, "_poetore_window", None)
         if poetore_window is not None:
-            poetore_window.close()
-            poetore_window.deleteLater()
+            poetore_window.dispose()
             self._poetore_window = None
 
         map_check_window = getattr(self, "_map_check_window", None)
@@ -5592,4 +5684,6 @@ class MainWindow(QMainWindow):
         voicevox_tts = getattr(self, "voicevox_tts", None)
         if voicevox_tts is not None:
             voicevox_tts.stop()
-        super().closeEvent(event)
+        for child in self.findChildren(QWidget):
+            if child.isWindow() and child.isVisible():
+                child.close()

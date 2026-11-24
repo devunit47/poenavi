@@ -642,7 +642,7 @@ class ExpeditionRewardController(QObject):
         self.hide()
         self._release_scan()
         if self._owns_ocr:
-            self._ocr.close()
+            self._ocr.close(permanent=True)
 
     def warm_up(self) -> None:
         if not self._helper_warm_started:

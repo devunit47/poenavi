@@ -816,75 +816,105 @@ class WindowsOcrServer:
         self.language = language
         self.startup_timeout = startup_timeout
         self.request_timeout = request_timeout
-        self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._operation_lock = threading.Lock()
         self._retired = threading.Event()
+        self._close_generation = 0
         self._process = None
         self._responses: queue.Queue[str | None] = queue.Queue()
         self._stderr: list[str] = []
         self._next_id = 0
 
     def start(self) -> None:
-        with self._lock:
+        with self._operation_lock:
+            with self._state_lock:
+                generation = self._close_generation
             try:
-                self._ensure_started()
+                self._ensure_started(generation)
             except Exception:
                 self._stop_process()
+                with self._state_lock:
+                    self._check_open(generation)
                 raise
+            with self._state_lock:
+                self._check_open(generation)
 
     def recognize(self, images: Sequence[bytes]) -> list[str]:
         if not images:
             return []
-        with self._lock:
-            last_error: Exception | None = None
+        with self._operation_lock:
+            with self._state_lock:
+                generation = self._close_generation
             for attempt in range(2):
                 try:
-                    return self._recognize_once(images)
+                    texts = self._recognize_once(images, generation)
                 except Exception as exc:  # noqa: BLE001 - restart owned helper once
-                    last_error = exc
+                    with self._state_lock:
+                        self._check_open(generation)
                     self._stop_process()
                     if attempt:
-                        break
-            raise RuntimeError(str(last_error) if last_error else "Windows OCRに失敗しました。")
+                        raise RuntimeError(str(exc)) from exc
+                else:
+                    with self._state_lock:
+                        self._check_open(generation)
+                    return texts
 
     def close(self, *, permanent: bool = False) -> None:
-        if permanent:
-            self._retired.set()
-        with self._lock:
-            self._stop_process(graceful=True)
+        with self._state_lock:
+            if permanent:
+                self._retired.set()
+            self._close_generation += 1
+            process = self._process
+            self._process = None
+            if process is not None:
+                self._responses.put_nowait(None)
+        if process is not None:
+            self._terminate_process(process)
+            threading.Thread(
+                target=self._finish_process, args=(process,), daemon=True,
+            ).start()
 
-    def _ensure_started(self) -> None:
+    def _check_open(self, generation: int) -> None:
+        """Check cancellation while holding the state lock."""
         if self._retired.is_set():
             raise RuntimeError("Windows OCRは終了済みです。")
-        if sys.platform != "win32":
-            raise RuntimeError("Windows標準OCRはWindows上でのみ実行できます。")
-        if self._process is not None and self._process.poll() is None:
-            return
-        if self._process is not None:
+        if generation != self._close_generation:
+            raise RuntimeError("Windows OCRは中断されました。")
+
+    def _ensure_started(self, generation: int) -> None:
+        with self._state_lock:
+            self._check_open(generation)
+            if sys.platform != "win32":
+                raise RuntimeError("Windows標準OCRはWindows上でのみ実行できます。")
+            process = self._process
+            if process is not None and process.poll() is None:
+                return
+        if process is not None:
             self._stop_process()
-        helper = _windows_ocr_helper()
+        command = _windows_ocr_command(_windows_ocr_helper())
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._responses = queue.Queue()
-        self._stderr = []
-        self._process = subprocess.Popen(
-            [*_windows_ocr_command(helper), "--server", self.language],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-            creationflags=creationflags,
-        )
-        process = self._process
-        responses = self._responses
-        stderr = self._stderr
+        with self._state_lock:
+            self._check_open(generation)
+            process = subprocess.Popen(
+                [*command, "--server", self.language],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                creationflags=creationflags,
+            )
+            self._process = process
+            responses = self._responses = queue.Queue()
+            stderr = self._stderr = []
         threading.Thread(
             target=self._read_stdout, args=(process, responses), daemon=True,
         ).start()
         threading.Thread(
             target=self._read_stderr, args=(process, stderr), daemon=True,
         ).start()
-        ready_line = self._wait_response(self.startup_timeout)
+        ready_line = self._wait_response(process, responses, stderr, self.startup_timeout)
         try:
             ready = json.loads(ready_line)
         except json.JSONDecodeError as exc:
@@ -892,9 +922,13 @@ class WindowsOcrServer:
         if not isinstance(ready, dict) or ready.get("ready") is not True:
             raise RuntimeError(str(ready.get("error") or "Windows OCRヘルパーを起動できません。"))
 
-    def _recognize_once(self, images: Sequence[bytes]) -> list[str]:
-        self._ensure_started()
-        process = self._process
+    def _recognize_once(self, images: Sequence[bytes], generation: int) -> list[str]:
+        self._ensure_started(generation)
+        with self._state_lock:
+            self._check_open(generation)
+            process = self._process
+            responses = self._responses
+            stderr = self._stderr
         if process is None or process.stdin is None:
             raise RuntimeError("Windows OCRヘルパーへ接続できません。")
         self._next_id += 1
@@ -905,7 +939,7 @@ class WindowsOcrServer:
         }
         process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
         process.stdin.flush()
-        response_line = self._wait_response(self.request_timeout)
+        response_line = self._wait_response(process, responses, stderr, self.request_timeout)
         try:
             response = json.loads(response_line)
         except json.JSONDecodeError as exc:
@@ -923,14 +957,20 @@ class WindowsOcrServer:
             raise RuntimeError("Windows OCRの一括処理結果が不正です。")
         return [str(value) for value in texts]
 
-    def _wait_response(self, timeout: float) -> str:
+    @staticmethod
+    def _wait_response(
+        process: subprocess.Popen[str],
+        responses: queue.Queue[str | None],
+        stderr: list[str],
+        timeout: float,
+    ) -> str:
         try:
-            line = self._responses.get(timeout=timeout)
+            line = responses.get(timeout=timeout)
         except queue.Empty as exc:
             raise RuntimeError("Windows OCRヘルパーが時間内に応答しませんでした。") from exc
         if line is None:
-            details = " ".join(self._stderr).strip()
-            if self._process is not None and getattr(self._process, "returncode", None) == 3:
+            details = " ".join(stderr).strip()
+            if process.returncode == 3:
                 raise RuntimeError(
                     "Windowsの日本語OCRがありません。Windows設定の「言語と地域」で"
                     "日本語のOCRを追加してください。"
@@ -940,39 +980,54 @@ class WindowsOcrServer:
 
     @staticmethod
     def _read_stdout(process, responses: queue.Queue[str | None]) -> None:
-        if process.stdout is not None:
-            for line in process.stdout:
-                responses.put(line.strip())
-        responses.put(None)
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    responses.put(line.strip())
+        except (OSError, ValueError):
+            pass
+        finally:
+            responses.put(None)
 
     @staticmethod
     def _read_stderr(process, stderr: list[str]) -> None:
-        if process.stderr is not None:
-            for line in process.stderr:
-                stderr.append(line.strip())
+        try:
+            if process.stderr is not None:
+                for line in process.stderr:
+                    stderr.append(line.strip())
+        except (OSError, ValueError):
+            pass
 
-    def _stop_process(self, *, graceful: bool = False) -> None:
-        process = self._process
-        self._process = None
-        if process is None:
-            return
-        if process.poll() is None and graceful and process.stdin is not None:
-            try:
-                process.stdin.write('{"Command":"shutdown"}\n')
-                process.stdin.flush()
-                process.wait(timeout=2)
-            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                pass
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2)
+    def _stop_process(self) -> None:
+        with self._state_lock:
+            process = self._process
+            self._process = None
+        if process is not None:
+            self._terminate_process(process)
+            self._finish_process(process)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        try:
+            if process.poll() is None:
+                process.terminate()
+        except OSError:
+            # Let the cleanup path wait and try kill if the process is still alive.
+            pass
+
+    @staticmethod
+    def _finish_process(process: subprocess.Popen[str]) -> None:
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
-                stream.close()
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 def windows_ocr_available(language: str = "ja-JP") -> bool:

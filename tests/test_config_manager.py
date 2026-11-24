@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from src.utils.config_manager import ConfigManager
 
 
@@ -891,6 +893,127 @@ class ConfigManagerTest(unittest.TestCase):
                 json.loads(config_path.read_text(encoding="utf-8")), previous
             )
             self.assertEqual(list(config_path.parent.glob(".config.json.*.tmp")), [])
+
+
+@pytest.fixture
+def user_config_path(tmp_path, monkeypatch):
+    app_dir = tmp_path / "app"
+    user_dir = tmp_path / "user-data"
+    app_dir.mkdir()
+    user_dir.mkdir()
+    write_default_config(app_dir)
+    monkeypatch.setenv(ConfigManager.ENV_USER_DATA_DIR, str(user_dir))
+    monkeypatch.setattr(ConfigManager, "get_app_dir", lambda: app_dir)
+    return user_dir / ConfigManager.CONFIG_FILE
+
+
+@pytest.mark.parametrize(
+    ("target", "method"),
+    [
+        (os, "replace"),
+        (ConfigManager, "save_pob_import_data"),
+        (ConfigManager, "migrate_startup_legacy_user_files"),
+    ],
+    ids=["replace", "pob", "startup"],
+)
+def test_load_config_keeps_existing_settings_after_temporary_io_failure(
+    user_config_path, target, method, capsys,
+):
+    original = {"schemaVersion": 11, "poe_version": "poe2"}
+    if method == "save_pob_import_data":
+        original["pob_code"] = "legacy-code"
+    original_json = json.dumps(original)
+    user_config_path.write_text(original_json, encoding="utf-8")
+
+    operation = getattr(target, method)
+
+    def fail_once(*args, **kwargs):
+        if failing_operation.call_count == 1:
+            raise PermissionError("temporarily locked")
+        return operation(*args, **kwargs)
+
+    with patch.object(target, method) as failing_operation:
+        failing_operation.side_effect = fail_once
+        loaded = ConfigManager.load_config()
+        failing_operation.assert_called_once()
+
+    assert loaded["poe_version"] == "poe2"
+    assert "temporarily locked" in capsys.readouterr().out
+    assert not list(user_config_path.parent.glob("config.backup-broken-*.json"))
+    if method in {"replace", "save_pob_import_data"}:
+        assert user_config_path.read_text(encoding="utf-8") == original_json
+    if method == "save_pob_import_data":
+        assert loaded["pob_code"] == "legacy-code"
+        assert not ConfigManager.pob_import_data_path().exists()
+
+    retried = ConfigManager.load_config()
+    assert json.loads(user_config_path.read_text(encoding="utf-8")) == retried
+    assert retried["poe_version"] == "poe2"
+    if method == "save_pob_import_data":
+        assert ConfigManager.load_pob_import_data()["pob_code"] == "legacy-code"
+
+
+def test_load_config_skips_unchanged_content(user_config_path):
+    user_config_path.write_text('{"poe_version": "poe2"}', encoding="utf-8")
+    config = ConfigManager.load_config()
+
+    with patch.object(ConfigManager, "_write_json", wraps=ConfigManager._write_json) as write_json:
+        assert ConfigManager.load_config() == config
+
+    write_json.assert_not_called()
+
+
+def test_load_config_does_not_reset_unreadable_config(user_config_path):
+    original_json = '{"poe_version": "poe2"}'
+    user_config_path.write_text(original_json, encoding="utf-8")
+
+    with patch.object(ConfigManager, "_read_json", side_effect=PermissionError("locked")):
+        with pytest.raises(PermissionError, match="locked"):
+            ConfigManager.load_config()
+
+    assert user_config_path.read_text(encoding="utf-8") == original_json
+    assert not list(user_config_path.parent.glob("config.backup-broken-*.json"))
+
+
+@pytest.mark.parametrize("broken_json", ['{"poe_version":', '["poe2"]'])
+def test_load_config_backs_up_broken_config_and_restores_defaults(user_config_path, broken_json):
+    user_config_path.write_text(broken_json, encoding="utf-8")
+
+    config = ConfigManager.load_config()
+
+    backup, = user_config_path.parent.glob("config.backup-broken-*.json")
+    assert backup.read_text(encoding="utf-8") == broken_json
+    assert config["poe_version"] == "poe1"
+    assert json.loads(user_config_path.read_text(encoding="utf-8")) == config
+
+
+@pytest.mark.parametrize(
+    ("version", "cheat_sheets", "image", "background"),
+    [
+        (11, {"opacity": "invalid", "background_opacity": 40}, 100, 40),
+        (11, {"opacity": 75, "background_opacity": None}, 75, 0),
+        (12, {"image_transparency": None, "background_transparency": 60}, 100, 40),
+        (12, {"image_transparency": 25, "background_transparency": "invalid"}, 75, 0),
+    ],
+)
+def test_load_config_repairs_invalid_legacy_cheat_sheet_values(
+    user_config_path, version, cheat_sheets, image, background,
+):
+    user_config_path.write_text(json.dumps({
+        "schemaVersion": version,
+        "poe_version": "poe2",
+        "cheat_sheets": cheat_sheets,
+    }), encoding="utf-8")
+
+    config = ConfigManager.load_config()
+
+    assert config["poe_version"] == "poe2"
+    assert config["cheat_sheets"] == {
+        "image_transparency": image,
+        "background_transparency": background,
+    }
+    assert json.loads(user_config_path.read_text(encoding="utf-8")) == config
+    assert not list(user_config_path.parent.glob("config.backup-broken-*.json"))
 
 
 if __name__ == "__main__":

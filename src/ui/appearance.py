@@ -163,6 +163,30 @@ def resolve_tokens(appearance=None, mode="poenavi") -> ThemeTokens:
     return replace(base, **_effective_overrides(settings, base))
 
 
+def contrast_ratio(foreground: str, background: str) -> float:
+    """Return the WCAG contrast ratio for two opaque #RRGGBB colours."""
+    def luminance(color):
+        if not _HEX_COLOR.fullmatch(color):
+            raise ValueError("Expected an opaque #RRGGBB colour")
+        channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        red, green, blue = (
+            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        )
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+    dark, light = sorted((luminance(foreground), luminance(background)))
+    return (light + 0.05) / (dark + 0.05)
+
+
+def has_low_text_contrast(appearance, mode="poenavi") -> bool:
+    tokens = resolve_tokens(appearance, mode)
+    return any(
+        contrast_ratio(tokens.text, background) < 3.0
+        for background in (tokens.background, tokens.surface)
+    )
+
+
 def _effective_overrides(settings, base=None):
     overrides = dict(settings["overrides"])
     if "surface" in overrides:

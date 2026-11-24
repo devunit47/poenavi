@@ -17,7 +17,7 @@ def consume_skip_startup_selector_argument(arguments):
 
 def normalize_app_mode(value):
     """未知の値を安全な既定モードへ戻す。"""
-    return value if value in VALID_APP_MODES else POENAVI_MODE
+    return value if isinstance(value, str) and value in VALID_APP_MODES else POENAVI_MODE
 
 
 def startup_preferences(config):

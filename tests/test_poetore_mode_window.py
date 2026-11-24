@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QHelpEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -29,6 +29,99 @@ from src.update.startup_gate import run_startup_update_gate
 from src.utils.config_manager import ConfigManager
 from src.utils.poe_version_data import POE1, POE2
 from src.version import APP_VERSION
+
+
+@pytest.fixture
+def position_window(qtbot, monkeypatch):
+    monkeypatch.setattr(PoetoreModeWindow, "_initialize", lambda self: None)
+    window = PoetoreModeWindow()
+    qtbot.addWidget(window)
+    window.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+    window.config = {}
+    window.setGeometry(50, 60, 550, 240)
+    return window
+
+
+def test_startup_position_restores_visible_saved_geometry(position_window):
+    window = position_window
+    available = QRect(-800, 0, 800, 600)
+    screen = Mock(availableGeometry=lambda: available)
+    window.config["poetore_window_geometry"] = {"x": -100, "y": 500, "width": 550, "height": 250}
+    with patch.object(QApplication, "screens", return_value=[screen]):
+        window._apply_startup_position()
+        assert window.geometry() == QRect(-550, 350, 550, 250)
+        window.move(-650, 70)
+        window._apply_startup_position()
+        assert window.pos() == QPoint(-650, 70)
+    window._session_closed = True
+
+
+def test_startup_right_snap_takes_priority_over_saved_geometry(position_window):
+    window = position_window
+    window.config = {
+        "snap_to_right_edge": True,
+        "display_monitor": 1,
+        "poetore_window_geometry": {"x": 30, "y": 100, "width": 610, "height": 250},
+    }
+    screens = [
+        Mock(availableGeometry=lambda: QRect(0, 0, 800, 600)),
+        Mock(availableGeometry=lambda: QRect(800, 30, 1000, 600)),
+    ]
+    with patch.object(QApplication, "screens", return_value=screens):
+        window._apply_startup_position()
+    assert window.geometry() == QRect(1250, 30, 550, 240)
+    window._session_closed = True
+
+
+@pytest.mark.parametrize("minimized", [False, True])
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_shutdown_saves_latest_config_and_discards_download(position_window, minimized, save_fails):
+    window = position_window
+    window._startup_position_applied = True
+    window._update_controller = Mock()
+    window.hotkey_service = Mock()
+    latest = {"unrelated": 42}
+    expected = (
+        {"x": 10, "y": 20, "width": 510, "height": 220} if minimized
+        else {"x": 50, "y": 60, "width": 550, "height": 240}
+    )
+    with (
+        patch.object(window, "isMinimized", return_value=minimized),
+        patch.object(window, "normalGeometry", return_value=QRect(10, 20, 510, 220)),
+        patch.object(ConfigManager, "load_config", return_value=latest),
+        patch.object(ConfigManager, "save_config", side_effect=OSError if save_fails else None) as save,
+    ):
+        window._shutdown()
+        window._shutdown()
+    save.assert_called_once_with({"unrelated": 42, "poetore_window_geometry": expected})
+    window._update_controller.discard_download.assert_called_once_with()
+    window.hotkey_service.stop.assert_called_once_with()
+
+
+@pytest.mark.parametrize(("method", "directory"), [
+    (PoetoreModeWindow._asset_path, "icons"),
+    (PoetoreModeWindow._app_asset_path, "app"),
+])
+def test_frozen_assets_prefer_executable_then_bundle(method, directory, tmp_path, monkeypatch):
+    import sys
+
+    executable = tmp_path / "install" / "PoENavi.exe"
+    bundle = tmp_path / "bundle"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    relative_path = f"assets/{directory}/test.ico"
+    executable_asset = executable.parent / relative_path
+    bundled_asset = bundle / relative_path
+    fallback = method("test.ico")
+    for asset in (executable_asset, bundled_asset):
+        asset.parent.mkdir(parents=True)
+        asset.touch()
+    assert method("test.ico") == executable_asset
+    executable_asset.unlink()
+    assert method("test.ico") == bundled_asset
+    bundled_asset.unlink()
+    assert method("test.ico") == fallback
 
 
 @pytest.mark.parametrize("prewarm", [False, True])
@@ -415,6 +508,8 @@ def test_startup_gate_and_hourly_check_share_release_result(hold_update_checks):
     workers = hold_update_checks(window._update_controller)
     try:
         with patch(
+            "src.update.startup_gate.version.IS_FORK", False,
+        ), patch(
             "src.update.qt_controller.fetch_latest_release", return_value=release,
         ) as fetch, patch(
             "src.update.startup_gate.UpdateAvailableDialog",

@@ -171,6 +171,46 @@ def test_apply_update_restores_old_install_when_launch_fails(tmp_path):
     assert (install / "PoENavi.exe").read_text(encoding="utf-8") == "old"
 
 
+@pytest.mark.parametrize("rename_source, rename_target, restore_source, restore_name", [
+    ("PoENavi", "PoENavi.failed", "PoENavi.backup", "PoENavi"),
+    ("PoENavi.backup", "PoENavi", "PoENavi.backup", "PoENavi"),
+    ("PoENavi.backup-old-test", "PoENavi.backup", "PoENavi.backup-old-test", "PoENavi.backup"),
+])
+def test_apply_update_reports_manual_recovery_when_rollback_fails(
+    tmp_path, monkeypatch, rename_source, rename_target, restore_source, restore_name,
+):
+    install = tmp_path / "PoENavi"
+    make_install(install)
+    make_install(tmp_path / "PoENavi.backup", "stale")
+    archive = tmp_path / "PoENavi.zip"
+    make_release(archive)
+    original_rename = Path.rename
+
+    def fail_rollback_rename(path, target):
+        if (path.name, target.name) == (rename_source, rename_target):
+            raise OSError("rollback rename failed")
+        return original_rename(path, target)
+
+    def fail_launch(_exe):
+        raise OSError("launch failed")
+
+    monkeypatch.setattr(Path, "rename", fail_rollback_rename)
+    with pytest.raises(UpdateApplyError) as error:
+        apply_update(archive, install, tmp_path / "work", fail_launch, timestamp=lambda: "test")
+
+    recovery_dir = tmp_path / restore_source
+    assert error.value.backup == recovery_dir
+    marker = "stale" if rename_source == "PoENavi.backup-old-test" else "old"
+    assert (recovery_dir / "PoENavi.exe").read_text(encoding="utf-8") == marker
+    message = error.value.user_message()
+    assert "launch failed" in message
+    assert "rollback rename failed" in message
+    assert "手動復旧手順" in message
+    assert f"「{recovery_dir}」の名前を「{restore_name}」に戻します" in message
+    if rename_source == "PoENavi":
+        assert f"「{install}」を、別の名前に変更して退避します" in message
+
+
 def test_apply_update_leaves_install_untouched_when_initial_rename_is_denied(
     tmp_path, monkeypatch
 ):

@@ -53,6 +53,7 @@ from src.ui.toolbar_icons import (
     image_manager_line_icon, line_icon_canvas, map_mod_manager_icon, memo_line_icon,
     settings_line_icon,
 )
+from src.ui.window_geometry import fit_saved_window_geometry
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
 from src.ui.update_dialogs import available_update_version, sync_update_action
 from src.update.startup_gate import (
@@ -77,6 +78,20 @@ from src.utils.log_path_detector import fill_missing_client_log_paths
 from src.utils.poe_version_data import POE1, POE2
 from src.utils.stash_tab_scroll import StashTabScrollController
 from src.version import with_fork_label
+
+
+def _find_asset(directory, filename):
+    relative_path = Path("assets") / directory / filename
+    if getattr(sys, "frozen", False):
+        executable_asset = Path(sys.executable).resolve().parent / relative_path
+        if executable_asset.is_file():
+            return executable_asset
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            bundled_asset = Path(bundle_root) / relative_path
+            if bundled_asset.is_file():
+                return bundled_asset
+    return Path(__file__).resolve().parents[2] / relative_path
 
 
 def _icon_canvas():
@@ -254,6 +269,7 @@ class PoetoreModeWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._session_closed = False
+        self._startup_position_applied = False
         try:
             self._initialize()
         except Exception:
@@ -350,11 +366,11 @@ class PoetoreModeWindow(QMainWindow):
 
     @staticmethod
     def _asset_path(filename):
-        return Path(__file__).resolve().parents[2] / "assets" / "icons" / filename
+        return _find_asset("icons", filename)
 
     @staticmethod
     def _app_asset_path(filename):
-        return Path(__file__).resolve().parents[2] / "assets" / "app" / filename
+        return _find_asset("app", filename)
 
     def _build_tray_icon(self):
         icon = QIcon(str(self._app_asset_path("icon2.ico")))
@@ -698,15 +714,29 @@ class PoetoreModeWindow(QMainWindow):
             )
 
     def _apply_startup_position(self):
-        if not self.config.get("snap_to_right_edge", False):
+        if self._session_closed:
             return
         screens = QApplication.screens()
         if not screens:
             return
-        index = int(self.config.get("display_monitor", 0))
-        screen = screens[index] if 0 <= index < len(screens) else screens[0]
-        available = screen.availableGeometry()
-        self.move(available.right() - self.width() + 1, available.top())
+        if self.config.get("snap_to_right_edge", False):
+            index = int(self.config.get("display_monitor", 0))
+            screen = screens[index] if 0 <= index < len(screens) else screens[0]
+            available = screen.availableGeometry()
+            self.move(available.right() - self.width() + 1, available.top())
+        elif not self._startup_position_applied:
+            try:
+                fitted = fit_saved_window_geometry(
+                    self.config.get("poetore_window_geometry"),
+                    [screen.availableGeometry() for screen in screens],
+                    minimum_width=self.minimumWidth(),
+                    minimum_height=max(1, self.minimumHeight()),
+                )
+            except OverflowError:
+                fitted = None
+            if fitted is not None:
+                self.setGeometry(fitted)
+        self._startup_position_applied = True
 
     def _header_button(self, text, tooltip):
         button = ToolbarButton(text)
@@ -1712,6 +1742,22 @@ class PoetoreModeWindow(QMainWindow):
         if self._session_closed:
             return
         self._session_closed = True
+        logger = logging.getLogger(__name__)
+        if self._startup_position_applied:
+            try:
+                geometry = self.normalGeometry() if self.isMinimized() else self.geometry()
+                if geometry.isValid():
+                    config = ConfigManager.load_config()
+                    config["poetore_window_geometry"] = {
+                        "x": geometry.x(),
+                        "y": geometry.y(),
+                        "width": geometry.width(),
+                        "height": geometry.height(),
+                    }
+                    ConfigManager.save_config(config)
+                    self.config = config
+            except Exception:
+                logger.exception("ぽえとれの位置とサイズを保存できませんでした")
         signals = getattr(self, "_league_signals", None)
         if signals is not None:
             signals.blockSignals(True)
@@ -1720,6 +1766,12 @@ class PoetoreModeWindow(QMainWindow):
         for connection in getattr(self, "_update_connections", ()):
             QObject.disconnect(connection)
         self._update_connections = ()
+        controller = getattr(self, "_update_controller", None)
+        if controller is not None:
+            try:
+                controller.discard_download()
+            except Exception:
+                logger.exception("ダウンロードを破棄できませんでした")
         tray_icon = getattr(self, "tray_icon", None)
         if tray_icon is not None:
             tray_icon.hide()

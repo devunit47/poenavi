@@ -1,3 +1,5 @@
+import ctypes
+from ctypes import wintypes
 import os
 import subprocess
 import sys
@@ -15,6 +17,7 @@ from src.single_instance import (
     SingleInstanceGuard,
     _WindowsNamedMutex,
     consume_restart_pid,
+    process_exists,
     wait_for_previous_instance,
 )
 
@@ -71,26 +74,39 @@ def test_restart_does_not_wait_for_current_process():
     exists.assert_not_called()
 
 
-def test_windows_process_check_uses_non_destructive_wait_handle():
+@pytest.mark.parametrize("status, expected", [(0x00000102, True), (0, False)])
+def test_windows_process_check_uses_non_destructive_wait_handle(status, expected):
     kernel32 = MagicMock()
-    kernel32.OpenProcess.return_value = 99
-    kernel32.WaitForSingleObject.return_value = 0x00000102
-    fake_ctypes = MagicMock()
-    fake_ctypes.windll.kernel32 = kernel32
+    handle = 0x1_0000_0063
+    kernel32.OpenProcess.return_value = handle
+    kernel32.WaitForSingleObject.return_value = status
 
     with (
         patch("src.single_instance.sys.platform", "win32"),
-        patch.dict("sys.modules", {"ctypes": fake_ctypes}),
+        patch.object(ctypes, "WinDLL", return_value=kernel32, create=True) as win_dll,
         patch("src.single_instance.os.kill") as kill,
     ):
-        from src.single_instance import process_exists
+        assert process_exists(4321) is expected
 
-        assert process_exists(4321) is True
-
+    win_dll.assert_called_once_with("kernel32", use_last_error=True)
+    assert kernel32.OpenProcess.argtypes == [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.WaitForSingleObject.argtypes == [wintypes.HANDLE, wintypes.DWORD]
+    assert kernel32.WaitForSingleObject.restype is wintypes.DWORD
+    assert kernel32.CloseHandle.argtypes == [wintypes.HANDLE]
+    assert kernel32.CloseHandle.restype is wintypes.BOOL
     kernel32.OpenProcess.assert_called_once_with(0x00100000, False, 4321)
-    kernel32.WaitForSingleObject.assert_called_once_with(99, 0)
-    kernel32.CloseHandle.assert_called_once_with(99)
+    kernel32.WaitForSingleObject.assert_called_once_with(handle, 0)
+    kernel32.CloseHandle.assert_called_once_with(handle)
     kill.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Win32 process APIs")
+def test_win32_process_checks_detect_current_process():
+    from updater_main import process_running
+
+    assert process_exists(os.getpid()) is True
+    assert process_running(os.getpid()) is True
 
 
 @pytest.mark.skipif(

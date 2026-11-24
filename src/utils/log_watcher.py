@@ -11,6 +11,8 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from src.utils.poe_version_data import POE1
 
+MAX_POLL_BYTES = 4 * 1024 * 1024
+
 
 class LogWatcher(QObject):
     """Client.txtをポーリングで監視し、イベントをシグナルで通知"""
@@ -50,6 +52,7 @@ class LogWatcher(QObject):
         self.poll_interval_ms = poll_interval_ms
         self.poe_version = POE1
         self._file_pos = 0
+        self._discarding_long_line = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
         self._active = False
@@ -62,6 +65,7 @@ class LogWatcher(QObject):
             self.stop()
         self.log_path = path
         self._file_pos = 0
+        self._discarding_long_line = False
         if was_active:
             self.start()
 
@@ -93,6 +97,7 @@ class LogWatcher(QObject):
             self._file_pos = os.path.getsize(self.log_path)
         except OSError:
             self._file_pos = 0
+        self._discarding_long_line = False
         
         self._active = True
         self._timer.start(self.poll_interval_ms)
@@ -166,16 +171,33 @@ class LogWatcher(QObject):
             # ファイルが小さくなった場合（ログリセット）
             if current_size < self._file_pos:
                 self._file_pos = 0
+                self._discarding_long_line = False
             
             if current_size == self._file_pos:
                 return  # 変更なし
             
-            with open(self.log_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(self.log_path, "rb") as f:
                 f.seek(self._file_pos)
-                new_data = f.read()
-                self._file_pos = f.tell()
-            
-            lines = new_data.splitlines()
+                new_data = f.read(MAX_POLL_BYTES)
+
+            if self._discarding_long_line:
+                first_newline = new_data.find(b"\n") + 1
+                if not first_newline:
+                    self._file_pos += len(new_data)
+                    return
+                self._file_pos += first_newline
+                new_data = new_data[first_newline:]
+                self._discarding_long_line = False
+
+            complete_bytes = new_data.rfind(b"\n") + 1
+            if not complete_bytes:
+                # 上限内に改行がない異常な長さの行は、次の改行まで読み飛ばす。
+                if len(new_data) == MAX_POLL_BYTES:
+                    self._file_pos += len(new_data)
+                    self._discarding_long_line = True
+                return
+            self._file_pos += complete_bytes
+            lines = new_data[:complete_bytes].decode("utf-8", errors="ignore").splitlines()
             if lines:
                 print(f"[LogWatcher] Read {len(lines)} new lines (pos={self._file_pos})")
             for line in lines:

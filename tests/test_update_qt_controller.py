@@ -9,7 +9,8 @@ from zipfile import ZipFile
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtWidgets import QApplication
 
 from src.update.qt_controller import UpdateController
 from src.update.release_client import ReleaseInfo
@@ -17,7 +18,7 @@ from src.update.release_client import ReleaseInfo
 
 @pytest.fixture(scope="module", autouse=True)
 def qt_app():
-    return QCoreApplication.instance() or QCoreApplication([])
+    return QApplication.instance() or QApplication([])
 
 
 class ImmediateThread:
@@ -262,13 +263,14 @@ def test_launch_updater_validates_staged_zip_and_uses_argument_list(
     install.mkdir(parents=True)
     (install / "PoENavi.exe").write_text("app", encoding="utf-8")
     (install / "PoENaviUpdater.exe").write_text("updater", encoding="utf-8")
-    updater_work = tmp_path / "updater-work"
+    updater_work = tmp_path / "PoENavi-Updater-active"
     launched = []
     controller = UpdateController(thread_factory=ImmediateThread)
     ready = Mock()
     controller.download_ready.connect(ready)
     controller.download(release)
     archive = ready.call_args.args[0]
+    monkeypatch.setattr("src.version.IS_FORK", False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "executable", str(install / "PoENavi.exe"))
@@ -277,8 +279,17 @@ def test_launch_updater_validates_staged_zip_and_uses_argument_list(
         lambda prefix: str(updater_work),
     )
     monkeypatch.setattr(
+        "src.update.qt_controller.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+
+    def launch(args, cwd):
+        UpdateController._cleanup_stale_update_dirs()
+        launched.append((args, cwd))
+
+    monkeypatch.setattr(
         "src.update.qt_controller.subprocess.Popen",
-        lambda args, cwd: launched.append((args, cwd)),
+        launch,
     )
 
     if tampered:
@@ -293,6 +304,7 @@ def test_launch_updater_validates_staged_zip_and_uses_argument_list(
         return
 
     controller.launch_updater(archive)
+    UpdateController._cleanup_stale_update_dirs()
     args, cwd = launched[0]
     assert args[0] == str(updater_work / "PoENaviUpdater.exe")
     assert args[args.index("--install-dir") + 1] == str(install)
@@ -301,6 +313,23 @@ def test_launch_updater_validates_staged_zip_and_uses_argument_list(
     assert staged_archive.read_bytes() == original
     assert cwd == str(updater_work)
     assert not archive.parent.exists()
+
+
+def test_fork_refuses_to_launch_updater(release_download, monkeypatch):
+    release, publish, _fetch_asset = release_download
+    publish(b"new")
+    controller = UpdateController(thread_factory=ImmediateThread)
+    monkeypatch.setattr("src.version.IS_FORK", True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    popen = Mock()
+    monkeypatch.setattr("src.update.qt_controller.subprocess.Popen", popen)
+    controller.download(release)
+
+    with pytest.raises(RuntimeError, match="フォーク版では自動アップデートを実行できません"):
+        controller.launch_updater(controller._ready_download.archive)
+    popen.assert_not_called()
+    controller.discard_download()
 
 
 def test_cleanup_stale_update_directories(tmp_path, monkeypatch):

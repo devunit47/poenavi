@@ -7,8 +7,10 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.ui.appearance import (
-    MAX_FONT_SIZE, MIN_FONT_SIZE, PRESETS, normalize_appearance, resolve_tokens,
+    MAX_FONT_SIZE, MIN_FONT_SIZE, PRESETS, has_low_text_contrast, normalize_appearance,
+    resolve_tokens,
 )
 
 
@@ -84,6 +86,15 @@ class AppearanceSettingsWidget(QScrollArea):
         for widget in (self.preview_title, self.preview_text, self.preview_caption, self.preview_overlay):
             preview_layout.addWidget(widget)
         layout.addWidget(self.preview)
+        self.contrast_warning = QLabel(
+            "文字と背景またはパネルのコントラストが低く、文字が読みにくくなります。"
+        )
+        self.contrast_warning.setObjectName("appearanceContrastWarning")
+        self.contrast_warning.setWordWrap(True)
+        self.contrast_warning.setStyleSheet(
+            "QLabel { color: #211A08; background-color: #FFE6A3; padding: 6px; }"
+        )
+        layout.addWidget(self.contrast_warning)
         actions = QHBoxLayout()
         self.reset_button = QPushButton("外観を既定に戻す")
         self.reset_button.setObjectName("appearanceReset")
@@ -137,6 +148,10 @@ class AppearanceSettingsWidget(QScrollArea):
 
     def _update_preview(self):
         tokens = resolve_tokens(self._draft, self._mode)
+        self.contrast_warning.setVisible(any(
+            has_low_text_contrast(self._draft, mode)
+            for mode in (POENAVI_MODE, POETORE_MODE)
+        ))
         for role, _label in self.COLOR_FIELDS:
             color = getattr(tokens, role)
             swatch = QPixmap(20, 20)

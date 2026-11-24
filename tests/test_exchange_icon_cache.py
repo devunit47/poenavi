@@ -2,7 +2,13 @@ import base64
 import threading
 import time
 import zlib
+from io import BytesIO
+from urllib.request import Request
+from unittest.mock import MagicMock, Mock
 
+import pytest
+
+from src.poetore import exchange_icon_cache
 from src.poetore.exchange_catalog import (
     bundled_exchange_icon_path,
     divination_card_icon_path,
@@ -17,6 +23,40 @@ PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 URL = "https://web.poecdn.com/gen/image/example.png"
+
+
+@pytest.mark.parametrize("destination", [
+    "https://example.invalid/icon.png",
+    "http://web.poecdn.com/icon.png",
+])
+def test_icon_redirect_blocks_untrusted_destination(destination):
+    handler = exchange_icon_cache._IconRedirectHandler()
+    response = BytesIO()
+    with pytest.raises(ValueError, match="redirect URL"):
+        handler.redirect_request(Request(URL), response, 302, "", {}, destination)
+    assert response.closed
+
+
+def test_icon_redirect_allows_https_on_cdn():
+    handler = exchange_icon_cache._IconRedirectHandler()
+    destination = "https://web.poecdn.com/new.png"
+    redirected = handler.redirect_request(Request(URL), BytesIO(), 302, "", {}, destination)
+    assert redirected.full_url == destination
+
+
+def test_icon_download_checks_final_url_before_reading(monkeypatch):
+    response = Mock()
+    response.geturl.return_value = "https://example.invalid/icon.png"
+    opener = MagicMock()
+    opener.open.return_value.__enter__.return_value = response
+    build_opener = Mock(return_value=opener)
+    monkeypatch.setattr(exchange_icon_cache, "build_opener", build_opener)
+
+    with pytest.raises(ValueError, match="response URL"):
+        exchange_icon_cache._download_icon(URL)
+
+    assert isinstance(build_opener.call_args.args[0], exchange_icon_cache._IconRedirectHandler)
+    response.read.assert_not_called()
 
 
 def test_first_request_fetches_then_same_session_uses_memory(tmp_path):

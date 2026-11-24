@@ -2109,7 +2109,7 @@ class SettingsDialog(QDialog):
         Styles.apply_checkbox_style(self.skip_startup_selector_checkbox)
         startup_layout.addWidget(self.skip_startup_selector_checkbox)
         self.startup_change_note = QLabel(
-            "PoEバージョン・起動モードの変更は、次回起動時から適用されます。"
+            "PoEバージョン・起動モードを変更すると、保存後に再起動を確認します。"
         )
         self.startup_change_note.setWordWrap(True)
         self.startup_change_note.setStyleSheet(
@@ -2736,8 +2736,8 @@ class SettingsDialog(QDialog):
         town_group.setVisible(False)  # 一般ユーザーには非表示（機能は残す）
         general_layout.addWidget(town_group)
         settings_note = QLabel(
-            "外観は再起動後、その他の変更は保存後に反映されます。起動モード・外観を変更した場合は、"
-            "保存後に再起動を確認します。"
+            "PoEバージョン・起動モード・外観を変更すると、保存後に再起動を確認します。"
+            "これらの変更は再起動後、その他の変更は保存後に反映されます。"
         )
         settings_note.setObjectName("generalSettingsSaveNote")
         settings_note.setStyleSheet(f"color: {theme.muted_text}; font-size: {theme_font_size(13)}px;")

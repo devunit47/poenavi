@@ -186,9 +186,9 @@ class ConfigManager:
         """旧config.json内のPoBインポート内容を専用JSONへ移す。"""
         if not isinstance(config, dict):
             return config
-        pob_data = config.pop("pob_data", None)
-        pob_code = config.pop("pob_code", None)
-        gem_tracker_checked = config.pop("gem_tracker_checked", None)
+        pob_data = config.get("pob_data")
+        pob_code = config.get("pob_code")
+        gem_tracker_checked = config.get("gem_tracker_checked")
         if pob_data is not None or pob_code is not None or gem_tracker_checked is not None:
             path = cls.pob_import_data_path()
             if not path.exists():
@@ -205,6 +205,9 @@ class ConfigManager:
                 if changed:
                     cls.save_pob_import_data(existing)
                 print("[ConfigManager] pob_import_data.json already exists; keeping existing file and removing legacy config PoB fields")
+        config.pop("pob_data", None)
+        config.pop("pob_code", None)
+        config.pop("gem_tracker_checked", None)
         return config
 
     @classmethod
@@ -391,6 +394,13 @@ class ConfigManager:
             return True
         return False
 
+    @staticmethod
+    def _invert_transparency(value, default):
+        try:
+            return 100 - int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
     @classmethod
     def _migrate_config(cls, config):
         """configのスキーマ差分を吸収する。
@@ -493,12 +503,12 @@ class ConfigManager:
             cheat_sheets = migrated.get("cheat_sheets")
             if isinstance(cheat_sheets, dict):
                 if "opacity" in cheat_sheets:
-                    cheat_sheets["image_transparency"] = (
-                        100 - int(cheat_sheets.pop("opacity"))
+                    cheat_sheets["image_transparency"] = cls._invert_transparency(
+                        cheat_sheets.pop("opacity"), 0,
                     )
                 if "background_opacity" in cheat_sheets:
-                    cheat_sheets["background_transparency"] = (
-                        100 - int(cheat_sheets.pop("background_opacity"))
+                    cheat_sheets["background_transparency"] = cls._invert_transparency(
+                        cheat_sheets.pop("background_opacity"), 100,
                     )
 
         if schema_version < 13:
@@ -506,12 +516,12 @@ class ConfigManager:
             if isinstance(cheat_sheets, dict):
                 # PoENaviの既存「透明率」と同じく、0%=完全透明、100%=不透明へ統一する。
                 if "image_transparency" in cheat_sheets:
-                    cheat_sheets["image_transparency"] = (
-                        100 - int(cheat_sheets["image_transparency"])
+                    cheat_sheets["image_transparency"] = cls._invert_transparency(
+                        cheat_sheets["image_transparency"], 100,
                     )
                 if "background_transparency" in cheat_sheets:
-                    cheat_sheets["background_transparency"] = (
-                        100 - int(cheat_sheets["background_transparency"])
+                    cheat_sheets["background_transparency"] = cls._invert_transparency(
+                        cheat_sheets["background_transparency"], 0,
                     )
 
         if schema_version == 13:
@@ -632,15 +642,22 @@ class ConfigManager:
         raise FileNotFoundError(f"default_config.json could not be loaded ({details})")
 
     @classmethod
-    def _load_from_path(cls, config_path):
-        raw_config = cls._normalize_appearance_fields(cls._read_json(config_path))
+    def _read_config(cls, config_path):
+        config = cls._read_json(config_path)
+        if not isinstance(config, dict):
+            raise ValueError("config.json must contain a JSON object")
+        return config
+
+    @classmethod
+    def _merge_config(cls, raw_config):
+        raw_config = cls._normalize_appearance_fields(raw_config)
         default_config = cls._load_default_config_template()
         migrated = cls._migrate_config(cls._deep_merge(default_config, raw_config))
-        if isinstance(raw_config, dict) and "area_note_migration_notice_shown" not in raw_config:
+        if "area_note_migration_notice_shown" not in raw_config:
             # この案内は旧版利用者向け。新規設定ではdefault_configのtrueを使い、
             # 既存configにキーが無い場合だけ一度表示する。
             migrated["area_note_migration_notice_shown"] = False
-        if isinstance(raw_config, dict) and "poe1_route_selected" not in raw_config:
+        if "poe1_route_selected" not in raw_config:
             migrated["poe1_route_selected"] = cls._infer_poe1_route_selected(raw_config)
         return migrated
 
@@ -660,7 +677,7 @@ class ConfigManager:
             if legacy_path.resolve() == config_path.resolve():
                 continue
 
-            config = cls._load_from_path(legacy_path)
+            config = cls._merge_config(cls._read_config(legacy_path))
             config = cls.migrate_pob_import_data_from_config(config)
             cls._backup_config(legacy_path, reason="legacy")
             cls._write_json(config_path, config)
@@ -675,29 +692,43 @@ class ConfigManager:
 
     @classmethod
     def load_config(cls):
-        cls._migrate_legacy_config_if_needed()
         config_path = Path(cls._get_config_path())
+        try:
+            cls._migrate_legacy_config_if_needed()
+        except OSError as exc:
+            if not config_path.exists():
+                raise
+            print(f"[WARN] Failed to handle legacy config: {exc}")
 
-        if not config_path.exists():
+        raw_config = None
+        if config_path.exists():
+            try:
+                raw_config = cls._read_config(config_path)
+            except ValueError:
+                cls._backup_config(config_path, reason="broken")
+
+        if raw_config is None:
             config = cls._load_default_config_template()
-            config = cls.migrate_pob_import_data_from_config(config)
-            cls._write_json(config_path, config)
-            cls.migrate_startup_legacy_user_files()
-            return config
+        else:
+            config = cls._merge_config(raw_config)
 
         try:
-            config = cls._load_from_path(config_path)
             config = cls.migrate_pob_import_data_from_config(config)
-            # schemaVersion付与や新規キー補完が入った場合は正式保存先へ反映する。
-            cls._write_json(config_path, config)
+            if config != raw_config:
+                cls._write_json(config_path, config)
+        except (OSError, UnicodeError) as exc:
+            if raw_config is None:
+                raise
+            print(f"[WARN] Failed to persist config or migrate PoB import data: {exc}")
+
+        try:
             cls.migrate_startup_legacy_user_files()
-            return config
-        except Exception:
-            cls._backup_config(config_path, reason="broken")
-            config = cls._load_default_config_template()
-            cls._write_json(config_path, config)
-            cls.migrate_startup_legacy_user_files()
-            return config
+        except OSError as exc:
+            if raw_config is None:
+                raise
+            print(f"[WARN] Failed to migrate startup user files: {exc}")
+
+        return config
 
     @classmethod
     def save_config(cls, config):

@@ -1,5 +1,6 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QLabel,
@@ -11,7 +12,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.appearance import resolve_dialog_theme
-from src.ui.dialog_theme import POENAVI_DIALOG_THEME, POETORE_DIALOG_THEME
+from src.ui.dialog_theme import (
+    POENAVI_DIALOG_THEME, POETORE_DIALOG_THEME, apply_dialog_theme, dialog_theme_for_mode,
+)
 from src.ui.styles import Styles
 from src.ui.toolbar_icons import checking_icon, download_icon, update_check_icon
 from src.update.release_client import ReleaseInfo, parse_version
@@ -54,7 +57,8 @@ def _update_message_theme(parent):
         if widget.property("dialogTheme") == resolve_dialog_theme(POENAVI_DIALOG_THEME).name:
             return resolve_dialog_theme(POENAVI_DIALOG_THEME)
         widget = widget.parentWidget()
-    return resolve_dialog_theme(POENAVI_DIALOG_THEME)
+    app = QApplication.instance()
+    return dialog_theme_for_mode(app.property("appMode") if app is not None else None)
 
 
 def build_update_message_box(
@@ -155,15 +159,32 @@ class UpdateProgressDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("ぽえなび アップデート")
         self.setModal(True)
+        apply_dialog_theme(self, _update_message_theme(parent))
 
         layout = QVBoxLayout(self)
         self.label = QLabel(f"v{version} をダウンロードしています…")
         self.progress = QProgressBar()
         self.cancel_button = QPushButton("キャンセル")
-        self.cancel_button.clicked.connect(self.cancel_requested.emit)
+        self.cancel_button.clicked.connect(self._request_cancel)
         layout.addWidget(self.label)
         layout.addWidget(self.progress)
         layout.addWidget(self.cancel_button)
+
+    def _request_cancel(self):
+        if self.cancel_button.isEnabled():
+            self.cancel_button.setEnabled(False)
+            self.cancel_requested.emit()
+
+    def closeEvent(self, event):
+        # The callers use close() after the download loop finishes.
+        if event.spontaneous():
+            self._request_cancel()
+        super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._request_cancel()
+        super().keyPressEvent(event)
 
     def set_progress(self, done: int, total: int) -> None:
         self.progress.setRange(0, total if total > 0 else 0)

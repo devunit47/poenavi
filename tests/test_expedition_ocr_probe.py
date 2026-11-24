@@ -1,8 +1,11 @@
 import base64
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from PySide6.QtGui import QColor, QImage
@@ -580,7 +583,7 @@ def test_windows_ocr_server_reuses_one_process_for_multiple_batches(monkeypatch)
 
     process = SimpleNamespace(stdin=FakeStdin(), poll=lambda: None)
 
-    def ensure_started():
+    def ensure_started(_generation):
         if server._process is None:
             starts.append(True)
             server._process = process
@@ -597,7 +600,7 @@ def test_windows_ocr_server_restarts_once_after_failure(monkeypatch):
     calls = []
     stops = []
 
-    def recognize_once(_images):
+    def recognize_once(_images, _generation):
         calls.append(True)
         if len(calls) == 1:
             raise RuntimeError("stopped")
@@ -616,7 +619,7 @@ def test_windows_ocr_server_cleans_up_failed_start(monkeypatch):
     stops = []
     monkeypatch.setattr(
         server, "_ensure_started",
-        lambda: (_ for _ in ()).throw(RuntimeError("startup failed")),
+        lambda _generation: (_ for _ in ()).throw(RuntimeError("startup failed")),
     )
     monkeypatch.setattr(server, "_stop_process", lambda **_kwargs: stops.append(True))
 
@@ -624,6 +627,51 @@ def test_windows_ocr_server_cleans_up_failed_start(monkeypatch):
         server.start()
 
     assert stops == [True]
+
+
+@pytest.mark.parametrize(
+    ("permanent", "error_message"),
+    [(True, "終了済み"), (False, "中断されました")],
+)
+def test_windows_ocr_server_close_interrupts_pending_response(
+    monkeypatch, permanent, error_message,
+):
+    server = WindowsOcrServer(request_timeout=2)
+    waiting_for_response = threading.Event()
+    allow_process_exit = threading.Event()
+    cleanup_finished = threading.Event()
+    process = Mock()
+    process.poll.return_value = None
+    process.wait.side_effect = lambda *, timeout: allow_process_exit.wait(timeout)
+    process.stderr.close.side_effect = cleanup_finished.set
+    server._process = process
+
+    get_response = server._responses.get
+
+    def get_when_waiting(*, timeout):
+        waiting_for_response.set()
+        return get_response(timeout=timeout)
+
+    monkeypatch.setattr(probe.sys, "platform", "win32")
+    monkeypatch.setattr(server._responses, "get", get_when_waiting)
+    recognize_once = Mock(wraps=server._recognize_once)
+    monkeypatch.setattr(server, "_recognize_once", recognize_once)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(server.recognize, [b"image"])
+        try:
+            assert waiting_for_response.wait(timeout=2)
+            started = time.monotonic()
+            server.close(permanent=permanent)
+            assert time.monotonic() - started < 0.5
+            process.terminate.assert_called_once_with()
+            with pytest.raises(RuntimeError, match=error_message):
+                result.result(timeout=0.5)
+            recognize_once.assert_called_once()
+        finally:
+            allow_process_exit.set()
+
+    assert cleanup_finished.wait(timeout=2)
 
 
 def test_unknown_ocr_engine_is_rejected_before_loading_image(tmp_path):

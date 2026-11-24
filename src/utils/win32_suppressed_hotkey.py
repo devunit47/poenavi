@@ -8,6 +8,8 @@ import sys
 import threading
 from ctypes import wintypes
 
+from src.utils.internal_key_input import is_internal_key_input
+
 
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
@@ -90,7 +92,7 @@ def _parse_hotkey(
 
 
 class HotkeyEventProcessor:
-    """Pure state machine used by the native hook and unit tests."""
+    """Track modifier and target state for the native keyboard hook."""
 
     def __init__(
         self, required_modifier_groups, target_vk: int, should_suppress, on_event,
@@ -107,38 +109,39 @@ class HotkeyEventProcessor:
         self.target_vk = target_vk
         self.should_suppress = should_suppress
         self.on_event = on_event
-        self.pressed_modifier_groups = set()
-        self.suppressing_target = False
+        self.reset()
+
+    def reset(self) -> None:
+        self._pressed_modifier_vks = {False: set(), True: set()}
+        self._suppressed_target_source = None
 
     def process(self, vk_code: int, is_down: bool, *, injected: bool = False) -> bool:
-        modifier_group = next(
-            (name for name, virtual_keys in MODIFIER_GROUPS.items()
-             if vk_code in virtual_keys),
-            None,
-        )
-        if modifier_group is not None:
+        if injected and is_internal_key_input():
+            return False
+        if any(vk_code in keys for keys in MODIFIER_GROUPS.values()):
+            pressed = self._pressed_modifier_vks[injected]
             if is_down:
-                self.pressed_modifier_groups.add(modifier_group)
+                pressed.add(vk_code)
             else:
-                self.pressed_modifier_groups.discard(modifier_group)
+                pressed.discard(vk_code)
             return False
         if vk_code != self.target_vk:
             return False
+        if self._suppressed_target_source is not None:
+            if self._suppressed_target_source != injected:
+                return False
+            if not is_down:
+                self._suppressed_target_source = None
+                self.on_event("released")
+            return True
         if is_down:
-            if self.suppressing_target:
-                return True
-            modifier_matches = (
-                self.pressed_modifier_groups == self.required_modifier_groups
-            )
-            if modifier_matches and self.should_suppress():
-                self.suppressing_target = True
+            # External remappers can supply either or both parts of a hotkey.
+            pressed = self._pressed_modifier_vks[False] | self._pressed_modifier_vks[True]
+            groups = {name for name, keys in MODIFIER_GROUPS.items() if pressed & keys}
+            if groups == self.required_modifier_groups and self.should_suppress():
+                self._suppressed_target_source = injected
                 self.on_event("pressed")
                 return True
-            return False
-        if self.suppressing_target:
-            self.suppressing_target = False
-            self.on_event("released")
-            return True
         return False
 
 
@@ -160,37 +163,60 @@ class Win32SuppressedHotkeyHook:
         self._hook = None
         self._callback = None
         self._startup = queue.Queue(maxsize=1)
+        self._stop_requested = threading.Event()
+        self._thread_lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive() and self._hook)
 
     def start(self, timeout: float = 3.0) -> None:
-        if self.is_running:
-            return
-        self._startup = queue.Queue(maxsize=1)
-        self._thread = threading.Thread(
-            target=self._run, name="PoENaviWin32Hotkey", daemon=True,
-        )
-        self._thread.start()
-        result = self._startup.get(timeout=timeout)
+        with self._thread_lock:
+            if self._thread and self._thread.is_alive():
+                if self._stop_requested.is_set():
+                    raise RuntimeError("Previous Win32 hotkey hook is still stopping")
+                return
+            self._stop_requested.clear()
+            self._processor.reset()
+            startup = self._startup = queue.Queue(maxsize=1)
+            thread = self._thread = threading.Thread(
+                target=self._run, name="PoENaviWin32Hotkey", daemon=True,
+            )
+            thread.start()
+        try:
+            result = startup.get(timeout=timeout)
+        except queue.Empty:
+            self._request_stop(thread)
+            raise
         if isinstance(result, BaseException):
-            self._thread = None
             raise result
+
+    def _request_stop(self, thread) -> None:
+        with self._thread_lock:
+            if self._thread is not thread:
+                return
+            self._stop_requested.set()
+            if self._thread_id:
+                ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
 
     def stop(self, timeout: float = 3.0) -> None:
         thread = self._thread
         if not thread:
             return
-        if self._thread_id:
-            ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+        self._request_stop(thread)
+        if thread is threading.current_thread():
+            return
         thread.join(timeout)
-        self._thread = None
-        self._thread_id = 0
-        self._hook = None
-        self._callback = None
+        if thread.is_alive():
+            return
+        with self._thread_lock:
+            if self._thread is thread:
+                self._thread = None
+                self._hook = None
+                self._callback = None
 
     def _run(self) -> None:
+        started = False
         try:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
@@ -221,7 +247,7 @@ class Win32SuppressedHotkeyHook:
             )
 
             def hook_proc(code, message, data_ptr):
-                if code == HC_ACTION:
+                if code == HC_ACTION and not self._stop_requested.is_set():
                     data = ctypes.cast(
                         data_ptr, ctypes.POINTER(KBDLLHOOKSTRUCT),
                     ).contents
@@ -234,22 +260,34 @@ class Win32SuppressedHotkeyHook:
                         return 1
                 return user32.CallNextHookEx(self._hook, code, message, data_ptr)
 
+            message = wintypes.MSG()
+            # Create the queue before publishing an ID that stop() can post to.
+            user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+            with self._thread_lock:
+                self._thread_id = int(kernel32.GetCurrentThreadId())
+            if self._stop_requested.is_set():
+                raise RuntimeError("Win32 hotkey hook startup was cancelled")
             self._callback = callback_type(hook_proc)
-            self._thread_id = int(kernel32.GetCurrentThreadId())
             self._hook = user32.SetWindowsHookExW(
                 WH_KEYBOARD_LL, self._callback, kernel32.GetModuleHandleW(None), 0,
             )
             if not self._hook:
                 raise ctypes.WinError()
+            started = True
             self._startup.put(True)
-            message = wintypes.MSG()
-            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+            while not self._stop_requested.is_set():
+                if user32.GetMessageW(ctypes.byref(message), None, 0, 0) <= 0:
+                    break
                 user32.TranslateMessage(ctypes.byref(message))
                 user32.DispatchMessageW(ctypes.byref(message))
         except BaseException as exc:
-            if self._startup.empty():
+            if not started:
                 self._startup.put(exc)
         finally:
-            if self._hook:
-                ctypes.windll.user32.UnhookWindowsHookEx(self._hook)
-            self._hook = None
+            try:
+                if self._hook:
+                    user32.UnhookWindowsHookEx(self._hook)
+            finally:
+                self._hook = None
+                with self._thread_lock:
+                    self._thread_id = 0

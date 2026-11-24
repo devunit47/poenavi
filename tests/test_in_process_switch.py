@@ -174,6 +174,8 @@ def test_round_trip_through_title_and_tray_saves_timer_and_retires_windows(
     navi1.start_timer()
     assert navi1.timer.isActive()
     timer_path = navi1._timer_state_path()
+    save_timer = Mock(wraps=navi1._save_timer_state_payload)
+    monkeypatch.setattr(navi1, "_save_timer_state_payload", save_timer)
     navi1.resize(700, navi1.height())
     navi1.mode_switcher.mode_buttons[POETORE_MODE].click()
     # A second queued request from the retired window must not switch again.
@@ -192,6 +194,7 @@ def test_round_trip_through_title_and_tray_saves_timer_and_retires_windows(
     history_signals.history_checked.emit(None)
     result_signals.leagues_ready.emit(())
     assert timer_path.is_file()
+    assert save_timer.call_count == 1
 
     trade1 = session.window
     trade1._hideout_notification = hideout = Mock()
@@ -276,6 +279,107 @@ def test_failed_window_creation_falls_back_or_restores_previous_mode(
         assert session.target == (POETORE_MODE, POE1)
         assert session.window.isVisible()
         assert ConfigManager.load_config()["poe_version"] == POE1
+
+
+@pytest.mark.parametrize("close_result", ["accepted", "rejected", "exception"])
+def test_geometry_save_failure_stops_services_and_restores_previous_window(
+    session, monkeypatch, qapp, caplog, close_result,
+):
+    old = session.start(POENAVI_MODE, POE1)
+    old.detach_panel("timer")
+    detached = old.detached_panel_windows["timer"]
+    dialog = QDialog(old)
+    dialog.show()
+    old.start_timer()
+
+    stops = []
+    for name in ("keyboard_listener", "suppressed_capture_hotkey", "voicevox_tts"):
+        stop = Mock()
+        monkeypatch.setattr(old, name, Mock(stop=stop))
+        stops.append(stop)
+    for name in ("log_watcher", "stash_tab_scroll"):
+        resource = getattr(old, name)
+        stop = Mock(wraps=resource.stop)
+        monkeypatch.setattr(resource, "stop", stop)
+        stops.append(stop)
+    remove_filter = Mock(wraps=qapp.removeEventFilter)
+    monkeypatch.setattr(qapp, "removeEventFilter", remove_filter)
+
+    close = old.close
+
+    old.resize(old.width() + 50, old.height())
+
+    def close_old_window():
+        with monkeypatch.context() as patch:
+            patch.setattr(ConfigManager, "save_config", Mock(side_effect=PermissionError("config write denied")))
+            assert close()
+        if close_result == "exception":
+            raise RuntimeError("close failed after shutdown")
+        return close_result == "accepted"
+
+    monkeypatch.setattr(old, "close", close_old_window)
+    create = app_composition.create_mode_window
+
+    def fail_target_creation(mode, version):
+        if version == POE2:
+            raise RuntimeError("target window could not start")
+        return create(mode, version)
+
+    monkeypatch.setattr(app_composition, "create_mode_window", fail_target_creation)
+    fallback = Mock(return_value=False)
+    if close_result == "exception":
+        fallback.side_effect = RuntimeError("fallback process could not start")
+    monkeypatch.setattr(app_session, "switch_app_target_and_restart", fallback)
+    critical = Mock()
+    monkeypatch.setattr(app_session.QMessageBox, "critical", critical)
+
+    assert not session.switch_target(POENAVI_MODE, POE2)
+
+    assert "ウィンドウの位置とサイズを保存できませんでした" in caplog.text
+    assert "config write denied" in caplog.text
+    fallback.assert_called_once_with(old, POENAVI_MODE, POE2)
+    critical.assert_not_called()
+    assert not old.isVisible()
+    assert not old.tray_icon.isVisible()
+    assert not old._update_check_timer.isActive()
+    assert not old.timer.isActive()
+    assert not detached.isVisible()
+    assert not dialog.isVisible()
+    remove_filter.assert_any_call(old)
+    for stop in stops:
+        stop.assert_called_once_with()
+    assert session.target == (POENAVI_MODE, POE1)
+    assert session.window is not old
+    assert session.window.isVisible()
+    assert session.window.accumulated_time > 0
+    assert ConfigManager.load_config()["poe_version"] == POE1
+    session.single_instance.set_window.assert_called_with(session.window)
+    qapp.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(old)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_failed_close_without_shutdown_restores_hidden_window(session, monkeypatch, raises):
+    old = session.start(POENAVI_MODE, POE1)
+
+    def fail_close():
+        old.hide()
+        if raises:
+            raise RuntimeError("close failed before shutdown")
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(old, "close", fail_close)
+        patch.setattr(app_session, "switch_app_target_and_restart", Mock(return_value=False))
+        assert not session.switch_target(POENAVI_MODE, POE2)
+
+    assert session.target == (POENAVI_MODE, POE1)
+    assert session.window is old
+    assert old.isVisible()
+    assert not old._session_closed
+    assert old._update_check_timer.isActive()
+    session.single_instance.set_window.assert_called_with(old)
+    assert ConfigManager.load_config()["poe_version"] == POE1
 
 
 def test_no_op_and_unsupported_targets_leave_current_window_and_settings(session, monkeypatch):

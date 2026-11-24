@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.poetore import parse_item_text
 from src.poetore.trade import build_search_query, resolve_trade_stat_filters
+from tests.test_poetore_trade import offline_trade_catalogs, official_trade_stat_entries
 
 SAMPLE_CSV = (
     Path(__file__).resolve().parents[1]
@@ -128,7 +129,7 @@ def test_normal_and_detailed_samples_resolve_the_same_known_trade_stats():
         assert normal_stats <= detailed_stats, family
 
 
-def test_all_collected_samples_can_build_trade_queries():
+def test_all_collected_samples_can_build_trade_queries(offline_trade_catalogs):
     for row in _filled_samples():
         item = parse_item_text(row["貼り付け本文"])
         stat_filters = resolve_trade_stat_filters(item)

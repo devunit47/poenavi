@@ -1,10 +1,50 @@
 import json
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock
 
 from src.utils.voicevox_tts import VoicevoxTtsService, guide_to_speech_text, split_speech_chunks
+
+
+def test_request_replacement_and_stop_serialize_queue_writes(monkeypatch):
+    # 要求をキューに残して、停止が満杯のキューへ書き込む競合を再現する。
+    monkeypatch.setattr(VoicevoxTtsService, "_run_requests", lambda self: None)
+    service = VoicevoxTtsService(stop_player=lambda: None)
+    writing = threading.Event()
+    release_write = threading.Event()
+    stopping = threading.Event()
+    put = service._requests.put_nowait
+
+    def pause_first_write(item):
+        if item == (1, "first"):
+            writing.set()
+            assert release_write.wait(timeout=2)
+        put(item)
+
+    def stop():
+        stopping.set()
+        service.stop()
+
+    monkeypatch.setattr(service._requests, "put_nowait", pause_first_write)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(service.speak_latest, "first")
+            try:
+                assert writing.wait(timeout=2)
+                stopped = executor.submit(stop)
+                assert stopping.wait(timeout=2)
+                assert not service._stopped.wait(timeout=0.1)
+            finally:
+                release_write.set()
+            first.result(timeout=2)
+            stopped.result(timeout=2)
+        service.speak_latest("after stop")
+        assert service._requests.get_nowait() is None
+        assert service._requests.empty()
+    finally:
+        service.stop()
 
 
 class FakeResponse:

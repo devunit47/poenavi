@@ -1,19 +1,19 @@
 """両起動モードで共通利用する起動時アップデート確認。"""
 
 import logging
-import sys
 
 from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
 
+from src import version
 from src.ui.update_dialogs import (
     UpdateAvailableDialog,
     UpdateProgressDialog,
     show_update_message,
 )
 from src.update.qt_controller import UpdateController
-from src.update.release_client import ReleaseInfo
+from src.update.release_client import ReleaseInfo, get_test_release_tag, is_auto_update_supported
 from src.utils.config_manager import ConfigManager
 
 
@@ -105,7 +105,7 @@ def _run_update_gate(
 
 def offer_update(release: ReleaseInfo, parent, controller: UpdateController) -> bool:
     """確認済みリリースの更新画面を開き、通常起動を続ける場合はTrueを返す。"""
-    supported = getattr(sys, "frozen", False) and sys.platform == "win32"
+    supported = is_auto_update_supported()
     dialog = UpdateAvailableDialog(release, supported, parent)
     if not dialog.exec():
         return True
@@ -187,6 +187,8 @@ def offer_update(release: ReleaseInfo, parent, controller: UpdateController) -> 
 
 def run_startup_update_gate(config: dict, parent=None) -> bool:
     """起動時の自動更新確認を行う。"""
+    if version.IS_FORK and not get_test_release_tag():
+        return True
     return _run_update_gate(config, parent, controller=shared_update_controller())
 
 

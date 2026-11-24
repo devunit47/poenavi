@@ -1,5 +1,6 @@
 import argparse
 import ctypes
+from ctypes import wintypes
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,13 +18,21 @@ from src.update.updater_engine import (
 
 def process_running(pid: int) -> bool:
     synchronize = 0x00100000
-    handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(synchronize, False, pid)
     if not handle:
         return False
     try:
-        return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == 0x00000102
+        return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32.CloseHandle(handle)
 
 
 def show_error(message: str) -> None:

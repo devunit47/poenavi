@@ -3,9 +3,12 @@ from http.client import IncompleteRead
 import json
 import os
 import re
+import sys
 from time import monotonic
 from urllib.parse import quote
 import urllib.request
+
+from src import version
 
 
 RELEASES_API = "https://api.github.com/repos/buri34/poenavi/releases/latest"
@@ -15,6 +18,14 @@ VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 SOCKET_TIMEOUT_SECONDS = 10
 RELEASE_CHECK_TIMEOUT_SECONDS = 30
 CHECK_TIMEOUT_MESSAGE = "更新確認がタイムアウトしました。"
+
+
+def is_auto_update_supported() -> bool:
+    return not version.IS_FORK and getattr(sys, "frozen", False) and sys.platform == "win32"
+
+
+def get_test_release_tag() -> str:
+    return os.environ.get(TEST_RELEASE_TAG_ENV, "").strip()
 
 
 @dataclass(frozen=True)
@@ -76,7 +87,7 @@ def fetch_latest_release(
     current_version: str,
     opener=urllib.request.urlopen,
 ) -> ReleaseInfo | None:
-    test_tag = os.environ.get(TEST_RELEASE_TAG_ENV, "").strip()
+    test_tag = get_test_release_tag()
     allow_prerelease = False
     release_api = RELEASES_API
     if test_tag:

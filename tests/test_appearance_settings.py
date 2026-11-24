@@ -84,6 +84,21 @@ def test_color_picker_handles_accept_and_cancel_without_changing_running_theme(q
         editor.close()
 
 
+def test_contrast_warning_tracks_draft_and_clears_after_reset(qtbot):
+    editor = AppearanceSettingsWidget(mode="poenavi")
+    qtbot.addWidget(editor)
+    assert editor.contrast_warning.isHidden()
+
+    # This draft matches the default PoEトレ panel. The settings are shared.
+    with patch("src.ui.appearance_settings.QColorDialog.getColor", return_value=QColor("#171B1D")):
+        editor.color_buttons["text"].click()
+    assert not editor.contrast_warning.isHidden()
+    assert editor.contrast_warning.parentWidget() is not editor.preview
+
+    editor.reset_button.click()
+    assert editor.contrast_warning.isHidden()
+
+
 @pytest.mark.parametrize("answer", [QMessageBox.Ok, QMessageBox.Cancel])
 def test_appearance_only_change_offers_restart(qapp, answer):
     config = {"startup": {"preferred_mode": "poenavi"}, "appearance": {"preset": "poetore"}}

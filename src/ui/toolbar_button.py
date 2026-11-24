@@ -4,6 +4,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QLabel, QPushButton, QToolTip
 
+from src.app_mode import POETORE_MODE
 from src.ui.appearance import theme_font_size
 from src.ui.dialog_theme import DialogTheme, icon_button_stylesheet
 
@@ -48,12 +49,12 @@ _POPUP_EVENTS = (
 
 
 class ToolbarButton(QPushButton):
-    def __init__(self, text="", parent=None, *, border_width=1, content="padding: 0;"):
+    def __init__(self, text="", parent=None, *, border_width=1, content="padding: 0;", mode=POETORE_MODE):
         super().__init__(text, parent)
         self._tooltip_popup = None
         self.setFocusPolicy(Qt.TabFocus)
         self.setStyleSheet(icon_button_stylesheet(
-            border_width=border_width, content=content,
+            border_width=border_width, content=content, mode=mode,
             focus_selector='[keyboardFocus="true"]:focus',
         ))
 

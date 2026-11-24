@@ -3,15 +3,22 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from src.app_mode import POENAVI_MODE
+from src.ui.app_theme import theme_for_mode
 from src.ui.main_window import MainWindow
+from src.ui.toolbar_button import ToolbarButton
 from src.ui.toolbar_icons import (
     image_manager_icon,
+    image_manager_line_icon,
     map_mod_manager_icon,
     memo_icon,
+    memo_line_icon,
     poenavi_mode_icon,
     poetore_mode_icon,
     settings_icon,
+    settings_line_icon,
     vendor_presets_icon,
+    vendor_presets_line_icon,
 )
 
 
@@ -72,33 +79,45 @@ def test_poennavi_toolbar_uses_custom_icons_and_has_no_poetore_button(qapp, monk
     monkeypatch.setattr(MainWindow, "_restore_progress_flags", lambda self: None)
     monkeypatch.setattr(MainWindow, "setup_ui", build_ui)
 
-    created = {}
-
-    def record(factory):
-        def build(**colors):
-            icon = factory(**colors)
-            created[factory.__name__] = icon
-            return icon
-        return build
-
-    for factory in (memo_icon, vendor_presets_icon, image_manager_icon, settings_icon):
-        monkeypatch.setattr(f"src.ui.main_window.{factory.__name__}", record(factory))
 
     window = MainWindow.__new__(MainWindow)
     try:
         with pytest.raises(UiBuilt):
             window.__init__()
 
-        expected = {
-            "memo_btn": "memo_icon",
-            "vendor_search_btn": "vendor_presets_icon",
-            "cheat_sheets_btn": "image_manager_icon",
-            "settings_btn": "settings_icon",
-        }
-        size = QSize(24, 24)
-        for attr, factory_name in expected.items():
-            actual = getattr(window, attr).icon().pixmap(size).toImage()
-            assert actual == created[factory_name].pixmap(size).toImage(), attr
+        expected = (
+            (window.memo_btn, memo_line_icon),
+            (window.vendor_search_btn, vendor_presets_line_icon),
+            (window.cheat_sheets_btn, image_manager_line_icon),
+            (window.settings_btn, settings_line_icon),
+        )
+        toolbar = window.global_controls_widget
+        assert toolbar.parentWidget().layout().indexOf(toolbar) == 0
+        color = theme_for_mode(POENAVI_MODE).muted_text
+        icon_size = QSize(24, 24)
+        for index, (button, factory) in enumerate(expected):
+            assert isinstance(button, ToolbarButton)
+            assert toolbar.layout().itemAt(index).widget() is button
+            assert button.size() == QSize(36, 36)
+            assert button.iconSize() == icon_size
+            assert button.icon().pixmap(icon_size).toImage() == factory(color).pixmap(icon_size).toImage()
+            assert button.toolTip() == button.accessibleName()
+            assert button.toolTip()
+        assert window.settings_btn.toolTip() == "設定画面を開く"
+        assert "Shift+Space" in window.cheat_sheets_btn.toolTip()
+        window._apply_bg_opacity(45)
+        assert "border-radius: 10px" in window.centralWidget().styleSheet()
+        assert "border: 1px solid" in window.centralWidget().styleSheet()
+        for frame, name in (
+            (window.guide_info_frame, "guideInfoFrame"),
+            (window.guide_text_frame, "guideTextFrame"),
+            (window.area_note_frame, "areaNoteFrame"),
+            (window.gem_tracker_frame, "gemTrackerFrame"),
+        ):
+            assert frame.objectName() == name
+            assert frame.styleSheet().strip().startswith(f"QFrame#{name} {{")
+        assert window.zone_label.frameWidth() == 0
+        assert window.guide_text_label.frameWidth() == 0
         assert not hasattr(window, "poetore_btn")
     finally:
         window.deleteLater()

@@ -554,9 +554,10 @@ def test_manager_regex_search_accepts_poe_quoted_and_negated_terms(qapp):
 
 @pytest.mark.parametrize("mode", [POENAVI_MODE, POETORE_MODE])
 def test_map_check_uses_mode_theme_and_shared_profile_controls(qapp, mode):
-    dialog = MapModManagerDialog(default_map_check_config())
+    dialog = MapModManagerDialog(default_map_check_config(), app_mode=mode)
     window = MapCheckWindow(default_map_check_config(), app_mode=mode)
-    assert dialog.property("dialogTheme") == POETORE_MODE
+    assert dialog.property("dialogTheme") == mode
+    assert f'QDialog[dialogTheme="{mode}"] QTableWidget QPushButton[decisionSegment="true"]' in dialog.styleSheet()
     assert window.property("dialogTheme") == mode
     assert window.property("dialogAccent") == dialog_theme_for_mode(mode).accent
     assert not window.close_button.icon().isNull()

@@ -17,11 +17,12 @@ from src.update.release_client import ReleaseInfo
 from src.utils.config_manager import ConfigManager
 
 
+UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
 logger = logging.getLogger(__name__)
 
 
 def shared_update_controller() -> UpdateController:
-    """起動時ゲートとぽえとれで使うアプリ内共通の更新コントローラー。"""
+    """起動時ゲートと両モードで使うアプリ内共通の更新コントローラー。"""
     app = QCoreApplication.instance()
     controller = getattr(app, "_shared_update_controller", None)
     if controller is None:

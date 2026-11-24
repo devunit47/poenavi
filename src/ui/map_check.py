@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app_mode import POENAVI_MODE
-from src.ui.appearance import resolve_dialog_theme, suspend_theme_fixed_geometry, theme_font_size
+from src.app_mode import POENAVI_MODE, POETORE_MODE
+from src.ui.appearance import suspend_theme_fixed_geometry, theme_font_size
 from src.poetore.clipboard import clipboard_change_token, read_item_clipboard
 from src.poetore.map_check import (
     DEFAULT_DECISIONS_BY_REF,
@@ -46,7 +46,6 @@ from src.poetore.window_position import (
     position_for_context_at_cursor_y,
 )
 from src.ui.dialog_theme import (
-    POETORE_DIALOG_THEME,
     UI_METRICS,
     apply_dialog_theme,
     dialog_theme_for_mode,
@@ -137,17 +136,18 @@ def _profile_selector(parent, layout, on_select):
 class MapModManagerDialog(QDialog):
     config_changed = Signal(dict)
 
-    def __init__(self, config: dict, parent=None):
+    def __init__(self, config: dict, parent=None, *, app_mode=POETORE_MODE):
         super().__init__(parent)
         self.config = normalized_map_check_config(config)
         self.catalog = load_map_mod_catalog()
         self.setWindowTitle("Map Mod管理")
         self.resize(820, 680)
         self.setProperty("density", "compact")
-        theme = resolve_dialog_theme(POETORE_DIALOG_THEME)
+        theme = dialog_theme_for_mode(app_mode)
         apply_dialog_theme(self, theme)
-        segment = 'QDialog[dialogTheme="poetore"] QTableWidget QPushButton[decisionSegment="true"]'
-        badge = 'QDialog[dialogTheme="poetore"] QLabel[uiRole="mapModScope"]'
+        root = f'QDialog[dialogTheme="{theme.name}"]'
+        segment = f'{root} QTableWidget QPushButton[decisionSegment="true"]'
+        badge = f'{root} QLabel[uiRole="mapModScope"]'
         selected_styles = []
         for value, (_, role) in _DECISIONS.items():
             ink = getattr(theme, role)
@@ -160,7 +160,7 @@ class MapModManagerDialog(QDialog):
                 }}
             """)
         self.setStyleSheet(self.styleSheet() + f"""
-            QDialog[dialogTheme="poetore"] QTableWidget QHeaderView::section:last {{
+            {root} QTableWidget QHeaderView::section:last {{
                 border-right: none;
             }}
             QWidget#mapModHeaderEnd {{

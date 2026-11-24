@@ -20,7 +20,10 @@ from src.ui.appearance import (
     fit_theme_fixed_geometry, has_custom_theme_font, theme_color,
     theme_font_family, theme_font_size, theme_rgba,
 )
+from src.ui.app_theme import theme_for_mode
+from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 from src.ui.styles import Styles
+from src.ui.toolbar_button import ToolbarButton
 from src.ui.mode_switcher import ModeSwitcherWidget, add_mode_switch_menu
 from src.ui.detached_panel import DetachedPanelWindow
 from src.ui.settings_dialog import AreaNoteDialog, SettingsDialog
@@ -83,8 +86,11 @@ from src.ui.update_dialogs import (
     UpdateAvailableDialog,
     UpdateProgressDialog,
     show_update_message,
+    available_update_version, sync_update_action,
 )
-from src.update.qt_controller import UpdateController
+from src.update.startup_gate import (
+    UPDATE_CHECK_INTERVAL_MS, record_update_check_result, shared_update_controller,
+)
 from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout
 
 from src.ui.startup_dialogs import RouteSelectionDialog
@@ -110,10 +116,8 @@ from src.ui.window_geometry import (
 
 from src.ui.vendor_search_dialog import VendorSearchPresetDialog
 from src.ui.toolbar_icons import (
-    image_manager_icon,
-    memo_icon,
-    settings_icon,
-    vendor_presets_icon,
+    image_manager_line_icon, memo_line_icon, panel_detach_icon, panel_minimize_icon,
+    settings_line_icon, vendor_presets_line_icon,
 )
 
 DEFAULT_CLICK_THROUGH_HOTKEY = "F6"
@@ -242,8 +246,6 @@ class MainWindow(QMainWindow):
         record = self.panel_registry[panel_id]
         content = record["content"]
         record["layout"].removeWidget(content)
-        if panel_id == "timer":
-            self._move_global_controls_to_main()
         record["expanded_size_policies"] = {
             widget: widget.sizePolicy() for widget in record.get("expand_widgets", ())
         }
@@ -278,9 +280,8 @@ class MainWindow(QMainWindow):
             return
 
         record = self.panel_registry[panel_id]
-        if panel_id == "timer" and not self._detached_panel_config(panel_id).get("minimized", False):
-            self._move_global_controls_to_timer()
-        panel_window.layout().removeWidget(record["content"])
+        content_layout = getattr(panel_window, "_content_layout", None) or panel_window.layout()
+        content_layout.removeWidget(record["content"])
         panel_window.restore_content_size_policy()
         for widget, size_policy in record.pop("expanded_size_policies", {}).items():
             widget.setSizePolicy(size_policy)
@@ -297,28 +298,8 @@ class MainWindow(QMainWindow):
         self._save_detached_panel_state(panel_id)
         self._adjust_main_window_after_panel_change()
 
-    def _move_global_controls_to_main(self):
-        if not hasattr(self, "global_controls_widget"):
-            return
-        record = self.panel_registry["timer"]
-        if self.timer_button_layout.indexOf(self.global_controls_widget) >= 0:
-            self.timer_button_layout.removeWidget(self.global_controls_widget)
-        if record["layout"].indexOf(self.global_controls_widget) < 0:
-            record["layout"].insertWidget(record["index"], self.global_controls_widget)
-
-    def _move_global_controls_to_timer(self):
-        if not hasattr(self, "global_controls_widget"):
-            return
-        record = self.panel_registry["timer"]
-        if record["layout"].indexOf(self.global_controls_widget) >= 0:
-            record["layout"].removeWidget(self.global_controls_widget)
-        if self.timer_button_layout.indexOf(self.global_controls_widget) < 0:
-            self.timer_button_layout.addWidget(self.global_controls_widget)
-
     def minimize_panel(self, panel_id: str):
         record = self.panel_registry[panel_id]
-        if panel_id == "timer":
-            self._move_global_controls_to_main()
         panel_window = self.detached_panel_windows.get(panel_id)
         if panel_window is not None:
             self._save_detached_panel_state(panel_id, persist=False)
@@ -339,8 +320,6 @@ class MainWindow(QMainWindow):
             elif panel_id != "gem" or self.poe_version == POE1:
                 record["content"].show()
             state["minimized"] = False
-        if not self._is_panel_detached("timer"):
-            self._move_global_controls_to_timer()
         self._update_restore_all_panels_button()
         ConfigManager.save_config(self.config)
         self._adjust_main_window_after_panel_change()
@@ -357,7 +336,7 @@ class MainWindow(QMainWindow):
 
     def _register_detachable_panel(
         self, panel_id: str, title: str, widgets: list[QWidget], layout, expand_widgets=(),
-        header_widgets=(), header_right_margin=0,
+        header_widgets=(),
     ):
         """連続したUIを、初期化時に一つの移動可能なコンテナへまとめる。"""
         index = layout.indexOf(widgets[0])
@@ -370,8 +349,8 @@ class MainWindow(QMainWindow):
 
         header_widget = QWidget()
         header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(0, 0, header_right_margin, 0)
-        header_layout.setSpacing(6)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(UI_METRICS.inline_gap)
 
         title_widget = widgets[0]
         layout.removeWidget(title_widget)
@@ -380,14 +359,11 @@ class MainWindow(QMainWindow):
         for widget in header_widgets:
             header_layout.addWidget(widget)
 
-        minimize_button = QPushButton("─ 最小化")
-        minimize_button.setStyleSheet(Styles.BUTTON)
-        minimize_button.setCursor(QCursor(Qt.PointingHandCursor))
+        icon_color = theme_for_mode(POENAVI_MODE).muted_text
+        minimize_button = self._icon_button(panel_minimize_icon(icon_color), "このパネルを最小化", 28, 18)
         minimize_button.clicked.connect(lambda: self.minimize_panel(panel_id))
         header_layout.addWidget(minimize_button)
-        detach_button = QPushButton("↗ 切り離す")
-        detach_button.setStyleSheet(Styles.BUTTON)
-        detach_button.setCursor(QCursor(Qt.PointingHandCursor))
+        detach_button = self._icon_button(panel_detach_icon(icon_color), "このパネルを別ウィンドウへ切り離す", 28, 18)
         detach_button.clicked.connect(lambda: self.detach_panel(panel_id))
         header_layout.addWidget(detach_button)
         panel_layout.addWidget(header_widget)
@@ -483,8 +459,6 @@ class MainWindow(QMainWindow):
                 panel_window.hide()
             else:
                 record["content"].hide()
-                if panel_id == "timer":
-                    self._move_global_controls_to_main()
         self._update_restore_all_panels_button()
         self._adjust_main_window_after_panel_change()
 
@@ -550,7 +524,10 @@ class MainWindow(QMainWindow):
         
         # 設定読み込み
         self.config = ConfigManager.load_config()
-        self.update_controller = UpdateController()
+        self.update_controller = shared_update_controller()
+        self._update_check_action = None
+        self._settings_update_open = False
+        self._update_offer_open = False
         self._update_progress_dialog = None
         app = QApplication.instance()
         if (
@@ -667,6 +644,10 @@ class MainWindow(QMainWindow):
         self.detached_panel_windows = {}
         
         self.setup_ui()
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
+        self._update_check_timer.timeout.connect(self._check_for_updates_in_background)
+        self._update_check_timer.start()
         self._build_tray_icon()
         self._restore_detached_panels()
         self._restore_minimized_panels()
@@ -675,7 +656,6 @@ class MainWindow(QMainWindow):
         self.map_thumbnail.auto_position = self.config.get("auto_position_map", True)
         self.setMouseTracking(True)
         self.centralWidget().setMouseTracking(True)
-        self._apply_bg_opacity(self.config.get("window_opacity", 100))
         self._apply_text_opacity(self.config.get("text_opacity", 100))
         
         # レベルガイド状態
@@ -792,6 +772,7 @@ class MainWindow(QMainWindow):
         """Connect handlers used after the startup update gate."""
         controller = self.update_controller
         self._update_connections = (
+            controller.check_started.connect(self._sync_update_button_from_config),
             controller.check_finished.connect(self._on_update_check_finished),
             controller.check_failed.connect(self._on_update_check_failed),
             controller.download_progress.connect(self._on_update_download_progress),
@@ -821,13 +802,12 @@ class MainWindow(QMainWindow):
         self.update_controller.check_failed.disconnect(on_failed)
 
         release = result["release"]
-        if release is None:
-            return True
-        if self.config.get("notified_update_version") == release.version:
+        notified_version = self.config.get("notified_update_version")
+        if result["error"] is None:
+            record_update_check_result(self.config, release)
+        if release is None or notified_version == release.version:
             return True
 
-        self.config["notified_update_version"] = release.version
-        ConfigManager.save_config(self.config)
         supported = getattr(sys, "frozen", False) and sys.platform == "win32"
         dialog = UpdateAvailableDialog(release, supported, self)
         if not dialog.exec():
@@ -916,26 +896,55 @@ class MainWindow(QMainWindow):
             self.config["poe_version"] = POE1
         return True
 
-    def _check_for_updates(self, manual=False):
+    def _update_action_busy(self):
+        return (
+            self.update_controller.checking
+            or getattr(self, "_settings_update_open", False)
+            or getattr(self, "_update_offer_open", False)
+            or self._update_progress_dialog is not None
+        )
+
+    def _sync_update_button_from_config(self):
+        if hasattr(self, "update_button"):
+            sync_update_action(
+                self.update_button, theme_for_mode(POENAVI_MODE), self.config,
+                busy=self._update_action_busy(),
+            )
+
+    def _run_toolbar_update_action(self):
+        action = "download" if available_update_version(self.config) else "check"
+        self._check_for_updates(manual=True, action=action)
+
+    def _check_for_updates_in_background(self):
+        self._check_for_updates()
+
+    def _check_for_updates(self, manual=False, *, action=None):
         """GitHub Releasesから最新バージョンを確認する。"""
-        self.update_controller.check(manual)
+        if not self._update_action_busy():
+            self._update_check_action = action or ("download" if manual else "background")
+            self.update_controller.check(manual)
 
-    def _on_update_check_finished(self, release, manual):
+    def _on_update_check_finished(self, release, _manual):
+        if self._settings_update_open:
+            return
+        action = self._update_check_action
+        self._update_check_action = None
+        record_update_check_result(self.config, release)
+        self._sync_update_button_from_config()
+        if action not in ("check", "download"):
+            return
         if release is None:
-            if manual:
-                show_update_message(
-                    self,
-                    QMessageBox.Information,
-                    "アップデート",
-                    "最新バージョンです。",
-                )
-            return
-        if not manual and self.config.get("notified_update_version") == release.version:
-            return
-        self._show_update_available(release)
+            show_update_message(
+                self, QMessageBox.Information, "アップデート", "最新バージョンです。",
+            )
+        elif action == "download":
+            self._show_update_available(release)
 
-    def _on_update_check_failed(self, message, manual):
-        if manual:
+    def _on_update_check_failed(self, message, _manual):
+        action = self._update_check_action
+        self._update_check_action = None
+        self._sync_update_button_from_config()
+        if action in ("check", "download"):
             show_update_message(
                 self,
                 QMessageBox.Warning,
@@ -944,16 +953,20 @@ class MainWindow(QMainWindow):
             )
 
     def _show_update_available(self, release):
-        self.config["notified_update_version"] = release.version
-        ConfigManager.save_config(self.config)
-        supported = getattr(sys, "frozen", False) and sys.platform == "win32"
-        dialog = UpdateAvailableDialog(release, supported, self)
-        if not dialog.exec():
-            return
-        if not supported:
-            QDesktopServices.openUrl(QUrl(release.page_url))
-            return
-        self._start_update_download(release)
+        self._update_offer_open = True
+        self._sync_update_button_from_config()
+        try:
+            supported = getattr(sys, "frozen", False) and sys.platform == "win32"
+            dialog = UpdateAvailableDialog(release, supported, self)
+            if not dialog.exec():
+                return
+            if not supported:
+                QDesktopServices.openUrl(QUrl(release.page_url))
+                return
+            self._start_update_download(release)
+        finally:
+            self._update_offer_open = False
+            self._sync_update_button_from_config()
 
     def _start_update_download(self, release):
         self._update_progress_dialog = UpdateProgressDialog(release.version, self)
@@ -971,8 +984,11 @@ class MainWindow(QMainWindow):
         if self._update_progress_dialog:
             self._update_progress_dialog.reject()
             self._update_progress_dialog = None
+            self._sync_update_button_from_config()
 
     def _on_update_download_failed(self, message):
+        if self._update_progress_dialog is None:
+            return
         self._on_update_download_cancelled()
         show_update_message(
             self,
@@ -982,9 +998,18 @@ class MainWindow(QMainWindow):
         )
 
     def _on_update_download_ready(self, archive, release):
-        if self._update_progress_dialog:
-            self._update_progress_dialog.accept()
-            self._update_progress_dialog = None
+        if self._update_progress_dialog is None:
+            return
+        self._update_offer_open = True
+        try:
+            self._confirm_update_download(archive, release)
+        finally:
+            self._update_offer_open = False
+            self._sync_update_button_from_config()
+
+    def _confirm_update_download(self, archive, release):
+        self._update_progress_dialog.accept()
+        self._update_progress_dialog = None
         answer = show_update_message(
             self,
             QMessageBox.Question,
@@ -1177,30 +1202,26 @@ class MainWindow(QMainWindow):
         alpha = int(opacity_pct / 100.0 * 255)
         # メイン背景
         self.centralWidget().setStyleSheet(
-            f"#centralWidget {{ background-color: {theme_rgba('overlay_bg', 0, 0, 0, alpha)}; border-radius: 10px; }}"
+            f"#centralWidget {{ background-color: {theme_rgba('overlay_bg', 0, 0, 0, alpha)}; border: 1px solid {theme_color('border', '#343B3E')}; border-radius: 10px; }}"
         )
         # ガイドテキストフレーム
         guide_alpha = int(alpha * 0.63)  # 元: 160/255 ≈ 63%の比率を維持
-        if hasattr(self, 'guide_text_frame'):
-            self.guide_text_frame.setStyleSheet(f"""
-                QFrame {{
-                    background-color: {theme_rgba('overlay_bg', 0, 0, 0, guide_alpha)};
-                    border: 1px solid {theme_rgba('overlay_border', 176, 255, 123, 0.2)};
-                    border-radius: 6px;
-                }}
-            """)
-        # ガイドコンテナ
-        container_alpha = int(alpha * 0.55)  # 元: 140/255
-        if hasattr(self, 'guide_container'):
-            self.guide_container.setStyleSheet(
-                f"#guideContainer {{ background-color: {theme_rgba('overlay_bg', 20, 30, 20, container_alpha)}; border-radius: 6px; }}"
-            )
+        if hasattr(self, "guide_text_frame"):
+            self._style_card(self.guide_text_frame, theme_rgba("overlay_bg", 0, 0, 0, guide_alpha))
+        self._apply_guide_background(opacity_pct)
+
+    def _apply_guide_background(self, opacity_pct):
+        container_alpha = int(int(opacity_pct / 100.0 * 255) * 0.55)  # 元: 140/255
+        background = theme_rgba("overlay_bg", 20, 30, 20, container_alpha) if self.guide_expanded else "transparent"
+        self.guide_container.setStyleSheet(
+            f"#guideContainer {{ background-color: {background}; border-radius: 10px; }}"
+        )
 
     def _apply_text_opacity(self, opacity_pct: int):
         """ガイドテキストエリア全体の透過率を適用（QGraphicsOpacityEffect）"""
         from PySide6.QtWidgets import QGraphicsOpacityEffect
         opacity = opacity_pct / 100.0
-        for attr in ('guide_container', 'timer_container', 'timer_toggle_btn', 'guide_toggle_btn'):
+        for attr in ('guide_container', 'timer_container', 'timer_toggle_btn', 'guide_toggle_btn', 'global_controls_widget'):
             w = getattr(self, attr, None)
             if w:
                 effect = QGraphicsOpacityEffect(w)
@@ -1267,74 +1288,136 @@ class MainWindow(QMainWindow):
         self.lbl_secs.setStyleSheet(base_style)
         self.lbl_ms.setStyleSheet(ms_style)
         
-        # コンテナのパディング調整
-        self.timer_container.layout().setContentsMargins(pad, pad, pad, pad // 2)
+        # 左右は外側のボディ余白を含めて従来のタイマーの幅を保つ。
+        side_pad = max(0, pad - UI_METRICS.page_margin)
+        self.timer_container.layout().setContentsMargins(side_pad, pad, side_pad, pad // 2)
+
+    @staticmethod
+    def _icon_button(icon, tooltip, size, icon_size):
+        button = ToolbarButton(border_width=0, mode=POENAVI_MODE)
+        button.setFixedSize(size, size)
+        button.setIcon(icon)
+        button.setIconSize(QSize(icon_size, icon_size))
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        return button
+
+    @staticmethod
+    def _style_card(frame, background="transparent"):
+        frame.setStyleSheet(f"""
+            QFrame#{frame.objectName()} {{
+                background-color: {background};
+                border: 1px solid {theme_color('border', '#343B3E')};
+                border-radius: 10px;
+            }}
+        """)
+
+    @staticmethod
+    def _action_button_style(*, active=False, compact=True):
+        theme = theme_for_mode(POENAVI_MODE)
+        accent = theme.accent
+        background = theme_color("accent_soft") if active else "transparent"
+        border = accent if active else theme_color("border", "#343B3E")
+        padding = "2px 6px" if compact else "4px 8px"
+        return f"""
+            QPushButton {{
+                background: {background}; color: {theme.text};
+                border: 1px solid {border}; border-radius: 7px;
+                padding: {padding}; font-size: {theme_font_size(11 if compact else 13)}px;
+            }}
+            QPushButton:hover:enabled, QPushButton:focus:enabled {{ border-color: {accent}; }}
+            QPushButton:pressed:enabled {{ background: {theme_color("accent_soft")}; }}
+            QPushButton:disabled {{ color: {theme_color("disabled")}; border-color: {theme_color("border")}; }}
+        """
+
+    def _build_global_toolbar(self, layout):
+        self.global_controls_widget = QWidget()
+        toolbar = QHBoxLayout(self.global_controls_widget)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(UI_METRICS.inline_gap)
+        color = theme_for_mode(POENAVI_MODE).muted_text
+        size = UI_METRICS.toolbar_size
+
+        self.memo_btn = self._icon_button(memo_line_icon(color), "共通メモを開く", size, 24)
+        self.memo_btn.clicked.connect(self.open_memo)
+        self.vendor_search_btn = self._icon_button(
+            vendor_presets_line_icon(color), "店売り・スタッシュ検索プリセット", size, 24,
+        )
+        self.vendor_search_btn.clicked.connect(self.open_vendor_search_presets)
+        self.cheat_sheets_btn = self._icon_button(image_manager_line_icon(color), "Cheat sheets", size, 24)
+        self._update_cheat_sheets_hotkey_tooltip()
+        self.cheat_sheets_btn.clicked.connect(self.open_cheat_sheets_from_button)
+        self.settings_btn = self._icon_button(settings_line_icon(color), "設定画面を開く", size, 24)
+        self.settings_btn.clicked.connect(self.open_settings)
+        for button in (self.memo_btn, self.vendor_search_btn, self.cheat_sheets_btn, self.settings_btn):
+            toolbar.addWidget(button)
+        toolbar.addStretch()
+
+        self.restore_all_panels_btn = QPushButton("パネルを全て表示")
+        self.restore_all_panels_btn.setStyleSheet(self._action_button_style())
+        self.restore_all_panels_btn.setToolTip("最小化したパネルをすべて表示")
+        self.restore_all_panels_btn.clicked.connect(self.restore_all_minimized_panels)
+        self.restore_all_panels_btn.hide()
+        toolbar.addWidget(self.restore_all_panels_btn)
+        layout.addWidget(self.global_controls_widget)
 
     def setup_ui(self):
-        from PySide6.QtWidgets import QSizePolicy
-        
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
-        central_widget.setStyleSheet(f"#centralWidget {{ background-color: {Styles.BACKGROUND_COLOR}; border-radius: 10px; }}")
+        central_widget.setProperty("themeLayoutManaged", True)
         self.setCentralWidget(central_widget)
-        
-        layout = QVBoxLayout(central_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        
-        # === タイトルバー ===
-        title_bar = QHBoxLayout()
-        # 操作ボタンを端リサイズの判定範囲から外す。
-        inset = self.EDGE_MARGIN + 2
-        title_bar.setContentsMargins(inset, inset, inset, 0)
-        title_bar.setSpacing(6)
+
+        root = QVBoxLayout(central_widget)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.title_bar_layout = title_bar = QHBoxLayout()
+        margin = UI_METRICS.page_margin
+        title_bar.setContentsMargins(margin, self.EDGE_MARGIN + 2, margin, UI_METRICS.inline_gap)
+        title_bar.setSpacing(UI_METRICS.inline_gap)
         self.mode_switcher = ModeSwitcherWidget(POENAVI_MODE, self.poe_version, central_widget)
         self.mode_switcher.switch_requested.connect(self.switch_requested)
         title_bar.addWidget(self.mode_switcher)
         title_bar.addStretch()
-        
-        # クリックスルー状態表示
+
+        self.update_button = ToolbarButton(border_width=0, mode=POENAVI_MODE)
+        self.update_button.setObjectName("poenaviAppUpdateAction")
+        self.update_button.setIconSize(QSize(20, 20))
+        self.update_button.clicked.connect(self._run_toolbar_update_action)
+        title_bar.addWidget(self.update_button)
+
+        glyph_style = f"font-size: {theme_font_size(14)}px; font-weight: bold; padding: 0;"
+        self.minimize_button = ToolbarButton("─", border_width=0, content=glyph_style, mode=POENAVI_MODE)
+        self.minimize_button.clicked.connect(self.minimize_main_window)
+        self.close_button = ToolbarButton("×", border_width=0, content=glyph_style, mode=POENAVI_MODE)
+        self.close_button.clicked.connect(self.close)
+        for button, tooltip in (
+            (self.minimize_button, "最小化（みになびの表示は維持します）"),
+            (self.close_button, "閉じる"),
+        ):
+            button.setFixedSize(32, 24)
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            title_bar.addWidget(button)
+        equalize_button_sizes((self.minimize_button, self.close_button), minimum_width=32, minimum_height=24)
+        self.update_button.setFixedSize(self.minimize_button.size())
+        self._sync_update_button_from_config()
+        root.addLayout(title_bar)
+
+        body = QWidget()
+        body.setProperty("themeLayoutManaged", True)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(margin, UI_METRICS.inline_gap, margin, margin)
+        layout.setSpacing(UI_METRICS.inline_gap)
+        root.addWidget(body, stretch=1)
+        self._build_global_toolbar(layout)
         self.click_through = False
-        self.click_through_label = QLabel("")
+        self.click_through_label = QLabel()
         self.click_through_label.setWordWrap(True)
-        self.click_through_label.setContentsMargins(inset, 2, inset, 0)
         self._update_click_through_label()
-        
-        btn_style = f"""
-            QPushButton {{
-                background: transparent; color: {Styles.TEXT_COLOR};
-                border: none; font-size: {theme_font_size(14)}px; font-weight: bold;
-                padding: 2px 8px;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('overlay_bg', 255, 255, 255, 0.15)}; border-radius: 3px; }}
-        """
-        close_btn_style = f"""
-            QPushButton {{
-                background: transparent; color: {Styles.TEXT_COLOR};
-                border: none; font-size: {theme_font_size(14)}px; font-weight: bold;
-                padding: 2px 8px;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('accent_soft', 255, 60, 60, 0.8)}; border-radius: 3px; color: {theme_color('overlay_text', '#ffffff')}; }}
-        """
-        
-        minimize_btn = QPushButton("─")
-        minimize_btn.setFixedSize(30, 22)
-        minimize_btn.setStyleSheet(btn_style)
-        minimize_btn.setToolTip("最小化（みになびの表示は維持します）")
-        minimize_btn.clicked.connect(self.minimize_main_window)
-        title_bar.addWidget(minimize_btn)
-        
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(30, 22)
-        close_btn.setStyleSheet(close_btn_style)
-        close_btn.setToolTip("閉じる")
-        close_btn.clicked.connect(self.close)
-        title_bar.addWidget(close_btn)
-        
-        layout.addLayout(title_bar)
         layout.addWidget(self.click_through_label)
         self._update_mode_switcher_width()
-        
+
         # === タイマー折りたたみトグル ===
         self.timer_expanded = self.config.get("timer_expanded", True)
         if self.config.get("timer_size") == "off":
@@ -1345,7 +1428,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(12)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1358,7 +1441,6 @@ class MainWindow(QMainWindow):
         self.timer_container = QWidget()
         timer_container_layout = QVBoxLayout(self.timer_container)
         timer_container_layout.setAlignment(Qt.AlignCenter)
-        timer_container_layout.setContentsMargins(20, 20, 20, 10)
         
         # タイマー内の折りたたみ対象部分
         self.timer_content = QWidget()
@@ -1425,7 +1507,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(11)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1474,25 +1556,24 @@ class MainWindow(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
         button_layout.setAlignment(Qt.AlignCenter)
-        self.timer_button_layout = button_layout
         
         self.start_btn = QPushButton("Start")
-        self.start_btn.setStyleSheet(Styles.BUTTON)
+        self.start_btn.setStyleSheet(self._action_button_style(compact=False))
         self.start_btn.clicked.connect(self.start_timer)
         button_layout.addWidget(self.start_btn)
         
         self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setStyleSheet(Styles.BUTTON)
+        self.stop_btn.setStyleSheet(self._action_button_style(compact=False))
         self.stop_btn.clicked.connect(self.stop_timer)
         button_layout.addWidget(self.stop_btn)
         
         self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setStyleSheet(Styles.BUTTON)
+        self.reset_btn.setStyleSheet(self._action_button_style(compact=False))
         self.reset_btn.clicked.connect(self.reset_timer)
         button_layout.addWidget(self.reset_btn)
 
         self.ready_btn = QPushButton("Ready")
-        self.ready_btn.setStyleSheet(Styles.BUTTON)
+        self.ready_btn.setStyleSheet(self._ready_button_style())
         self.ready_btn.setToolTip("黄昏の岸辺への入場を待ってタイマーを自動開始")
         self.ready_btn.clicked.connect(self.toggle_timer_ready)
         button_layout.addWidget(self.ready_btn)
@@ -1504,65 +1585,10 @@ class MainWindow(QMainWindow):
             self.reset_btn.setVisible(False)
             self.ready_btn.setVisible(False)
         
-        button_layout.addStretch()
+        self.ready_btn.setText("Ready ✓")
+        equalize_button_sizes((self.start_btn, self.stop_btn, self.reset_btn, self.ready_btn), equal_width=False)
+        self.ready_btn.setText("Ready")
 
-        # PoENavi全体の操作。本体内ではタイマー操作と同じ行に置くが、
-        # タイマー切り離し時は本体側へ残す。
-        self.global_controls_widget = QWidget()
-        global_controls_layout = QHBoxLayout(self.global_controls_widget)
-        global_controls_layout.setContentsMargins(0, 0, 0, 0)
-        global_controls_layout.setSpacing(10)
-        global_controls_layout.addStretch()
-
-        self.restore_all_panels_btn = QPushButton("パネルを全て表示")
-        self.restore_all_panels_btn.setStyleSheet(Styles.BUTTON)
-        self.restore_all_panels_btn.setToolTip("最小化したパネルをすべて表示")
-        self.restore_all_panels_btn.clicked.connect(self.restore_all_minimized_panels)
-        self.restore_all_panels_btn.hide()
-        global_controls_layout.addWidget(self.restore_all_panels_btn)
-
-        poenavi_icon_colors = {
-            "accent_color": Styles.TEXT_COLOR,
-            "panel_color": "#263A20",
-            "dark_color": "#142111",
-        }
-
-        self.memo_btn = QPushButton("")
-        self.memo_btn.setStyleSheet(Styles.BUTTON)
-        self.memo_btn.setFixedSize(35, 35)
-        self.memo_btn.setIcon(memo_icon(**poenavi_icon_colors))
-        self.memo_btn.setIconSize(QSize(24, 24))
-        self.memo_btn.setToolTip("共通メモ")
-        self.memo_btn.clicked.connect(self.open_memo)
-        global_controls_layout.addWidget(self.memo_btn)
-
-        self.vendor_search_btn = QPushButton("")
-        self.vendor_search_btn.setStyleSheet(Styles.BUTTON)
-        self.vendor_search_btn.setFixedSize(35, 35)
-        self.vendor_search_btn.setIcon(vendor_presets_icon(**poenavi_icon_colors))
-        self.vendor_search_btn.setIconSize(QSize(24, 24))
-        self.vendor_search_btn.setToolTip("店売り・スタッシュ検索プリセット")
-        self.vendor_search_btn.clicked.connect(self.open_vendor_search_presets)
-        global_controls_layout.addWidget(self.vendor_search_btn)
-
-        self.cheat_sheets_btn = QPushButton("")
-        self.cheat_sheets_btn.setStyleSheet(Styles.BUTTON)
-        self.cheat_sheets_btn.setFixedSize(35, 35)
-        self.cheat_sheets_btn.setIcon(image_manager_icon(**poenavi_icon_colors))
-        self.cheat_sheets_btn.setIconSize(QSize(24, 24))
-        self._update_cheat_sheets_hotkey_tooltip()
-        self.cheat_sheets_btn.clicked.connect(self.open_cheat_sheets_from_button)
-        global_controls_layout.addWidget(self.cheat_sheets_btn)
-        
-        self.settings_btn = QPushButton("")
-        self.settings_btn.setStyleSheet(Styles.BUTTON)
-        self.settings_btn.setFixedSize(35, 35)
-        self.settings_btn.setIcon(settings_icon(**poenavi_icon_colors))
-        self.settings_btn.setIconSize(QSize(24, 24))
-        self.settings_btn.clicked.connect(self.open_settings)
-        global_controls_layout.addWidget(self.settings_btn)
-        button_layout.addWidget(self.global_controls_widget)
-        
         timer_container_layout.addLayout(button_layout)
         
         # タイマーコンテナを固定高さで追加
@@ -1573,11 +1599,9 @@ class MainWindow(QMainWindow):
         # ガイド部分は左右にパディング
         self.guide_container = QWidget()
         self.guide_container.setObjectName("guideContainer")
-        self.guide_container.setStyleSheet(f"""
-            #guideContainer {{ background-color: {theme_rgba('overlay_bg', 20, 30, 20, 140)}; border-radius: 6px; }}
-        """)
+        self.guide_container.setProperty("themeLayoutManaged", True)
         guide_container_layout = QVBoxLayout(self.guide_container)
-        guide_container_layout.setContentsMargins(20, 5, 20, 0)
+        guide_container_layout.setContentsMargins(0, UI_METRICS.inline_gap, 0, 0)
         guide_container_layout.setSpacing(5)
 
         # ガイドの表示範囲・進行方法に関する操作はガイドと一緒に移動する。
@@ -1588,14 +1612,14 @@ class MainWindow(QMainWindow):
 
         self.part2_btn = QPushButton("Act 6-10" if self.part2_mode else "Act 1-5")
         self.part2_btn.setStyleSheet(self._part2_btn_style())
-        self.part2_btn.setFixedHeight(22)
+        self.part2_btn.setMinimumHeight(22)
         self.part2_btn.clicked.connect(self.toggle_part2)
         self.part2_btn.setVisible(self.poe_version == POE1)
         guide_mode_layout.addWidget(self.part2_btn)
 
         self.visit_btn = QPushButton("自動")
         self.visit_btn.setStyleSheet(self._visit_btn_style())
-        self.visit_btn.setFixedHeight(22)
+        self.visit_btn.setMinimumHeight(22)
         self.visit_btn.clicked.connect(self.toggle_visit_override)
         guide_mode_layout.addWidget(self.visit_btn)
         
@@ -1605,7 +1629,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(12)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1616,13 +1640,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.guide_toggle_btn)
         
         guide_frame = QFrame()
-        guide_frame.setStyleSheet(f"""
-            QFrame {{
-                border: 1px solid {theme_rgba('overlay_border', 176, 255, 123, 0.3)};
-                border-radius: 6px;
-                padding: 5px;
-            }}
-        """)
+        guide_frame.setObjectName("guideInfoFrame")
+        guide_frame.setProperty("themeLayoutManaged", True)
+        self._style_card(guide_frame)
         guide_layout = QVBoxLayout(guide_frame)
         guide_layout.setContentsMargins(10, 5, 10, 5)
         guide_layout.setSpacing(3)
@@ -1654,7 +1674,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(11)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1671,7 +1691,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(11)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1689,19 +1709,7 @@ class MainWindow(QMainWindow):
         self.area_note_edit_button.setCursor(QCursor(Qt.PointingHandCursor))
         self.area_note_edit_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.area_note_edit_button.setToolTip("現在のエリアのエリアメモを編集します")
-        self.area_note_edit_button.setStyleSheet(f"""
-            QPushButton {{
-                background: {theme_rgba('overlay_bg', 20, 30, 20, 160)};
-                color: {Styles.TEXT_COLOR};
-                border: 1px solid {theme_rgba('overlay_border', 176, 255, 123, 0.75)};
-                border-radius: 5px;
-                padding: 3px 9px;
-                font-size: {theme_font_size(11)}px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('accent_soft', 73, 110, 50, 180)}; color: {theme_color('overlay_text', '#ffffff')}; }}
-            QPushButton:disabled {{ color: {theme_color('disabled', '#666666')}; border-color: {theme_color('overlay_border', '#555555')}; }}
-        """)
+        self.area_note_edit_button.setStyleSheet(self._action_button_style())
         self.area_note_edit_button.clicked.connect(self.open_area_note_editor)
         self.area_note_edit_button.setEnabled(False)
         guide_text_header_layout.addWidget(self.area_note_edit_button)
@@ -1710,21 +1718,6 @@ class MainWindow(QMainWindow):
         self.mini_navi_toggle_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.mini_navi_toggle_btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.mini_navi_toggle_btn.setToolTip("ボタンに表示された動作でみになびを切り替えます。ロック操作はみになび側の鍵ボタンで行えます。")
-        self.mini_navi_toggle_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {theme_rgba('overlay_bg', 20, 30, 20, 160)};
-                color: {Styles.TEXT_COLOR};
-                border: 1px solid {theme_rgba('overlay_border', 176, 255, 123, 0.75)};
-                border-radius: 5px;
-                padding: 3px 9px;
-                font-size: {theme_font_size(11)}px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background: {theme_rgba('accent_soft', 73, 110, 50, 180)};
-                color: {theme_color('overlay_text', '#ffffff')};
-            }}
-        """)
         self.mini_navi_toggle_btn.clicked.connect(self.toggle_mini_navi_overlay)
         guide_text_header_layout.addWidget(self.mini_navi_toggle_btn)
 
@@ -1733,24 +1726,16 @@ class MainWindow(QMainWindow):
         
         # ── 攻略ガイド表示エリア（本体） ──
         guide_text_frame = QFrame()
-        guide_text_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {theme_rgba('overlay_bg', 0, 0, 0, 160)};
-                border: 1px solid {theme_rgba('overlay_border', 176, 255, 123, 0.2)};
-                border-radius: 6px;
-            }}
-        """)
+        guide_text_frame.setObjectName("guideTextFrame")
+        guide_text_frame.setProperty("themeLayoutManaged", True)
+        self._style_card(guide_text_frame, theme_rgba("overlay_bg", 0, 0, 0, 160))
         guide_text_layout = QVBoxLayout(guide_text_frame)
         guide_text_layout.setContentsMargins(10, 8, 10, 8)
 
         self.area_note_frame = QFrame()
-        self.area_note_frame.setStyleSheet(f"""
-            QFrame {{
-                background: {theme_rgba('accent_soft', 55, 45, 15, 190)};
-                border: 1px solid {theme_rgba('overlay_border', 255, 210, 80, 150)};
-                border-radius: 5px;
-            }}
-        """)
+        self.area_note_frame.setObjectName("areaNoteFrame")
+        self.area_note_frame.setProperty("themeLayoutManaged", True)
+        self._style_card(self.area_note_frame, theme_rgba("accent_soft", 55, 45, 15, 190))
         area_note_layout = QVBoxLayout(self.area_note_frame)
         area_note_layout.setContentsMargins(9, 6, 9, 6)
         area_note_layout.setSpacing(3)
@@ -1776,22 +1761,7 @@ class MainWindow(QMainWindow):
         self.poelab_link_button.setCursor(QCursor(Qt.PointingHandCursor))
         self.poelab_link_button.setToolTip("PoELabトップページを標準ブラウザで開きます")
         self.poelab_link_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self.poelab_link_button.setStyleSheet(f"""
-            QPushButton {{
-                background: {theme_rgba('accent_soft', 150, 30, 30, 210)};
-                color: {theme_color('overlay_text', '#ffffff')};
-                border: 1px solid {theme_rgba('overlay_border', 255, 115, 105, 230)};
-                border-radius: 4px;
-                padding: 4px 10px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background: {theme_rgba('accent_soft', 205, 45, 40, 235)};
-                border-color: {theme_color('overlay_border', '#ffaaa2')};
-            }}
-            QPushButton:pressed {{ background: {theme_rgba('accent_soft', 115, 20, 20, 235)}; }}
-            QPushButton:disabled {{ color: {theme_color('disabled', '#777777')}; border-color: {theme_color('overlay_border', '#555555')}; }}
-        """)
+        self.poelab_link_button.setStyleSheet(self._action_button_style())
         self.poelab_link_button.clicked.connect(self.open_daily_poelab)
         self.poelab_link_button.hide()
         poelab_button_layout.addWidget(self.poelab_link_button)
@@ -1803,15 +1773,15 @@ class MainWindow(QMainWindow):
         scroll.setStyleSheet(f"""
             QScrollArea {{ border: none; background: transparent; }}
             QScrollBar:vertical {{
-                width: 16px;
-                background: {theme_rgba('accent_soft', 176, 255, 123, 0.08)};
-                border-radius: 7px;
-                margin: 0 2px;
+                width: {UI_METRICS.overlay_margin}px;
+                background: {theme_color('surface', '#15191B')};
+                border-radius: {UI_METRICS.inline_gap}px;
+                margin: 0;
             }}
             QScrollBar::handle:vertical {{
-                min-height: 36px;
+                min-height: {UI_METRICS.overlay_control_height}px;
                 background: {theme_color('muted_text', 'rgba(176, 255, 123, 0.55)')};
-                border-radius: 7px;
+                border-radius: {UI_METRICS.inline_gap}px;
             }}
             QScrollBar::handle:vertical:hover {{ background: {theme_color('accent', 'rgba(176, 255, 123, 0.85)')}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ width: 0; height: 0; }}
@@ -1865,7 +1835,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(11)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1887,7 +1857,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; color: {Styles.TEXT_COLOR};
                 border: none; font-size: {theme_font_size(11)}px; font-weight: bold;
-                text-align: left; padding: 2px 5px;
+                text-align: left; padding: 2px 0;
             }}
             QPushButton:hover {{ color: {theme_color('overlay_text', '#ffffff')}; }}
         """)
@@ -1898,13 +1868,9 @@ class MainWindow(QMainWindow):
         
         # ジェムトラッカーコンテナ
         self.gem_tracker_frame = QFrame()
-        self.gem_tracker_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {theme_rgba('overlay_bg', 0, 0, 0, 160)};
-                border: 1px solid {theme_rgba('overlay_border', 176, 255, 123, 0.2)};
-                border-radius: 6px;
-            }}
-        """)
+        self.gem_tracker_frame.setObjectName("gemTrackerFrame")
+        self.gem_tracker_frame.setProperty("themeLayoutManaged", True)
+        self._style_card(self.gem_tracker_frame, theme_rgba("overlay_bg", 0, 0, 0, 160))
         gem_tracker_layout = QVBoxLayout(self.gem_tracker_frame)
         gem_tracker_layout.setContentsMargins(8, 4, 8, 4)
         gem_tracker_layout.setSpacing(4)
@@ -1914,14 +1880,7 @@ class MainWindow(QMainWindow):
         pob_btn_layout.setSpacing(6)
         
         self.pob_import_btn = QPushButton("📥 PoBインポート")
-        self.pob_import_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {theme_rgba('accent_soft', 68, 136, 255, 0.2)}; color: {theme_color('accent', '#4488ff')};
-                border: 1px solid {theme_rgba('overlay_border', 68, 136, 255, 0.5)}; border-radius: 3px;
-                padding: 3px 10px; font-size: {theme_font_size(11)}px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('accent_soft', 68, 136, 255, 0.35)}; }}
-        """)
+        self.pob_import_btn.setStyleSheet(self._action_button_style())
         self.pob_import_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.pob_import_btn.clicked.connect(self._on_pob_import)
         pob_btn_layout.addWidget(self.pob_import_btn)
@@ -1929,14 +1888,7 @@ class MainWindow(QMainWindow):
         # PoBクリアボタン
         self.pob_clear_btn = QPushButton("データクリア")
         self.pob_clear_btn.setMinimumHeight(22)
-        self.pob_clear_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {theme_rgba('accent_soft', 255, 102, 102, 0.10)}; color: {theme_color('danger', '#ff8888')};
-                border: 1px solid {theme_rgba('overlay_border', 255, 102, 102, 0.45)}; border-radius: 3px;
-                padding: 3px 8px; font-size: {theme_font_size(11)}px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('accent_soft', 255, 102, 102, 0.22)}; color: {theme_color('danger', '#ffaaaa')}; }}
-        """)
+        self.pob_clear_btn.setStyleSheet(self._action_button_style())
         self.pob_clear_btn.setToolTip("PoBデータをクリア")
         self.pob_clear_btn.clicked.connect(self._on_pob_clear)
         pob_btn_layout.addWidget(self.pob_clear_btn)
@@ -1955,7 +1907,7 @@ class MainWindow(QMainWindow):
         self.gem_shop_search_copy_btn = QPushButton("Regexをコピー")
         self.gem_shop_search_copy_btn.setMinimumHeight(22)
         self.gem_shop_search_copy_btn.setToolTip("現在Actのショップ検索Regexをクリップボードへコピー（ゲームには入力しません）")
-        self.gem_shop_search_copy_btn.setStyleSheet(Styles.BUTTON)
+        self.gem_shop_search_copy_btn.setStyleSheet(self._action_button_style())
         self.gem_shop_search_copy_btn.clicked.connect(self.copy_gem_shop_search_query)
         gem_search_preview_layout.addWidget(self.gem_shop_search_copy_btn)
         gem_tracker_layout.addLayout(gem_search_preview_layout)
@@ -1988,12 +1940,10 @@ class MainWindow(QMainWindow):
 
         self._register_detachable_panel(
             "timer", "タイマー", [self.timer_toggle_btn, self.timer_container], layout,
-            header_right_margin=10,
         )
         self._register_detachable_panel(
             "guide", "ガイド", [self.guide_toggle_btn, self.guide_container], layout,
             expand_widgets=(self.guide_container,), header_widgets=(self.guide_mode_controls,),
-            header_right_margin=10,
         )
         self._register_detachable_panel(
             "map", "マップ", [self.map_toggle_btn, self.map_thumbnail], guide_lower_layout,
@@ -2007,6 +1957,7 @@ class MainWindow(QMainWindow):
         
         # 初期状態の反映
         self._apply_guide_visibility()
+        self._apply_bg_opacity(self.config.get("window_opacity", 100))
 
         # リサイズグリップ（右下）
         from PySide6.QtWidgets import QSizeGrip
@@ -2029,8 +1980,10 @@ class MainWindow(QMainWindow):
             self.size_grip.move(self.width() - 18, self.height() - 18)
 
     def _update_mode_switcher_width(self):
-        # 左右マージン、ウィンドウ操作ボタン2個、レイアウトの間隔。
-        reserved = 2 * (self.EDGE_MARGIN + 2) + 2 * 30 + 3 * 6
+        margins = self.title_bar_layout.contentsMargins()
+        buttons = (self.update_button, self.minimize_button, self.close_button)
+        reserved = margins.left() + margins.right() + sum(button.width() for button in buttons)
+        reserved += 4 * self.title_bar_layout.spacing()
         self.mode_switcher.set_available_width(self.width(), self.width() - reserved)
 
     def _adjust_height_keep_width(self):
@@ -2061,8 +2014,9 @@ class MainWindow(QMainWindow):
             central.updateGeometry()
         # QtのminimumSizeHintが切り離し前の内容を保持していても、
         # 明示した最小高さを優先して操作列まで縮められるようにする。
-        self.setMinimumHeight(self.DETACHED_ONLY_MIN_HEIGHT)
-        self.resize(self.width(), self.DETACHED_ONLY_MIN_HEIGHT)
+        height = self._main_window_min_height()
+        self.setMinimumHeight(height)
+        self.resize(self.width(), height)
 
     def _adjust_detached_panel_height(self, panel_id: str):
         """切り離しパネルの展開内容を収めつつ、ユーザー指定サイズは維持する。"""
@@ -2120,66 +2074,15 @@ class MainWindow(QMainWindow):
         ConfigManager.save_config(self.config)
 
     def _part2_btn_style(self):
-        if self.part2_mode:
-            return f"""
-                QPushButton {{
-                    background: {theme_rgba('accent_soft', 176, 255, 123, 0.2)}; color: {Styles.TEXT_COLOR};
-                    border: 1px solid {Styles.TEXT_COLOR}; border-radius: 3px;
-                    padding: 2px 8px; font-size: {theme_font_size(10)}px; font-weight: bold;
-                }}
-                QPushButton:hover {{ background: {theme_rgba('accent_soft', 176, 255, 123, 0.35)}; }}
-            """
-        else:
-            return f"""
-                QPushButton {{
-                    background: transparent; color: {theme_color('muted_text', '#888888')};
-                    border: 1px solid {theme_color('overlay_border', '#555555')}; border-radius: 3px;
-                    padding: 2px 8px; font-size: {theme_font_size(10)}px;
-                }}
-                QPushButton:hover {{ color: {Styles.TEXT_COLOR}; border-color: {Styles.TEXT_COLOR}; }}
-            """
-    
+        return self._action_button_style(active=self.part2_mode)
+
     def _visit_btn_style(self):
-        if self.visit_override is not None:
-            return f"""
-                QPushButton {{
-                    background: {theme_rgba('accent_soft', 255, 200, 50, 0.25)}; color: {theme_color('warning', '#ffc832')};
-                    border: 1px solid {theme_color('overlay_border', '#ffc832')}; border-radius: 3px;
-                    padding: 2px 6px; font-size: {theme_font_size(10)}px; font-weight: bold;
-                }}
-                QPushButton:hover {{ background: {theme_rgba('accent_soft', 255, 200, 50, 0.4)}; }}
-            """
-        else:
-            return f"""
-                QPushButton {{
-                    background: transparent; color: {theme_color('muted_text', '#888888')};
-                    border: 1px solid {theme_color('overlay_border', '#555555')}; border-radius: 3px;
-                    padding: 2px 6px; font-size: {theme_font_size(10)}px;
-                }}
-                QPushButton:hover {{ color: {Styles.TEXT_COLOR}; border-color: {Styles.TEXT_COLOR}; }}
-            """
+        return self._action_button_style(active=self.visit_override is not None)
 
     # === 自動ラップ機能 ===
 
     def _auto_lap_btn_style(self):
-        if self.auto_lap:
-            return f"""
-                QPushButton {{
-                    background: {theme_rgba('accent_soft', 100, 200, 255, 0.25)}; color: {theme_color('accent', '#64c8ff')};
-                    border: 1px solid {theme_color('overlay_border', '#64c8ff')}; border-radius: 3px;
-                    padding: 2px 6px; font-size: {theme_font_size(10)}px; font-weight: bold;
-                }}
-                QPushButton:hover {{ background: {theme_rgba('accent_soft', 100, 200, 255, 0.4)}; }}
-            """
-        else:
-            return f"""
-                QPushButton {{
-                    background: transparent; color: {theme_color('muted_text', '#888888')};
-                    border: 1px solid {theme_color('overlay_border', '#555555')}; border-radius: 3px;
-                    padding: 2px 6px; font-size: {theme_font_size(10)}px;
-                }}
-                QPushButton:hover {{ color: {Styles.TEXT_COLOR}; border-color: {Styles.TEXT_COLOR}; }}
-            """
+        return self._action_button_style(active=self.auto_lap)
 
     def toggle_auto_lap(self):
         self.auto_lap = not self.auto_lap
@@ -2610,6 +2513,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "mini_navi_toggle_btn"):
             return
         self.mini_navi_toggle_btn.setText(self._mini_navi_toggle_text())
+        self.mini_navi_toggle_btn.setStyleSheet(self._action_button_style(
+            active=bool(self.config.get("mini_guide_overlay", {}).get("enabled", False)),
+        ))
         self.mini_navi_toggle_btn.setVisible(self._is_mini_navi_available() and self.guide_expanded)
 
     def _enforce_feature_support(self):
@@ -2800,15 +2706,7 @@ class MainWindow(QMainWindow):
             # サブトグルボタンも非表示
             self.zone_header_toggle_btn.setVisible(False)
             self.guide_text_toggle_btn.setVisible(False)
-        # 背景も連動
-        if self.guide_expanded:
-            self.guide_container.setStyleSheet(f"""
-                #guideContainer {{ background-color: {theme_rgba('overlay_bg', 20, 30, 20, 140)}; border-radius: 6px; }}
-            """)
-        else:
-            self.guide_container.setStyleSheet("""
-                #guideContainer { background-color: transparent; }
-            """)
+        self._apply_guide_background(self.config.get("window_opacity", 100))
         self.guide_toggle_btn.setText("▼ ガイド" if self.guide_expanded else "▶ ガイド")
     
     def start_timer(self):
@@ -2892,19 +2790,7 @@ class MainWindow(QMainWindow):
         )
 
     def _ready_button_style(self):
-        if self.timer_ready:
-            return f"""
-                QPushButton {{
-                    background-color: {theme_color('accent_soft', '#2e7d32')};
-                    color: {theme_color('overlay_text', 'white')};
-                    border: 1px solid {theme_color('overlay_border', '#66bb6a')};
-                    border-radius: 4px;
-                    padding: 5px 12px;
-                    font-weight: bold;
-                }}
-                QPushButton:hover {{ background-color: {theme_color('accent_soft', '#388e3c')}; }}
-            """
-        return Styles.BUTTON
+        return self._action_button_style(active=self.timer_ready, compact=False)
 
     def _refresh_ready_button(self):
         if not hasattr(self, "ready_btn"):
@@ -3906,12 +3792,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "click_through_label"):
             return
         hotkey = self.config.get('hotkeys', {}).get('click_through', DEFAULT_CLICK_THROUGH_HOTKEY)
-        if getattr(self, 'click_through', False):
-            self.click_through_label.setText(f"🔓 クリックスルーON（{hotkey}で解除）")
-            self.click_through_label.setStyleSheet(f"color: {theme_color('danger', '#ff9944')}; font-size: {theme_font_size(14)}px; font-weight: bold;")
+        if getattr(self, "click_through", False):
+            self.click_through_label.setText(f"クリックスルーON（{hotkey}で解除）")
+            color = theme_color("warning", "#ff9944")
         else:
             self.click_through_label.setText(f"クリックスルーOFF（{hotkey}でON）")
-            self.click_through_label.setStyleSheet(f"color: {theme_rgba('accent', 176, 255, 123, 0.45)}; font-size: {theme_font_size(12)}px; font-weight: normal;")
+            color = theme_for_mode(POENAVI_MODE).muted_text
+        self.click_through_label.setStyleSheet(f"color: {color}; font-size: {theme_font_size(11)}px;")
         self.click_through_label.setVisible(True)
 
     # --- レベルガイド ---
@@ -4715,7 +4602,7 @@ class MainWindow(QMainWindow):
     # --- ウィンドウ移動 & 下端リサイズ ---
     MIN_HEIGHT = 400
     EXPANDED_TIMER_MIN_HEIGHT = 460
-    DETACHED_ONLY_MIN_HEIGHT = 90
+    DETACHED_ONLY_MIN_HEIGHT = 112
 
     def _are_all_visible_panels_detached(self) -> bool:
         """現在のPoEバージョンで表示対象の全パネルが切り離されているか。"""
@@ -4748,7 +4635,11 @@ class MainWindow(QMainWindow):
     def _main_window_min_height(self) -> int:
         """表示中の固定コンテンツが見切れない本体最小高を返す。"""
         if self._are_all_visible_panels_outside_main():
-            return self.DETACHED_ONLY_MIN_HEIGHT
+            central = self.centralWidget()
+            if central is None:
+                return self.DETACHED_ONLY_MIN_HEIGHT
+            layout = central.layout()
+            return max(self.DETACHED_ONLY_MIN_HEIGHT, layout.minimumHeightForWidth(self.width()))
         timer_attached = not self._is_panel_detached("timer")
         if (
             timer_attached
@@ -4972,6 +4863,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.cheat_sheets_btn.setToolTip("Cheat sheets（ホットキー未設定）")
+        self.cheat_sheets_btn.setAccessibleName(self.cheat_sheets_btn.toolTip())
 
     def _ensure_cheat_sheet_overlay(self):
         from src.ui.cheat_sheets import CheatSheetOverlay
@@ -5322,9 +5214,19 @@ class MainWindow(QMainWindow):
         """設定のアプリ情報タブから、通知済みバージョンも含めて確認する。"""
         from src.update.startup_gate import run_manual_update_check
 
-        self.config = ConfigManager.load_config()
-        if not run_manual_update_check(self.config, parent):
-            QApplication.instance().quit()
+        if self._settings_update_open or self._update_offer_open or self._update_progress_dialog is not None:
+            return
+        # 設定画面が既に進行中の確認に合流する場合も、結果は設定画面で一度だけ表示する。
+        self._update_check_action = None
+        self._settings_update_open = True
+        self._sync_update_button_from_config()
+        try:
+            self.config = ConfigManager.load_config()
+            if not run_manual_update_check(self.config, parent, controller=self.update_controller):
+                QApplication.instance().quit()
+        finally:
+            self._settings_update_open = False
+            self._sync_update_button_from_config()
 
     def _main_window_flags(self):
         return _with_optional_always_on_top(Qt.FramelessWindowHint, self)

@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 import shiboken6
-from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt
 from PySide6.QtWidgets import QDialog
 
 from src import app_composition, app_session
@@ -10,6 +10,8 @@ from src.app_mode import POENAVI_MODE, POETORE_MODE
 from src.app_session import AppSessionController
 from src.ui.main_window import MainWindow
 from src.ui.poetore_mode_window import PoetoreModeWindow
+from src.ui.toolbar_button import ToolbarButton
+from src.update.release_client import ReleaseInfo
 from src.utils.config_manager import ConfigManager
 from src.utils.poe_version_data import POE1, POE2
 
@@ -62,6 +64,86 @@ def session(qapp, monkeypatch, tmp_path):
 def _trigger_tray(window, label):
     submenu, = [action.menu() for action in window.tray_icon.contextMenu().actions() if action.menu()]
     next(action for action in submenu.actions() if action.text() == label).trigger()
+
+
+def test_navi_titlebar_updates_share_controller_and_follow_release_state(session, qtbot, monkeypatch):
+    window = session.start(POENAVI_MODE, POE1)
+    release = ReleaseInfo("99.99.99", "notes", "https://example.com", "https://example.com/a.zip",
+                          "https://example.com/a.sha256")
+    button = window.update_button
+    assert isinstance(button, ToolbarButton)
+    assert button.objectName() == "poenaviAppUpdateAction"
+    assert button.iconSize() == QSize(20, 20)
+    assert button.size() == window.minimize_button.size() == window.close_button.size()
+    assert button.toolTip() == "アプリの更新をチェック"
+    initial_icon = button.icon().cacheKey()
+    assert window._update_check_timer.isActive()
+    assert window._update_check_timer.interval() == 3600000
+    from src.update.startup_gate import shared_update_controller
+    assert window.update_controller is shared_update_controller()
+
+    # Hold the worker task so the disabled state is observable before it finishes.
+    worker_tasks = []
+    monkeypatch.setattr(window.update_controller, "_thread_factory", lambda target: Mock(
+        start=lambda: worker_tasks.append(target),
+    ))
+    monkeypatch.setattr("src.update.qt_controller.fetch_latest_release", lambda _version: release)
+    offer = Mock()
+    monkeypatch.setattr(window, "_show_update_available", offer)
+
+    qtbot.mouseClick(button, Qt.LeftButton)
+    assert len(worker_tasks) == 1
+    assert not button.isEnabled()
+    assert button.toolTip() == "アプリの更新を確認中…"
+    worker_tasks.pop()()
+    assert button.isEnabled()
+    assert button.toolTip() == button.accessibleName() == "v99.99.99 に更新"
+    assert button.icon().cacheKey() != initial_icon
+    offer.assert_not_called()
+
+    qtbot.mouseClick(button, Qt.LeftButton)
+    worker_tasks.pop()()
+    offer.assert_called_once_with(release)
+    offer.reset_mock()
+
+    monkeypatch.setattr("src.update.qt_controller.fetch_latest_release", lambda _version: None)
+    window._update_check_timer.timeout.emit()
+    worker_tasks.pop()()
+    assert button.toolTip() == "アプリの更新をチェック"
+    assert ConfigManager.load_config()["notified_update_version"] == ""
+    offer.assert_not_called()
+
+    # Settings may open while a periodic check is in flight.
+    from src.update import startup_gate
+    settings_offer = Mock(return_value=True)
+    monkeypatch.setattr(startup_gate, "offer_update", settings_offer)
+    monkeypatch.setattr("src.update.qt_controller.fetch_latest_release", lambda _version: release)
+    window._update_check_timer.timeout.emit()
+    settings = QDialog(window)
+    QTimer.singleShot(0, worker_tasks.pop())
+    window._check_for_updates_from_settings(settings)
+    settings_offer.assert_called_once_with(release, settings, window.update_controller)
+    offer.assert_not_called()
+    assert button.isEnabled()
+    assert button.toolTip() == "v99.99.99 に更新"
+
+
+def test_navi_panel_buttons_and_toolbar_remain_reachable_when_all_panels_are_minimized(
+    session, qtbot, qapp,
+):
+    window = session.start(POENAVI_MODE, POE1)
+    toolbar = window.global_controls_widget
+    for panel_id in ("map", "gem", "guide", "timer"):
+        button = window.panel_registry[panel_id]["minimize_button"]
+        qtbot.mouseClick(button, Qt.LeftButton)
+        assert window.config["detached_panels"][panel_id]["minimized"]
+    qapp.processEvents()
+    assert toolbar.isVisible()
+    assert toolbar.geometry().bottom() < toolbar.parentWidget().height()
+    assert window.update_button.geometry().bottom() < toolbar.mapTo(window, toolbar.rect().topLeft()).y()
+    qtbot.mouseClick(window.restore_all_panels_btn, Qt.LeftButton)
+    assert not window.restore_all_panels_btn.isVisible()
+    assert all(not state["minimized"] for state in window.config["detached_panels"].values())
 
 
 def test_round_trip_through_title_and_tray_saves_timer_and_retires_windows(

@@ -142,7 +142,7 @@ class GlobalHotkeyService(QObject):
                     return
                 modifier = self._modifier_name(key_name)
                 if modifier:
-                    pressed_modifiers.add(modifier)
+                    pressed_modifiers.add(key_name)
                 pressed_keys.add(modifier or key_name)
 
                 if key_name in {"esc", "escape"}:
@@ -153,7 +153,7 @@ class GlobalHotkeyService(QObject):
                     [
                         modifier_name
                         for modifier_name in ("ctrl", "alt", "shift")
-                        if modifier_name in pressed_modifiers
+                        if modifier_name in pressed_keys
                     ]
                     + [key_name]
                 )
@@ -176,7 +176,9 @@ class GlobalHotkeyService(QObject):
                     return
                 modifier = self._modifier_name(key_name)
                 if modifier:
-                    pressed_modifiers.discard(modifier)
+                    pressed_modifiers.discard(key_name)
+                    if any(self._modifier_name(name) == modifier for name in pressed_modifiers):
+                        return
                 pressed_keys.discard(modifier or key_name)
                 for combo, required_keys in tuple(pending_releases.items()):
                     action = self._hotkey_map.get(combo) or "poetore_capture"

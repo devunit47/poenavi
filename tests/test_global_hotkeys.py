@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from src.utils.global_hotkeys import (
     ForegroundSuppressedHotkeyService,
     HOTKEY_ACTIONS_ALLOWED_OUTSIDE_POE,
@@ -191,6 +193,62 @@ def test_capture_release_waits_for_every_key_regardless_of_release_order():
     assert emitted == ["poetore_capture"]
     listeners[0].on_release(SimpleNamespace(char="p", vk=ord("P")))
     assert emitted == ["poetore_capture", "poetore_capture_released"]
+
+
+@pytest.mark.parametrize("modifier", ["ctrl", "alt", "shift"])
+def test_service_matches_hotkey_until_both_modifier_sides_are_released(modifier):
+    listeners = []
+    service = GlobalHotkeyService(
+        {"start_stop": f"{modifier}+d"},
+        listener_factory=lambda **kwargs: listeners.append(FakeListener(**kwargs)) or listeners[-1],
+    )
+    emitted = []
+    service.command.connect(emitted.append)
+    service.start()
+    listener = listeners[0]
+    left = SimpleNamespace(name=f"{modifier}_l")
+    right = SimpleNamespace(name=f"{modifier}_r")
+    target = SimpleNamespace(char="d", vk=ord("D"))
+
+    listener.on_press(left)
+    listener.on_press(right)
+    listener.on_release(left)
+    listener.on_press(target)
+    listener.on_release(target)
+    assert emitted == ["start_stop"]
+
+    listener.on_release(right)
+    listener.on_press(target)
+    assert emitted == ["start_stop"]
+    service.stop()
+
+
+@pytest.mark.parametrize("action", ["poetore_capture", "poetore_auto_hide"])
+def test_service_waits_for_last_held_modifier_side_before_release(action):
+    listeners = []
+    service = GlobalHotkeyService(
+        {action: "ctrl+d"},
+        listener_factory=lambda **kwargs: listeners.append(FakeListener(**kwargs)) or listeners[-1],
+    )
+    emitted = []
+    service.command.connect(emitted.append)
+    service.start()
+    listener = listeners[0]
+    left = SimpleNamespace(name="ctrl_l")
+    right = SimpleNamespace(name="ctrl_r")
+    target = SimpleNamespace(char="d", vk=ord("D"))
+
+    listener.on_press(left)
+    listener.on_press(right)
+    listener.on_press(target)
+    listener.on_release(left)
+    listener.on_press(target)  # auto-repeat while right Ctrl is still held
+    listener.on_release(target)
+    assert emitted == [action]
+
+    listener.on_release(right)
+    assert emitted == [action, f"{action}_released"]
+    service.stop()
 
 
 def test_auto_hide_capture_emits_its_own_release_notification():

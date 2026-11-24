@@ -69,7 +69,7 @@ from src.utils.feature_support import (
 )
 from src.utils.zone_master_data import load_zone_master_data
 from src.utils.poe_progress_data import get_auto_lap_triggers, get_clear_message, get_special_lap_event
-from src.utils.pob_importer import import_pob, get_pob_skill_sets
+from src.utils.pob_importer import decode_pob_code, get_skill_sets_from_xml, parse_pob_xml
 from src.utils.gem_resolver import load_gem_names_ja, resolve_gem_acquisition
 from src.utils.gem_shop_search import (
     HoldTrigger,
@@ -465,7 +465,10 @@ class MainWindow(QMainWindow):
     def _close_detached_panels(self):
         """アプリ終了時はパネルを本体へ戻さず閉じ、切り離し状態を保持する。"""
         for panel_window in tuple(getattr(self, "detached_panel_windows", {}).values()):
-            self._save_detached_panel_state(panel_window.panel_id, persist=True)
+            try:
+                self._save_detached_panel_state(panel_window.panel_id, persist=True)
+            except Exception:
+                logging.getLogger(__name__).exception("切り離しパネルの状態を保存できませんでした")
             panel_window._returning = True
             panel_window.close()
             panel_window.deleteLater()
@@ -808,7 +811,9 @@ class MainWindow(QMainWindow):
         if release is None or notified_version == release.version:
             return True
 
-        supported = getattr(sys, "frozen", False) and sys.platform == "win32"
+        from src.update.release_client import is_auto_update_supported
+
+        supported = is_auto_update_supported()
         dialog = UpdateAvailableDialog(release, supported, self)
         if not dialog.exec():
             return True
@@ -956,7 +961,9 @@ class MainWindow(QMainWindow):
         self._update_offer_open = True
         self._sync_update_button_from_config()
         try:
-            supported = getattr(sys, "frozen", False) and sys.platform == "win32"
+            from src.update.release_client import is_auto_update_supported
+
+            supported = is_auto_update_supported()
             dialog = UpdateAvailableDialog(release, supported, self)
             if not dialog.exec():
                 return
@@ -2287,7 +2294,8 @@ class MainWindow(QMainWindow):
             if not pob_code:
                 return
             try:
-                skill_sets = get_pob_skill_sets(pob_code)
+                xml_str = decode_pob_code(pob_code)
+                skill_sets = get_skill_sets_from_xml(xml_str)
                 selected_skill_set_ids = []
                 if skill_sets:
                     skill_set_dialog = PoBSkillSetSelectionDialog(skill_sets, self)
@@ -2295,7 +2303,13 @@ class MainWindow(QMainWindow):
                         return
                     selected_skill_set_ids = skill_set_dialog.selected_skill_set_ids()
 
-                result = import_pob(pob_code, selected_skill_set_ids=selected_skill_set_ids)
+                if "<pathofbuilding>" not in xml_str.lower():
+                    raise ValueError("有効なPoBデータではありません（PathOfBuildingタグが見つかりません）")
+                result = parse_pob_xml(xml_str, selected_skill_set_ids=selected_skill_set_ids)
+                if not result["class"]:
+                    raise ValueError("クラス情報が見つかりません")
+                if not result["gem_names"]:
+                    raise ValueError("ジェム情報が見つかりません")
                 if not result or not result.get("gem_groups"):
                     QMessageBox.warning(self, "インポートエラー", "選択されたSkill setからジェム情報を取得できませんでした。")
                     return
@@ -2923,11 +2937,14 @@ class MainWindow(QMainWindow):
 
     def _save_timer_state(self):
         """タイマー状態をPoEバージョン別のtimer_poe*.jsonへ保存"""
-        self._save_timer_state_payload(self._timer_state_payload())
+        payload = self._timer_state_payload()
+        self._save_timer_state_payload(payload)
+        self._last_saved_timer_state = (self.poe_version, deepcopy(payload))
         print(f"[INFO] タイマー状態を保存しました [{self.poe_version}] (経過: {self.accumulated_time:.1f}秒, Act{self.current_act})")
     
     def _clear_saved_timer(self):
         """現在のPoEバージョンの保存済みタイマー状態をクリア"""
+        self._last_saved_timer_state = None
         path = self._timer_state_path()
         if path.exists():
             try:
@@ -3733,7 +3750,8 @@ class MainWindow(QMainWindow):
         if not self.config.get("logout_enabled", True):
             return
         from src.utils.tcp_disconnect import disconnect_poe
-        success, msg = disconnect_poe()
+        log_path = self.config.get("client_log_paths", {}).get(self.poe_version)
+        success, msg = disconnect_poe(log_path=log_path or None)
         if success:
             print(f"[LOGOUT] {msg}")
         else:
@@ -5309,12 +5327,10 @@ class MainWindow(QMainWindow):
     def save_session_state(self):
         if self.is_running:
             self.stop_timer()
-        elif (
-            self.accumulated_time > 0
-            or any(lap is not None for lap in self.lap_times)
-            or self.segment_recorder.segments
-        ):
-            self._save_timer_state()
+        elif self._has_timer_record():
+            current_state = (self.poe_version, self._timer_state_payload())
+            if current_state != getattr(self, "_last_saved_timer_state", None):
+                self._save_timer_state()
 
     def quit_from_tray(self):
         self.close()
@@ -5496,32 +5512,46 @@ class MainWindow(QMainWindow):
     def _shutdown(self):
         if getattr(self, "_session_closed", False):
             return
+        self._session_closed = True
+        logger = logging.getLogger(__name__)
+
+        if self._main_window_initialized:
+            try:
+                self.save_session_state()
+            except Exception:
+                logger.exception("タイマー状態を保存できませんでした")
+
         # 起動時アップデートでは、保存済みジオメトリを復元する前の仮サイズ
         # (420x1200) のまま終了する。初期化・初期配置が完了した通常終了時だけ
         # 位置とサイズを保存し、ユーザー設定を仮サイズで上書きしない。
-        if (
-            getattr(self, "_main_window_initialized", False)
-            and getattr(self, "_initial_positioned", False)
-        ):
-            # 他のウィンドウが終了直前に保存した設定（例: map_viewer_width/height）を
-            # 古い self.config で上書きしないよう、最新configを読み直して必要キーだけ更新する。
-            geo = self.geometry()
-            config = ConfigManager.load_config()
-            config["window_geometry"] = {
-                "x": geo.x(),
-                "y": geo.y(),
-                "width": geo.width(),
-                "height": geo.height(),
-            }
-            ConfigManager.save_config(config)
-            self.config = config
+        if self._main_window_initialized and self._initial_positioned:
+            try:
+                geo = self.normalGeometry() if self.isMinimized() else self.geometry()
+                if geo.isValid():
+                    # 他のウィンドウが保存した設定を保持するため、最新configを読み直す。
+                    config = ConfigManager.load_config()
+                    config["window_geometry"] = {
+                        "x": geo.x(),
+                        "y": geo.y(),
+                        "width": geo.width(),
+                        "height": geo.height(),
+                    }
+                    ConfigManager.save_config(config)
+                    self.config = config
+            except Exception:
+                logger.exception("ウィンドウの位置とサイズを保存できませんでした")
+
+        def cleanup(action):
+            try:
+                action()
+            except Exception:
+                logger.exception("終了処理に失敗しました (%s)", action)
 
         tray_icon = getattr(self, "tray_icon", None)
         if tray_icon is not None:
             tray_icon.hide()
 
         self._close_detached_panels()
-        self._session_closed = True
         QApplication.instance().removeEventFilter(self)
         hold = getattr(self, "_gem_shop_search_hold", None)
         if hold is not None:
@@ -5535,57 +5565,50 @@ class MainWindow(QMainWindow):
         if controller is not None:
             for connection in getattr(self, "_update_connections", ()):
                 QObject.disconnect(connection)
-            controller.discard_download()
+            cleanup(controller.discard_download)
 
         # みになびは本体と独立したトップレベルウィンドウなので、アプリ終了時は
         # 明示的に一緒に閉じる。
         overlay = getattr(self, "mini_navi_overlay", None)
         if overlay is not None:
-            overlay.close()
+            cleanup(overlay.close)
+            overlay.hide()
             overlay.lock_button_window.deleteLater()
             overlay.deleteLater()
 
         checklist = getattr(self, "act4_checklist_window", None)
         if checklist is not None:
-            checklist.close()
+            cleanup(checklist.close)
             checklist.deleteLater()
 
         map_thumbnail = getattr(self, "map_thumbnail", None)
         if map_thumbnail is not None:
-            map_thumbnail.clear()
+            cleanup(map_thumbnail.clear)
 
         cheat_sheet_overlay = getattr(self, "_cheat_sheet_overlay", None)
         if cheat_sheet_overlay is not None:
-            cheat_sheet_overlay.hide_and_save()
-            cheat_sheet_overlay.close()
+            cleanup(cheat_sheet_overlay.hide_and_save)
+            cleanup(cheat_sheet_overlay.close)
             cheat_sheet_overlay.deleteLater()
 
         poetore_window = getattr(self, "_poetore_window", None)
         if poetore_window is not None:
-            poetore_window.dispose()
+            cleanup(poetore_window.dispose)
             self._poetore_window = None
 
         map_check_window = getattr(self, "_map_check_window", None)
         if map_check_window is not None:
-            map_check_window.close()
+            cleanup(map_check_window.close)
             map_check_window.deleteLater()
             self._map_check_window = None
 
-        keyboard_listener = getattr(self, "keyboard_listener", None)
-        if keyboard_listener:
-            keyboard_listener.stop()
-        stash_tab_scroll = getattr(self, "stash_tab_scroll", None)
-        if stash_tab_scroll is not None:
-            stash_tab_scroll.stop()
-        suppressed_capture_hotkey = getattr(self, "suppressed_capture_hotkey", None)
-        if suppressed_capture_hotkey is not None:
-            suppressed_capture_hotkey.stop()
-        log_watcher = getattr(self, "log_watcher", None)
-        if log_watcher is not None:
-            log_watcher.stop()
-        voicevox_tts = getattr(self, "voicevox_tts", None)
-        if voicevox_tts is not None:
-            voicevox_tts.stop()
+        for name in (
+            "keyboard_listener", "stash_tab_scroll", "suppressed_capture_hotkey",
+            "log_watcher", "voicevox_tts",
+        ):
+            service = getattr(self, name, None)
+            if service is not None:
+                cleanup(service.stop)
         for child in self.findChildren(QWidget):
             if child.isWindow() and child.isVisible():
-                child.close()
+                cleanup(child.close)

@@ -13,7 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from src.poetore.exchange_catalog import (
     bundled_exchange_icon_path,
@@ -168,7 +168,27 @@ def inspect_image(data: bytes) -> str | None:
     return None
 
 
+def _valid_remote_url(url: str | None) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and parsed.hostname in ALLOWED_ICON_HOSTS
+
+
+class _IconRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _valid_remote_url(newurl):
+            fp.close()
+            raise ValueError("Currency Exchange icon redirect URL is not allowed")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _download_icon(url: str) -> bytes:
+    if not _valid_remote_url(url):
+        raise ValueError("Currency Exchange icon URL is not allowed")
     request = Request(
         url,
         headers={
@@ -177,7 +197,9 @@ def _download_icon(url: str) -> bytes:
             "User-Agent": "PoENavi/poetore-icon-cache",
         },
     )
-    with urlopen(request, timeout=20) as response:
+    with build_opener(_IconRedirectHandler()).open(request, timeout=20) as response:
+        if not _valid_remote_url(response.geturl()):
+            raise ValueError("Currency Exchange icon response URL is not allowed")
         content_length = response.headers.get("Content-Length")
         if content_length is not None and int(content_length) > MAX_IMAGE_BYTES:
             raise ValueError("Currency Exchange icon exceeds the size limit")
@@ -221,7 +243,7 @@ class ExchangeIconCache:
             if path is not None:
                 return _completed_future(IconResult(path, "bundled", "png"))
             return _completed_future(self._placeholder())
-        if icon_kind != "remote" or not self._valid_remote_url(icon_url):
+        if icon_kind != "remote" or not _valid_remote_url(icon_url):
             return _completed_future(self._placeholder())
 
         key = hashlib.sha256(icon_url.encode("utf-8")).hexdigest()
@@ -288,16 +310,6 @@ class ExchangeIconCache:
             return None
         image_format = inspect_image(data)
         return IconResult(path, "disk", image_format) if image_format else None
-
-    @staticmethod
-    def _valid_remote_url(icon_url: str | None) -> bool:
-        if not isinstance(icon_url, str):
-            return False
-        parsed = urlparse(icon_url)
-        return (
-            parsed.scheme == "https"
-            and (parsed.hostname or "").casefold() in ALLOWED_ICON_HOSTS
-        )
 
     @staticmethod
     def _atomic_write(path: Path, data: bytes) -> None:

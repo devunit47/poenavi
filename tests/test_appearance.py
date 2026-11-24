@@ -8,7 +8,8 @@ from PySide6.QtGui import QColor, QFontDatabase, QPalette
 from src.ui.appearance import (
     COLOR_ROLES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE,
     POENAVI_TOKENS, POETORE_TOKENS, TOKYO_NIGHT_TOKENS, VSCODE_DARK_2026_TOKENS,
-    apply_application_appearance, configure_appearance, current_appearance,
+    apply_application_appearance, configure_appearance, contrast_ratio, current_appearance,
+    has_low_text_contrast,
     normalize_appearance, resolve_tokens, theme_color, theme_font_size,
     theme_qcolor, theme_rgba,
 )
@@ -59,8 +60,26 @@ def test_default_keeps_all_three_legacy_themes_and_imported_styles():
     assert dialog_theme_for_mode("poetore") is POETORE_DIALOG_THEME
     assert Styles.TEXT_COLOR == "#b0ff7b"
     assert "rgba(0, 0, 0, 180)" in Styles.MAIN_WINDOW
+    assert "rgba(176, 255, 123, 0.7)" in Styles.LAP_ITEM_COMPLETED
+    assert "#b0ff7b" in Styles.LAP_ITEM_CURRENT
     assert theme_font_size(96) == 96
     assert theme_color("text", "#123456") == "#123456"
+
+
+def test_contrast_ratio_is_symmetric_and_uses_relative_luminance():
+    assert contrast_ratio("#FFFFFF", "#FFFFFF") == 1
+    assert contrast_ratio("#FFFFFF", "#000000") == pytest.approx(21)
+    assert contrast_ratio("#000000", "#FFFFFF") == pytest.approx(21)
+    assert contrast_ratio("#FF0000", "#FFFFFF") == pytest.approx(3.998, abs=0.001)
+
+
+@pytest.mark.parametrize("role", ["background", "surface"])
+def test_low_contrast_checks_text_against_each_surface(role):
+    assert not has_low_text_contrast(None)
+    settings = {"overrides": {"text": "#FFFFFF", role: "#EEEEEE"}}
+    assert has_low_text_contrast(settings)
+    settings["overrides"][role] = "#777777"
+    assert not has_low_text_contrast(settings)
 
 
 @pytest.mark.parametrize("preset, expected", [

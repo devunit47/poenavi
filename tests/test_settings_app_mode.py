@@ -216,7 +216,7 @@ def test_poENavi_startup_controls_do_not_show_poetore_autostart(qapp):
     direct_index = layout.indexOf(dialog.skip_startup_selector_checkbox)
     assert layout.itemAt(direct_index + 1).widget() is dialog.startup_change_note
     assert dialog.startup_change_note.text() == (
-        "PoEバージョン・起動モードの変更は、次回起動時から適用されます。"
+        "PoEバージョン・起動モードを変更すると、保存後に再起動を確認します。"
     )
     assert layout.count() == direct_index + 2
     assert not hasattr(dialog, "windows_autostart_poetore_checkbox")
@@ -288,7 +288,8 @@ def test_general_settings_save_note_is_at_bottom(qapp):
     note = dialog.findChild(QLabel, "generalSettingsSaveNote")
     layout = note.parentWidget().layout()
 
-    assert "外観は再起動後" in note.text()
+    assert "PoEバージョン・起動モード・外観を変更すると" in note.text()
+    assert "これらの変更は再起動後" in note.text()
     assert "その他の変更は保存後" in note.text()
     assert "保存後に再起動を確認します" in note.text()
     assert layout.indexOf(note) == layout.count() - 2

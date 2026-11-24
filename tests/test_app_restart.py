@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from src.app_mode import SKIP_STARTUP_SELECTOR_ARGUMENT
 from src.app_restart import (
     _restart_command,
-    _poetore_message_box_style,
+    _ask_mode_switch_restart,
     confirm_mode_switch_restart,
     restart_application,
     switch_app_target_and_restart,
@@ -28,7 +28,7 @@ def test_same_mode_does_not_prompt():
         }
     }
 
-    with patch("src.app_restart.QMessageBox.question") as question:
+    with patch("src.app_restart._ask_mode_switch_restart") as question:
         assert confirm_mode_switch_restart(None, config) is False
 
     question.assert_not_called()
@@ -127,12 +127,19 @@ def test_same_poe_version_and_mode_do_not_prompt():
     question.assert_not_called()
 
 
-def test_poetore_restart_prompt_uses_teal_neutral_theme():
-    style = _poetore_message_box_style()
+@pytest.mark.parametrize(("mode", "accent", "background"), [
+    ("poenavi", "#B0FF7B", "#101310"),
+    ("poetore", "#65FFCA", "#111416"),
+])
+def test_restart_prompt_uses_current_mode_theme(qapp, mode, accent, background):
+    def inspect_prompt(box):
+        assert accent in box.styleSheet()
+        assert background in box.styleSheet()
+        assert box.standardButtons() == QMessageBox.Ok | QMessageBox.Cancel
+        return QMessageBox.Cancel
 
-    assert "#65FFCA" in style
-    assert "#111416" in style
-    assert "QMessageBox QPushButton" in style
+    with patch.object(QMessageBox, "exec", new=inspect_prompt):
+        assert _ask_mode_switch_restart(None, mode, "再起動しますか？") == QMessageBox.Cancel
 
 
 def test_development_restart_command_runs_main_script():

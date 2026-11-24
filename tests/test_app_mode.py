@@ -69,8 +69,10 @@ class AppModeTest(unittest.TestCase):
         }
         self.assertEqual(startup_preferences(config), (POETORE_MODE, False))
 
-    def test_invalid_mode_falls_back_to_poennavi(self):
-        self.assertEqual(normalize_app_mode("unknown"), POENAVI_MODE)
+    def test_invalid_mode_falls_back_to_poenavi(self):
+        for value in ("unknown", [], {}, None):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_app_mode(value), POENAVI_MODE)
 
     def test_save_preferences_does_not_mutate_original(self):
         original = {"startup": {"preferred_mode": POENAVI_MODE}, "other": 1}
@@ -315,6 +317,30 @@ class AppModeTest(unittest.TestCase):
         )
         load_config.assert_not_called()
         app.exec.assert_not_called()
+
+    def test_reset_appearance_is_saved_before_appearance_is_applied(self):
+        app = MagicMock()
+        single_instance = MagicMock()
+        config = {
+            "appearance": {"overrides": {"text": "#000000"}},
+            "poe_version": POE2,
+        }
+        expected = {"appearance": {"preset": "default", "overrides": {}}, "poe_version": POE2}
+        events = []
+        with (
+            patch.object(main.sys, "argv", ["main.py", "--reset-appearance", "--reset-appearance"]),
+            patch.object(main, "QApplication", return_value=app) as create_app,
+            patch.object(main, "apply_bundled_ui_font"),
+            patch.object(main, "SingleInstanceGuard", return_value=single_instance),
+            patch.object(main, "sync_windows_poetore_autostart_with_error", return_value=None),
+            patch.object(main.ConfigManager, "load_config", return_value=config),
+            patch.object(main.ConfigManager, "save_config", side_effect=lambda value: events.append(("save", value))),
+            patch.object(main, "apply_application_appearance", side_effect=lambda _app, value: events.append(("apply", value))),
+            patch("src.update.startup_gate.run_startup_update_gate", return_value=False),
+        ):
+            self.assertEqual(main.run(), 0)
+            create_app.assert_called_once_with(["main.py"])
+        self.assertEqual(events, [("save", expected), ("apply", expected)])
 
     def test_mode_selection_dialog_uses_act_support_label(self):
         dialog = StartupSelectionDialog()

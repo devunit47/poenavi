@@ -36,7 +36,7 @@ from src.single_instance import (
     wait_for_previous_instance,
 )
 from src.app_font import apply_bundled_ui_font
-from src.ui.appearance import apply_application_appearance
+from src.ui.appearance import apply_application_appearance, normalize_appearance
 from src.windows_autostart import (
     consume_windows_startup_poetore_argument,
     sync_windows_poetore_autostart_with_error,
@@ -120,6 +120,9 @@ def select_startup_options(config, force_poetore=False, skip_selector=False):
 
 def run():
     started_at = perf_counter()
+    reset_appearance = "--reset-appearance" in sys.argv[1:]
+    if reset_appearance:
+        sys.argv[1:] = [arg for arg in sys.argv[1:] if arg != "--reset-appearance"]
     force_poetore = consume_windows_startup_poetore_argument(sys.argv)
     skip_selector = consume_skip_startup_selector_argument(sys.argv)
     restart_pid = consume_restart_pid(sys.argv)
@@ -136,6 +139,9 @@ def run():
         )
         return 0
     config = ConfigManager.load_config()
+    if reset_appearance:
+        config["appearance"] = normalize_appearance(None)
+        ConfigManager.save_config(config)
     apply_application_appearance(app, config)
     autostart_error = sync_windows_poetore_autostart_with_error(config)
     if autostart_error:

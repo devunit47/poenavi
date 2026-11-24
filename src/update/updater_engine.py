@@ -169,14 +169,42 @@ def apply_update(
             shutil.rmtree(stale_backup, ignore_errors=True)
         return backup
     except Exception as exc:
-        if backup_created and install_dir.exists():
-            if failed.exists():
-                shutil.rmtree(failed)
-            retry_transient_file_operation(lambda: install_dir.rename(failed))
-        if backup_created and backup.exists():
-            retry_transient_file_operation(lambda: backup.rename(install_dir))
-        if stale_backup is not None and stale_backup.exists() and not backup.exists():
-            retry_transient_file_operation(lambda: stale_backup.rename(backup))
+        restore_source = backup if backup_created else install_dir
+        restore_target = install_dir
+        move_failed_install = False
+        try:
+            if backup_created and install_dir.exists():
+                move_failed_install = True
+                if failed.exists():
+                    raise FileExistsError(f"退避先が既に存在します: {failed}")
+                retry_transient_file_operation(lambda: install_dir.rename(failed))
+                move_failed_install = False
+            if backup_created:
+                retry_transient_file_operation(lambda: backup.rename(install_dir))
+                restore_source = install_dir
+            if stale_backup is not None and stale_backup.exists() and not backup.exists():
+                restore_source = stale_backup
+                restore_target = backup
+                retry_transient_file_operation(lambda: stale_backup.rename(backup))
+        except Exception as rollback_exc:
+            steps = ["この画面を閉じ、実行中のぽえなびを終了します。"]
+            if move_failed_install:
+                steps.append(
+                    f"更新に失敗したフォルダ「{install_dir}」を、別の名前に変更して退避します。"
+                )
+            if restore_source != restore_target:
+                steps.append(
+                    f"「{restore_source}」の名前を「{restore_target.name}」に戻します。"
+                )
+            steps.append(f"「{install_dir}」内の PoENavi.exe を起動します。")
+            instructions = "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1))
+            raise UpdateApplyError(
+                "アップデートに失敗し、フォルダを自動で復元できませんでした。\n"
+                f"更新失敗の詳細: {exc}\n復元失敗の詳細: {rollback_exc}\n\n"
+                f"旧版が残っているフォルダ: {restore_source}\n\n"
+                f"手動復旧手順:\n{instructions}",
+                restore_source,
+            ) from rollback_exc
         raise UpdateApplyError(
             "アップデートに失敗したため、更新前のぽえなびを復元しました。"
             f"\n（詳細: {exc}）\n\n"

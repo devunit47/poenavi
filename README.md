@@ -128,12 +128,12 @@ PoENaviはゲームとは独立して動作し、処理内容をこのリポジ�
 
 ### PC内で読み取る情報
 
-- PoEの`Client.txt`：エリア、レベル、Act進行の検知
+- PoEの`Client.txt`：エリア、レベル、Act進行、およびぽえとれ隠れ家滞在通知（集中モード）の検知
 - ユーザーがコピーしたアイテム情報：ぽえとれの価格検索
-- PoEウィンドウの位置とプロセス名：対象ウィンドウの識別
-- ユーザーが指定したPoE2画面範囲の画像：エクスペディション報酬とアビス冒涜ModのローカルOCR
+- PoEウィンドウの位置・プロセス名・起動状態：対象ウィンドウの識別と隠れ家滞在通知
+- ユーザーが指定した画面範囲の画像：PoE1ハイスト報酬／トリンケット、PoE2エクスペディション報酬、およびPoE2アビス冒涜ModのローカルOCR
 
-設定、メモ、タイマー記録、価格キャッシュ、OCR用画像処理はPC内で扱います。`Client.txt`の内容、個人メモ、キャプチャ画像を外部へ送信することはありません。
+設定、メモ、タイマー記録、価格キャッシュ、OCR用画像処理はPC内で扱います。`Client.txt`の内容、個人メモ、キャプチャ画像、OCR読取文字列を外部へ送信することはありません。
 
 ### 行わないこと
 
@@ -146,18 +146,18 @@ PoENaviはゲームとは独立して動作し、処理内容をこのリポジ�
 
 ### OCRを使用する画面読取機能
 
-PoE2の「エクスペディション報酬価格チェック」と「アビス冒涜Modティアチェック」は、ユーザーが設定したホットキーを押した時だけ実行されます。
+PoE1の「ハイスト報酬／トリンケットOCR」、PoE2の「エクスペディション報酬価格チェック」と「アビス冒涜Modティアチェック」は、ユーザーが設定したホットキーを押した時だけ実行されます。
 
 処理の流れは次のとおりです。
 
 1. OSの画面キャプチャ機能で、ユーザーが指定したPoE画面の範囲を取得
 2. Windows OCRを使ってPC内で文字を解析
-   - アビス冒涜Modで、Windows OCRが本文を安定して認識したものの数字だけ欠落した場合に限り、自動取得した高精度OCRパック（NDLOCR-Lite）でその行を再確認
+   - ハイスト報酬やアビス冒涜Modなどで補助が必要な場合に限り、自動取得した高精度OCRパック（NDLOCR-Lite、PC内 `%LOCALAPPDATA%\PoENavi\ocr-packs\` に保存）でローカル再確認
 3. 解析結果をPoENaviの独立したウィンドウとして表示
 
 これらのOCR機能は、ゲームメモリやゲームファイルを読み取らず、ゲームプロセスへのコード注入も行いません。また、OCR結果を使った自動クリック、キー入力、Mod選択などのゲーム操作は行いません。
 
-キャプチャ画像やOCRで読み取った文章は外部へ送信されません。エクスペディション報酬の参考価格はpoe.ninjaから取得し、アビス冒涜ModのTier判定にはPoENaviへ同梱したローカルデータを使用します。
+キャプチャ画像やOCRで読み取った文章は外部へ送信されません。エクスペディション／ハイスト報酬の参考価格はpoe.ninjaから取得し、アビス冒涜ModのTier判定にはPoENaviへ同梱したローカルデータを使用します。
 
 Grinding Gear GamesのDeveloper Policyでは、ゲームとは独立して動作する実行アプリは「推奨はしないが許可する」とされる一方、ゲームクライアント、メモリ、ゲームファイルへの介入や、画面認識を起点とした自動操作は禁止されています。
 
@@ -170,10 +170,12 @@ PoENaviのOCR機能は、この方針を考慮して「ユーザーによる手�
 
 ### 外部通信先
 
-- GitHub Releases：アップデート確認・取得
-- Path of Exile公式Trade API：アイテム名、MOD、数値などの検索条件を送信
-- poe.ninja：通貨・アイテムの参考価格取得
-- Path of Exile公式CDNなど：アイテム画像取得
+- GitHub Releases（`api.github.com` / `github.com`）：本家公式版のアップデート確認・取得、および高精度OCRパック（NDLOCR-Lite）の取得
+- Path of Exile公式Trade / Leagues API（`www.pathofexile.com` / `jp.pathofexile.com`）：アイテム名、MOD、数値などの検索条件送信・リーグ取得
+- Path of Exile公式CDN（`web.poecdn.com`）：アイテム／通貨アイコンおよびCurrency Exchange参考データ取得
+- poe.ninja（`poe.ninja`）：通貨・アイテムの参考価格取得
+- PoE Wiki（`www.poewiki.net`）：検索結果で表示するアイテム画像取得
+- VOICEVOX Engine（`http://127.0.0.1:50021`、PC内ローカル通信のみ）：PoE2みになびの音声案内有効時のみ
 
 ユーザー操作を起点に、検索文字列やチャットコマンドなどのキー入力をPoEへ送る機能があります。ログアウト機能を有効にしてホットキーを押した場合は、PoEクライアントのTCP接続を切断します。
 
@@ -183,10 +185,10 @@ PoENavi runs independently from the game, and its source code is publicly availa
 
 ### Information Read Locally
 
-- PoE's `Client.txt`: used to detect areas, levels, and Act progression
+- PoE's `Client.txt`: used to detect areas, levels, Act progression, and optional Poetore hideout-stay notifications
 - Item information copied by the user: used for trade searches in Poetore
-- The PoE window position and process name: used to identify the target window
-- Images of PoE2 screen regions selected by the user: used for local OCR of Expedition rewards and Abyss Desecration modifiers
+- The PoE window position, process name, and process state: used to identify the target window and support hideout-stay notifications
+- Images of user-selected screen regions: used for local OCR of PoE1 Heist rewards/trinkets, PoE2 Expedition rewards, and PoE2 Abyss Desecration modifiers
 
 Settings, notes, timer records, price caches, screenshots, and OCR processing remain on the user's PC. The contents of `Client.txt`, personal notes, captured images, and OCR text are not uploaded.
 
@@ -201,16 +203,16 @@ Settings, notes, timer records, price caches, screenshots, and OCR processing re
 
 ### OCR-Based Screen Reading
 
-The PoE2 Expedition reward price checker and Abyss Desecration modifier Tier checker run only when the user presses the configured shortcut.
+The PoE1 Heist reward/trinket OCR, PoE2 Expedition reward price checker, and PoE2 Abyss Desecration modifier Tier checker run only when the user presses the configured shortcut.
 
 1. A user-configured region of the PoE screen is captured through the operating system's screen-capture API.
 2. Text is recognized locally using Windows OCR.
-   - For an Abyss Desecration modifier only, if Windows OCR has a stable body but is missing a number, the automatically downloaded high-accuracy OCR pack (NDLOCR-Lite) rechecks that row locally.
+   - When additional local confirmation is needed (such as missing numbers in Abyss Desecration modifiers or Heist OCR), the automatically downloaded high-accuracy OCR pack (NDLOCR-Lite, stored locally under `%LOCALAPPDATA%\PoENavi\ocr-packs\`) rechecks locally.
 3. The result is shown in a separate PoENavi window.
 
 These OCR features do not read game memory or files, inject code, or interact with the game process. OCR results are never used to click, press keys, select modifiers, or perform any other in-game action automatically.
 
-Captured images and recognized text are not sent to an external server. Expedition reference prices are obtained from poe.ninja, while Abyss Desecration modifier Tiers are determined using data bundled with PoENavi.
+Captured images and recognized text are not sent to an external server. Reference prices are obtained from poe.ninja, while Abyss Desecration modifier Tiers are determined using data bundled with PoENavi.
 
 PoENavi's OCR features are designed with the Path of Exile Developer Policy in mind: they are manually initiated, read-only, processed locally, and displayed in a separate application window. This statement does not mean that PoENavi has been individually reviewed, endorsed, or approved by Grinding Gear Games. Please refer to the current official policies:
 
@@ -219,10 +221,12 @@ PoENavi's OCR features are designed with the Path of Exile Developer Policy in m
 
 ### External Connections
 
-- GitHub Releases: checking for and downloading updates
-- Official Path of Exile Trade API: submitting item names, modifiers, values, and other search conditions
-- poe.ninja: obtaining reference prices for currencies and items
-- Official Path of Exile CDN and related services: downloading item images
+- GitHub Releases (`api.github.com`, `github.com`): checking for and downloading official updates, and downloading the optional NDLOCR-Lite high-accuracy OCR pack
+- Official Path of Exile Trade & Leagues API (`www.pathofexile.com`, `jp.pathofexile.com`): submitting item names, modifiers, values, and other search conditions, and fetching league lists
+- Official Path of Exile CDN (`web.poecdn.com`): downloading item/currency icons and Currency Exchange reference data
+- poe.ninja (`poe.ninja`): obtaining reference prices for currencies and items
+- PoE Wiki (`www.poewiki.net`): downloading item images displayed in search results
+- VOICEVOX Engine (`http://127.0.0.1:50021`, localhost only): used only when PoE2 Mini-Navi voice guidance is enabled
 
 Some non-OCR features can send search text or chat commands to PoE, but only in response to an explicit user action. OCR results never initiate keyboard or mouse input to the game. When the logout feature is enabled and its shortcut is pressed, PoENavi disconnects the PoE client's TCP connection.
 
@@ -238,7 +242,7 @@ Some non-OCR features can send search text or chat commands to PoE, but only in 
 
 PoENaviはインストーラーやWindowsサービスを使用しません。アンインストールするには、PoENaviを終了して、展開した`PoENavi`フォルダを削除してください。
 
-設定、メモ、タイマー記録なども削除する場合は、`%APPDATA%\PoENavi\`を削除してください。必要な記録がある場合は、先にバックアップしてください。
+設定、メモ、タイマー記録なども削除する場合は、`%APPDATA%\PoENavi\`（高精度OCRパックを利用している場合は`%LOCALAPPDATA%\PoENavi\ocr-packs\`）を削除してください。必要な記録がある場合は、先にバックアップしてください。
 
 ## 不具合報告・要望
 
@@ -281,8 +285,8 @@ python -m pytest -q
 - pynput / Windows API
 - urllib3
 - miniaudio（WAV／MP3通知音声の再生）
-- Windows OCR（PoE2エクスペディション報酬読取）
-- NDLOCR-Lite 1.3.1（PoE2アビス冒涜Modの数字欠落時のみ補助）
+- Windows OCR（PoE1ハイスト報酬／トリンケット、PoE2エクスペディション報酬・アビス冒涜Mod読取）
+- NDLOCR-Lite 1.3.1（PoE1ハイスト報酬やPoE2アビス冒涜Modの補助OCR）
 - PyInstaller
 
 ## License・免責・Credits

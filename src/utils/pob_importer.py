@@ -24,6 +24,9 @@ import re
 import html
 import xml.etree.ElementTree as ET
 
+MAX_POB_CODE_LENGTH = 2 * 1024 * 1024
+MAX_DECOMPRESSED_BYTES = 16 * 1024 * 1024
+
 
 # PoE1クラス → 昇華クラス マッピング
 ASCENDANCY_MAP = {
@@ -45,6 +48,8 @@ for base_class, ascendancies in ASCENDANCY_MAP.items():
 
 def decode_pob_code(pob_code: str) -> str:
     """PoBコードをBase64デコード→zlibデコードしてXML文字列を返す"""
+    if len(pob_code) > MAX_POB_CODE_LENGTH:
+        raise ValueError("PoBコードの文字数が上限を超えています")
     # 空白・改行を除去
     pob_code = pob_code.strip().replace("\n", "").replace("\r", "")
     
@@ -61,7 +66,12 @@ def decode_pob_code(pob_code: str) -> str:
         compressed = base64.b64decode(pob_code)
     
     # zlib解凍
-    xml_bytes = zlib.decompress(compressed)
+    decompressor = zlib.decompressobj()
+    xml_bytes = decompressor.decompress(compressed, MAX_DECOMPRESSED_BYTES + 1)
+    if len(xml_bytes) > MAX_DECOMPRESSED_BYTES:
+        raise ValueError("PoBコードの展開サイズが上限を超えています")
+    if not decompressor.eof:
+        raise zlib.error("PoBコードの圧縮データが途中で切れています")
     xml_str = xml_bytes.decode("utf-8")
     
     return xml_str
@@ -74,6 +84,10 @@ def get_skill_sets_from_xml(xml_str: str) -> list[dict]:
     except ET.ParseError:
         return []
 
+    return _get_skill_sets(root)
+
+
+def _get_skill_sets(root: ET.Element) -> list[dict]:
     skills = root.find("Skills")
     if skills is None:
         return []
@@ -151,7 +165,7 @@ def parse_pob_xml(xml_str: str, selected_skill_set_ids: list[str] | set[str] | N
             ascendancy=ascendancy,
             gem_names_set=gem_names_set,
             gem_groups=gem_groups,
-            skill_sets=get_skill_sets_from_xml(xml_str),
+            skill_sets=_get_skill_sets(root),
             selected_ids=selected_ids,
         )
 

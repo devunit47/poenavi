@@ -4,10 +4,12 @@ from unittest.mock import Mock, patch
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 from src.ui.main_window import MainWindow
+from src.ui.update_dialogs import UpdateProgressDialog
 from src.update.qt_controller import UpdateController
 from src.update.release_client import ReleaseInfo
 
@@ -242,6 +244,41 @@ def test_start_update_shows_progress_before_controller_download():
 
     dialog_class.assert_called_once_with(release.version, window)
     window.update_controller.download.assert_called_once_with(release)
+
+
+@pytest.mark.parametrize("mode", ["poenavi", "poetore"])
+def test_update_progress_uses_mode_theme_and_programmatic_close_does_not_cancel(app, mode):
+    previous = app.property("appMode")
+    app.setProperty("appMode", mode)
+    try:
+        progress = UpdateProgressDialog("2.5.0")
+        cancel = Mock()
+        progress.cancel_requested.connect(cancel)
+        assert progress.property("dialogTheme") == mode
+        assert "QProgressBar" in progress.styleSheet()
+        progress.show()
+        progress.close()
+        cancel.assert_not_called()
+    finally:
+        app.setProperty("appMode", previous)
+
+
+@pytest.mark.parametrize("action", ["close", "escape", "button"])
+def test_update_progress_user_actions_request_cancellation_once(qtbot, action):
+    progress = UpdateProgressDialog("2.5.0")
+    qtbot.addWidget(progress)
+    progress.show()
+    cancel = Mock()
+    progress.cancel_requested.connect(cancel)
+    if action == "close":
+        QCoreApplication.sendEvent(progress.windowHandle(), QCloseEvent())
+    elif action == "escape":
+        qtbot.keyClick(progress, Qt.Key_Escape)
+    else:
+        progress.cancel_button.click()
+    cancel.assert_called_once_with()
+    QCoreApplication.sendEvent(progress.windowHandle(), QCloseEvent())
+    cancel.assert_called_once_with()
 
 
 def test_close_before_initial_position_does_not_overwrite_saved_geometry():

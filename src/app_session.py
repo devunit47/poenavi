@@ -70,10 +70,18 @@ class AppSessionController(QObject):
                 return False
 
             try:
-                if not old_window.close():
+                closed = False
+                try:
+                    closed = old_window.close()
+                finally:
+                    # Qtのclose()が失敗しても、終了処理に入った画面は再利用しない。
+                    if closed or old_window._session_closed:
+                        if not closed:
+                            old_window.hide()
+                        self.window = None
+                        self.single_instance.set_window(None)
+                if not closed:
                     raise RuntimeError("切替前のウィンドウを閉じられませんでした")
-                self.window = None
-                self.single_instance.set_window(None)
                 self.start(*target)
                 return True
             except Exception:
@@ -95,11 +103,17 @@ class AppSessionController(QObject):
 
     def _restore_target(self, old_window, old_target):
         try:
-            old_window.config.update(save_app_target(*old_target))
+            try:
+                old_window.config.update(save_app_target(*old_target))
+            except Exception:
+                if self.window is None:
+                    raise
+                logger.exception("切替前の設定を保存できませんでした")
             if self.window is None:
                 self.start(*old_target)
             else:
                 self.app.setProperty("appMode", old_target[0])
+                old_window.restore_from_tray()
         except Exception:
             logger.exception("切替前の画面を復元できませんでした")
             QMessageBox.critical(None, "切替エラー", "画面を復元できませんでした。アプリを起動し直してください。")

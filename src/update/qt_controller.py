@@ -10,6 +10,7 @@ import threading
 
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Qt, Signal, Slot
 
+from src import version
 from src.update.artifacts import (
     DownloadCancelled,
     download_file,
@@ -23,6 +24,7 @@ from src.update.release_client import (
     SOCKET_TIMEOUT_SECONDS,
     ReleaseInfo,
     fetch_latest_release,
+    is_auto_update_supported,
 )
 from src.version import APP_VERSION
 
@@ -40,6 +42,9 @@ class _VerifiedDownload:
 
 
 class UpdateController(QObject):
+    _updater_work_dirs: set[Path] = set()
+    _updater_work_dirs_lock = threading.Lock()
+
     check_started = Signal()
     check_finished = Signal(object, bool)
     check_failed = Signal(str, bool)
@@ -78,12 +83,13 @@ class UpdateController(QObject):
             except Exception:
                 logger.warning("古い更新用一時フォルダーの削除を開始できませんでした。", exc_info=True)
 
-    @staticmethod
-    def _cleanup_stale_update_dirs() -> None:
+    @classmethod
+    def _cleanup_stale_update_dirs(cls) -> None:
         temp_dir = Path(tempfile.gettempdir())
         for path in temp_dir.glob("PoENavi-Updater-*"):
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
+            with cls._updater_work_dirs_lock:
+                if path.is_dir() and path.resolve() not in cls._updater_work_dirs:
+                    shutil.rmtree(path, ignore_errors=True)
 
     @property
     def checking(self) -> bool:
@@ -228,7 +234,9 @@ class UpdateController(QObject):
             self._work_dir = None
 
     def launch_updater(self, archive: Path) -> None:
-        if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        if version.IS_FORK:
+            raise RuntimeError("フォーク版では自動アップデートを実行できません。")
+        if not is_auto_update_supported():
             raise RuntimeError(
                 "自動更新は Windows exe 版でのみ利用できます。"
             )
@@ -241,11 +249,13 @@ class UpdateController(QObject):
         if not source.is_file():
             raise RuntimeError("PoENaviUpdater.exe が見つかりません。")
 
-        updater_work = Path(tempfile.mkdtemp(prefix="PoENavi-Updater-"))
-        updater_work.mkdir(parents=True, exist_ok=True)
+        with self._updater_work_dirs_lock:
+            updater_work = Path(tempfile.mkdtemp(prefix="PoENavi-Updater-")).resolve()
+            self._updater_work_dirs.add(updater_work)
         updater = updater_work / "PoENaviUpdater.exe"
         staged_archive = updater_work / "PoENavi.zip"
         try:
+            updater_work.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, updater)
             shutil.copy2(ready.archive, staged_archive)
             if not verify_sha256(staged_archive, ready.checksum):
@@ -266,7 +276,9 @@ class UpdateController(QObject):
                 cwd=str(updater_work),
             )
         except Exception:
-            shutil.rmtree(updater_work, ignore_errors=True)
+            with self._updater_work_dirs_lock:
+                shutil.rmtree(updater_work, ignore_errors=True)
+                self._updater_work_dirs.discard(updater_work)
             raise
 
         self.discard_download()

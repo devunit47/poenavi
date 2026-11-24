@@ -71,6 +71,7 @@ class VoicevoxTtsService:
         self._requests: queue.Queue[tuple[int, str] | None] = queue.Queue(maxsize=1)
         self._audio_queue: queue.Queue[tuple[int, bytes] | None] = queue.Queue()
         self._generation = 0
+        self._request_lock = threading.Lock()
         self._stopped = threading.Event()
         self._last_error = None
         self._request_thread = threading.Thread(
@@ -84,25 +85,28 @@ class VoicevoxTtsService:
 
     def speak_latest(self, text: str):
         text = (text or "").strip()
-        if not text or self._stopped.is_set():
+        if not text:
             return
-        self._generation += 1
-        generation = self._generation
-        self._stop_player()
-        self._clear_queue(self._requests)
-        self._clear_queue(self._audio_queue)
-        self._requests.put_nowait((generation, text))
+        with self._request_lock:
+            if self._stopped.is_set():
+                return
+            self._generation += 1
+            self._stop_player()
+            self._clear_queue(self._requests)
+            self._clear_queue(self._audio_queue)
+            self._requests.put_nowait((self._generation, text))
 
     def stop(self):
-        if self._stopped.is_set():
-            return
-        self._stopped.set()
-        self._generation += 1
-        self._stop_player()
-        self._clear_queue(self._requests)
-        self._clear_queue(self._audio_queue)
-        self._requests.put_nowait(None)
-        self._audio_queue.put_nowait(None)
+        with self._request_lock:
+            if self._stopped.is_set():
+                return
+            self._stopped.set()
+            self._generation += 1
+            self._stop_player()
+            self._clear_queue(self._requests)
+            self._clear_queue(self._audio_queue)
+            self._requests.put_nowait(None)
+            self._audio_queue.put_nowait(None)
         self._request_thread.join(timeout=0.3)
         self._playback_thread.join(timeout=0.3)
 

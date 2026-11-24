@@ -1,11 +1,59 @@
 """Windows foreground-window helpers for search-string paste experiments."""
 
+import ctypes
 import sys
 import time
+from ctypes import wintypes
+from functools import cache
 from pathlib import PureWindowsPath
 
 
 SW_RESTORE = 9
+
+
+@cache
+def _window_api():
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    hwnd = wintypes.HWND
+    dword = wintypes.DWORD
+    bool_type = wintypes.BOOL
+    int_type = ctypes.c_int
+    dword_pointer = ctypes.POINTER(dword)
+    signatures = (
+        (user32, (
+            ("GetWindowThreadProcessId", [hwnd, dword_pointer], dword),
+            ("GetForegroundWindow", [], hwnd),
+            ("GetWindowRect", [hwnd, ctypes.POINTER(wintypes.RECT)], bool_type),
+            ("IsWindow", [hwnd], bool_type),
+            ("IsIconic", [hwnd], bool_type),
+            ("ShowWindow", [hwnd, int_type], bool_type),
+            ("BringWindowToTop", [hwnd], bool_type),
+            ("SetForegroundWindow", [hwnd], bool_type),
+            ("SetFocus", [hwnd], hwnd),
+            ("AttachThreadInput", [dword, dword, bool_type], bool_type),
+            ("GetWindow", [hwnd, wintypes.UINT], hwnd),
+            ("IsWindowVisible", [hwnd], bool_type),
+            ("GetWindowTextLengthW", [hwnd], int_type),
+            ("GetParent", [hwnd], hwnd),
+            ("keybd_event", [wintypes.BYTE, wintypes.BYTE, dword, ctypes.c_size_t], None),
+        )),
+        (kernel32, (
+            ("OpenProcess", [dword, bool_type, dword], wintypes.HANDLE),
+            ("QueryFullProcessImageNameW", [
+                wintypes.HANDLE, dword, wintypes.LPWSTR, dword_pointer,
+            ], bool_type),
+            ("CloseHandle", [wintypes.HANDLE], bool_type),
+            ("GetCurrentThreadId", [], dword),
+            ("GetCurrentProcessId", [], dword),
+        )),
+    )
+    for dll, functions in signatures:
+        for name, argtypes, restype in functions:
+            function = getattr(dll, name)
+            function.argtypes = argtypes
+            function.restype = restype
+    return user32, kernel32
 
 
 def _restore_window_if_minimized(user32, hwnd) -> bool:
@@ -27,15 +75,7 @@ def is_path_of_exile_window(hwnd) -> bool:
     if sys.platform != "win32" or not hwnd:
         return False
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
+        user32, kernel32 = _window_api()
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
         if not pid.value:
@@ -63,10 +103,8 @@ def get_foreground_window():
     if sys.platform != "win32":
         return None
     try:
-        import ctypes
-        from ctypes import wintypes
-        ctypes.windll.user32.GetForegroundWindow.restype = wintypes.HWND
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        user32, _ = _window_api()
+        hwnd = user32.GetForegroundWindow()
         return int(hwnd) if hwnd else None
     except Exception as exc:
         print(f"[WINDOW] GetForegroundWindow failed: {exc}")
@@ -78,11 +116,9 @@ def get_window_rect(hwnd):
     if sys.platform != "win32" or not hwnd:
         return None
     try:
-        import ctypes
-        from ctypes import wintypes
-
+        user32, _ = _window_api()
         rect = wintypes.RECT()
-        if not ctypes.windll.user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
             return None
         return (
             rect.left,
@@ -101,24 +137,7 @@ def focus_window(hwnd, wait_seconds=0.12):
         return False
 
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
-        user32.GetForegroundWindow.restype = wintypes.HWND
-        user32.IsWindow.argtypes = [wintypes.HWND]
-        user32.IsIconic.argtypes = [wintypes.HWND]
-        user32.IsIconic.restype = wintypes.BOOL
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.BringWindowToTop.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.SetFocus.argtypes = [wintypes.HWND]
-        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        user32, kernel32 = _window_api()
 
         hwnd = wintypes.HWND(hwnd)
         if not user32.IsWindow(hwnd):
@@ -185,23 +204,8 @@ def get_next_visible_window_after(hwnd, skip_current_process=False):
     if sys.platform != "win32" or not hwnd:
         return None
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
+        user32, kernel32 = _window_api()
         GW_HWNDNEXT = 2
-        user32.GetWindow.argtypes = [wintypes.HWND, ctypes.c_uint]
-        user32.GetWindow.restype = wintypes.HWND
-        user32.IsWindowVisible.argtypes = [wintypes.HWND]
-        user32.IsWindowVisible.restype = wintypes.BOOL
-        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        user32.GetWindowTextLengthW.restype = ctypes.c_int
-        user32.GetParent.argtypes = [wintypes.HWND]
-        user32.GetParent.restype = wintypes.HWND
-        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
         current_pid = int(kernel32.GetCurrentProcessId())
 
         def window_pid(window):

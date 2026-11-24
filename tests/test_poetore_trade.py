@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -44,8 +45,43 @@ from src.poetore.trade import (
 )
 
 
+@pytest.fixture(scope="module")
+def official_trade_stat_entries():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "poetore-official-stats-baseline.json"
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(
+        {"type": row["kind"], "id": row["stat_id"], "text": row["japanese"]}
+        for row in baseline["entries"]
+    )
+
+
+@pytest.fixture
+def offline_trade_catalogs(monkeypatch, official_trade_stat_entries):
+    monkeypatch.setattr(trade, "_stat_entries_cache", official_trade_stat_entries)
+    english_gear = (
+        {"type": "Imbued Wand"},
+        {"type": "Reaver Sword"},
+        {"name": "Allure", "flags": {"unique": True}},
+    )
+    japanese_gear = (
+        {"type": "浸潤のワンド"},
+        {"type": "略奪者の剣"},
+        {"name": "魅惑", "flags": {"unique": True}},
+    )
+    monkeypatch.setattr(
+        trade, "_item_catalogs_cache",
+        trade._TradeItemCatalogSnapshot(
+            by_root={
+                trade.API_ROOT: trade._TradeItemCatalog((("equipment", english_gear),), english_gear),
+                trade.JP_API_ROOT: trade._TradeItemCatalog((("equipment", japanese_gear),), japanese_gear),
+            },
+            paired=True,
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
-def _isolate_trade_api_test_state(monkeypatch):
+def _isolate_trade_api_test_state(monkeypatch, offline_trade_catalogs):
     """Keep synthetic requests out of user logs and limiter state isolated."""
     monkeypatch.setattr(
         "src.poetore.trade.record_trade_api_event", lambda *_args, **_kwargs: None,

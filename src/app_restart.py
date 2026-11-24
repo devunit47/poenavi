@@ -7,7 +7,7 @@ import sys
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from src.ui.appearance import normalize_appearance, requested_appearance, resolve_app_theme, theme_color
+from src.ui.appearance import normalize_appearance, requested_appearance, theme_color
 from src.app_mode import (
     POETORE_MODE,
     SKIP_STARTUP_SELECTOR_ARGUMENT,
@@ -16,7 +16,7 @@ from src.app_mode import (
     startup_preferences,
 )
 from src.single_instance import RESTART_PID_PREFIX
-from src.ui.app_theme import POETORE_THEME
+from src.ui.app_theme import theme_for_mode
 from src.utils.config_manager import ConfigManager
 from src.utils.feature_support import POETORE, is_feature_supported
 from src.utils.poe_version_data import POE1, POE2, get_poe_label
@@ -96,50 +96,44 @@ def switch_app_target_and_restart(parent, mode, poe_version):
     return False
 
 
-def _poetore_message_box_style():
+def _mode_switch_message_box_style(current_mode):
+    theme = theme_for_mode(current_mode)
+    hover = theme_color("control", "#25332F" if current_mode == POETORE_MODE else "#2C362C")
+    pressed = theme_color("accent_soft", "#276B5A" if current_mode == POETORE_MODE else theme.background)
     return f"""
         QMessageBox {{
-            background-color: {resolve_app_theme(POETORE_THEME).background};
+            background-color: {theme.background};
         }}
         QMessageBox QLabel {{
             background-color: transparent;
-            color: {resolve_app_theme(POETORE_THEME).text};
+            color: {theme.text};
         }}
         QMessageBox QPushButton {{
             min-width: 72px;
             padding: 5px 12px;
-            background-color: {resolve_app_theme(POETORE_THEME).panel};
-            color: {resolve_app_theme(POETORE_THEME).text};
+            background-color: {theme.panel};
+            color: {theme.text};
             border: 1px solid {theme_color('border', '#3A4245')};
             border-radius: 4px;
         }}
         QMessageBox QPushButton:hover {{
-            background-color: {theme_color('control', '#25332F')};
-            border-color: {resolve_app_theme(POETORE_THEME).accent};
+            background-color: {hover};
+            border-color: {theme.accent};
         }}
         QMessageBox QPushButton:pressed {{
-            background-color: {theme_color('accent_soft', '#276B5A')};
+            background-color: {pressed};
         }}
     """
 
 
 def _ask_mode_switch_restart(parent, current_mode, text):
-    if current_mode != POETORE_MODE:
-        return QMessageBox.question(
-            parent,
-            "設定切り替え",
-            text,
-            QMessageBox.Ok | QMessageBox.Cancel,
-            QMessageBox.Ok,
-        )
-
     message_box = QMessageBox(parent)
     message_box.setWindowTitle("設定切り替え")
     message_box.setIcon(QMessageBox.Question)
     message_box.setText(text)
     message_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
     message_box.setDefaultButton(QMessageBox.Ok)
-    message_box.setStyleSheet(_poetore_message_box_style())
+    message_box.setStyleSheet(_mode_switch_message_box_style(current_mode))
     return message_box.exec()
 
 

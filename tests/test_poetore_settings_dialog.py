@@ -341,11 +341,13 @@ def test_poetore_settings_contains_common_trade_and_window_controls():
     assert "修道院へ移動（/monastery）:" in labels
     assert all("（仮）修道院" not in label for label in labels)
     assert dialog.app_mode_radios["poetore"].isChecked()
-    assert not dialog.skip_startup_selector_checkbox.isChecked()
+    assert dialog.skip_startup_selector_checkbox.isChecked()
     dialog.app_mode_radios["poenavi"].setChecked(True)
     dialog.skip_startup_selector_checkbox.setChecked(False)
     settings = dialog.get_settings()
     assert settings["startup"]["preferred_mode"] == "poenavi"
+    assert settings["startup"]["show_mode_selector"] is True
+    assert settings["poe_version_mode"] == "ask"
     assert settings["hotkeys"]["start_stop"] == "F7"
     assert settings["hotkeys"]["monastery"] == "F12"
     assert settings["hotkeys"]["poetore_capture"] == "alt+d"

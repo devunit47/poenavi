@@ -817,6 +817,7 @@ class WindowsOcrServer:
         self.startup_timeout = startup_timeout
         self.request_timeout = request_timeout
         self._lock = threading.Lock()
+        self._retired = threading.Event()
         self._process = None
         self._responses: queue.Queue[str | None] = queue.Queue()
         self._stderr: list[str] = []
@@ -845,11 +846,15 @@ class WindowsOcrServer:
                         break
             raise RuntimeError(str(last_error) if last_error else "Windows OCRに失敗しました。")
 
-    def close(self) -> None:
+    def close(self, *, permanent: bool = False) -> None:
+        if permanent:
+            self._retired.set()
         with self._lock:
             self._stop_process(graceful=True)
 
     def _ensure_started(self) -> None:
+        if self._retired.is_set():
+            raise RuntimeError("Windows OCRは終了済みです。")
         if sys.platform != "win32":
             raise RuntimeError("Windows標準OCRはWindows上でのみ実行できます。")
         if self._process is not None and self._process.poll() is None:

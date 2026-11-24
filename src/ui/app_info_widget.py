@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 from src.ui.appearance import theme_color, theme_font_size
 from src.ui.app_theme import AppTheme
 from src.ui.dialog_theme import DialogTheme
+from src.version import APP_VERSION, IS_FORK, with_fork_label
 
 
 class AppInfoWidget(QWidget):
@@ -25,12 +26,7 @@ class AppInfoWidget(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        try:
-            from main import __version__
-        except ImportError:
-            __version__ = "不明"
-
-        version_label = QLabel(f"ぽえなび v{__version__}")
+        version_label = QLabel(with_fork_label(f"ぽえなび v{APP_VERSION}"))
         version_label.setObjectName("appInfoVersion")
         if shared_dialog_theme:
             version_label.setProperty("uiRole", "title")
@@ -39,6 +35,16 @@ class AppInfoWidget(QWidget):
                 f"color: {theme.text}; font-size: {theme_font_size(18)}px; font-weight: bold;"
             )
         layout.addWidget(version_label)
+        if IS_FORK:
+            fork_note = QLabel("本家（buri34/poenavi）をベースにした非公式のカスタムFork版です。")
+            fork_note.setWordWrap(True)
+            if shared_dialog_theme:
+                fork_note.setProperty("uiRole", "muted")
+            else:
+                fork_note.setStyleSheet(
+                    f"color: {theme.muted_text}; font-size: {theme_font_size(12)}px;"
+                )
+            layout.addWidget(fork_note)
         self.update_button = QPushButton("アップデートを確認")
         self.update_button.setObjectName("appInfoUpdateButton")
         if shared_dialog_theme:

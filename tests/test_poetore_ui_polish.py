@@ -526,7 +526,7 @@ def test_icon_button_fill_uses_custom_appearance_and_preserves_checked_state(qap
 
 
 @pytest.mark.parametrize("locked", [False, True])
-def test_main_title_text_drag_respects_window_lock(qapp, tmp_path, locked):
+def test_main_title_bar_blank_space_drag_respects_window_lock(qapp, tmp_path, locked):
     window = build_scenario("main", tmp_path)
     window.config["window_locked"] = locked
     settle(qapp, window)
@@ -534,16 +534,16 @@ def test_main_title_text_drag_respects_window_lock(qapp, tmp_path, locked):
     handle = window.windowHandle()
     delta = QPoint(28, 16)
 
-    for label in (window.title_label, window.mode_label):
-        start = label.mapTo(window, label.rect().center())
-        assert window.childAt(start) is window.title_bar
-        original_pos = window.pos()
-        QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, start)
-        QTest.mouseMove(handle, start + delta)
-        assert window.pos() == original_pos + (QPoint() if locked else delta)
-        release = start + delta if locked else start
-        QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, release)
-        assert window.title_bar._drag_offset is None
+    title_bar = window.title_bar
+    start = title_bar.mapTo(window, QPoint(title_bar.width() - 2, title_bar.height() // 2))
+    assert window.childAt(start) is title_bar
+    original_pos = window.pos()
+    QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(handle, start + delta)
+    assert window.pos() == original_pos + (QPoint() if locked else delta)
+    release = start + delta if locked else start
+    QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, release)
+    assert title_bar._drag_offset is None
 
     QTest.mouseDClick(handle, Qt.LeftButton, Qt.NoModifier, start)
     assert window.isVisible()
@@ -832,8 +832,14 @@ def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request,
     buttons = [button for button in window.header_action_buttons if button.isVisibleTo(window)]
     assert all(button.width() == button.height() == window.focus_button.height() for button in buttons)
     assert available.contains(window.frameGeometry())
-    assert window.title_bar.rect().contains(window.title_label.geometry())
-    assert window.title_bar.rect().contains(window.mode_label.geometry())
+    switcher = window.title_bar.mode_switcher
+    controls = (switcher.compact_button,) if switcher.compact_button.isVisible() else (
+        *switcher.mode_buttons.values(), switcher.version_button,
+    )
+    for control in controls:
+        assert window.title_bar.rect().contains(
+            QRect(control.mapTo(window.title_bar, QPoint()), control.size())
+        )
     assert window._rate_scroll.verticalScrollBar().maximum() == 0
     assert not geometry_failures(window)
 
@@ -863,7 +869,8 @@ def test_main_large_font_fits_small_screen(qapp, tmp_path, monkeypatch, request,
     assert scroll.verticalScrollBar().maximum() == 0
 
     if preset == "custom":
-        assert window.title_label.palette().color(window.title_label.foregroundRole()).name() == "#c68cff"
+        current = switcher.compact_button if switcher.compact_button.isVisible() else window.title_label
+        assert current.palette().buttonText().color().name() == "#c68cff"
 
 
 def _available_sync_state(version, league):

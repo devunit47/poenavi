@@ -106,7 +106,7 @@ def test_controller_closes_ocr_helper_when_application_quits():
     app.aboutToQuit.connect.assert_called_once_with(controller.close)
     app.aboutToQuit.connect.call_args.args[0]()
     overlay.hide.assert_called_once_with()
-    ocr.close.assert_called_once_with()
+    ocr.close.assert_called_once_with(permanent=True)
 
 
 def test_controller_rejects_scan_until_read_region_is_configured():

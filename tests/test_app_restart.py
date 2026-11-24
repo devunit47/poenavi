@@ -1,12 +1,15 @@
 from unittest.mock import patch
 
+import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from src.app_mode import SKIP_STARTUP_SELECTOR_ARGUMENT
 from src.app_restart import (
     _restart_command,
     _poetore_message_box_style,
     confirm_mode_switch_restart,
     restart_application,
+    switch_app_target_and_restart,
 )
 
 
@@ -190,3 +193,47 @@ def test_restart_quits_after_detached_process_starts():
         assert restart_application() is True
 
     quit_app.assert_called_once_with()
+
+
+@pytest.mark.parametrize(("version_mode", "show_selector", "updated_version_mode"), [
+    ("poe1", False, "poe2"),
+    ("ask", True, "ask"),
+    ("", False, ""),
+])
+def test_immediate_switch_saves_target_without_confirmation(
+    qapp, version_mode, show_selector, updated_version_mode,
+):
+    from PySide6.QtWidgets import QWidget
+
+    parent = QWidget()
+    parent.config = {}
+    config = {
+        "poe_version": "poe1",
+        "poe_version_mode": version_mode,
+        "startup": {"preferred_mode": "poenavi", "show_mode_selector": show_selector},
+    }
+
+    with (
+        patch("src.app_restart.ConfigManager.load_config", return_value=config),
+        patch("src.app_restart.ConfigManager.save_config") as save,
+        patch("src.app_restart._ask_mode_switch_restart") as confirm,
+        patch("src.app_restart.QProcess.startDetached", return_value=(True, 123)) as start,
+        patch.object(qapp, "quit") as quit_app,
+    ):
+        assert switch_app_target_and_restart(parent, "poetore", "poe2")
+
+    saved, = save.call_args.args
+    assert saved["poe_version"] == "poe2"
+    assert saved["poe_version_mode"] == updated_version_mode
+    assert saved["startup"] == {"preferred_mode": "poetore", "show_mode_selector": show_selector}
+    assert parent.config == saved
+    assert start.call_args.args[1].count(SKIP_STARTUP_SELECTOR_ARGUMENT) == 1
+    confirm.assert_not_called()
+    quit_app.assert_called_once_with()
+
+
+def test_standard_restart_does_not_forward_one_shot_selector_argument():
+    with patch("src.app_restart.sys.argv", ["main.py", SKIP_STARTUP_SELECTOR_ARGUMENT]):
+        _, arguments = _restart_command()
+
+    assert SKIP_STARTUP_SELECTOR_ARGUMENT not in arguments

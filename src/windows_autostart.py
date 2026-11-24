@@ -11,12 +11,13 @@ REGISTRY_VALUE_NAME = "PoENaviPoetore"
 
 def consume_windows_startup_poetore_argument(arguments: list[str]) -> bool:
     """内部用起動引数を取り除き、自動起動経由かを返す。"""
-    found = WINDOWS_STARTUP_POETORE_ARGUMENT in arguments[1:]
+    poetore_arguments = {WINDOWS_STARTUP_POETORE_ARGUMENT, "--poetore"}
+    found = any(argument in poetore_arguments for argument in arguments[1:])
     if found:
-        arguments[:] = [
+        arguments[1:] = [
             argument
-            for argument in arguments
-            if argument != WINDOWS_STARTUP_POETORE_ARGUMENT
+            for argument in arguments[1:]
+            if argument not in poetore_arguments
         ]
     return found
 

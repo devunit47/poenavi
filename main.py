@@ -12,7 +12,13 @@ from src.qt_platform import configure_qt_platform
 # PySide6を読み込む前に設定する必要がある。
 configure_qt_platform()
 
-from src.app_mode import POENAVI_MODE, POETORE_MODE, save_startup_preferences, startup_preferences
+from src.app_mode import (
+    POENAVI_MODE,
+    POETORE_MODE,
+    consume_skip_startup_selector_argument,
+    save_startup_preferences,
+    startup_preferences,
+)
 from src.utils.feature_support import POETORE, is_feature_supported
 from src.utils.config_manager import ConfigManager
 from src.utils.poe_version_data import POE1, POE2
@@ -56,26 +62,28 @@ def run_audio_smoke_test():
     return 0
 
 
-def select_startup_options(config, force_poetore=False):
+def select_startup_options(config, force_poetore=False, skip_selector=False):
     """PoEバージョンと使用機能を確定し、必要なら統合選択画面を表示する。"""
     updated = dict(config or {})
-    version_mode = updated.get("poe_version_mode", "ask")
+    version_mode = updated.get("poe_version_mode")
     current_version = updated.get("poe_version", POE1)
     if current_version not in (POE1, POE2):
         current_version = POE1
-    selected_version = version_mode if version_mode in (POE1, POE2) else current_version
-
-    if force_poetore and is_feature_supported(POETORE, selected_version):
-        return updated, POETORE_MODE
+    selected_version = (
+        version_mode if not skip_selector and version_mode in (POE1, POE2)
+        else current_version
+    )
 
     preferred_mode, show_selector = startup_preferences(config)
+    if force_poetore and is_feature_supported(POETORE, selected_version):
+        preferred_mode, show_selector = POETORE_MODE, False
     if (
         preferred_mode == POETORE_MODE
         and not is_feature_supported(POETORE, selected_version)
     ):
         preferred_mode = POENAVI_MODE
         show_selector = True
-    if version_mode in (POE1, POE2) and not show_selector:
+    if skip_selector or not show_selector:
         if updated.get("poe_version") != selected_version:
             updated["poe_version"] = selected_version
             ConfigManager.save_config(updated)
@@ -113,6 +121,7 @@ def select_startup_options(config, force_poetore=False):
 def run():
     started_at = perf_counter()
     force_poetore = consume_windows_startup_poetore_argument(sys.argv)
+    skip_selector = consume_skip_startup_selector_argument(sys.argv)
     restart_pid = consume_restart_pid(sys.argv)
     wait_for_previous_instance(restart_pid)
     app = QApplication(sys.argv)
@@ -142,21 +151,18 @@ def run():
     app.setProperty("startupUpdateChecked", True)
 
     config = ConfigManager.load_config()
-    if force_poetore:
-        startup_selection = select_startup_options(config, force_poetore=True)
-    else:
-        startup_selection = select_startup_options(config)
+    startup_selection = select_startup_options(
+        config, force_poetore=force_poetore, skip_selector=skip_selector,
+    )
     if startup_selection is None:
         return 0
     config, app_mode = startup_selection
     app.setProperty("startupPoeVersionSelected", True)
 
-    from src.app_composition import create_mode_window
+    from src.app_session import AppSessionController
 
-    app.setProperty("appMode", app_mode)
-    window = create_mode_window(app_mode, config.get("poe_version", POE1))
-    single_instance.set_window(window)
-    window.show()
+    session = AppSessionController(app, single_instance)
+    session.start(app_mode, config.get("poe_version", POE1))
 
     def report_runtime():
         from src.utils.runtime_diagnostics import (
@@ -165,7 +171,7 @@ def run():
         )
 
         print_runtime_snapshot(
-            capture_runtime_snapshot(app_mode, started_at, window)
+            capture_runtime_snapshot(session.target[0], started_at, session.window)
         )
 
     QTimer.singleShot(0, report_runtime)

@@ -93,12 +93,12 @@ def test_map_mod_manager_reuses_dialog_and_reloads_current_config(qtbot, monkeyp
     assert window._map_mod_manager_dialog is None
 
 
-def test_main_title_bar_shows_title_and_short_poe_version_without_eyebrow():
+def test_main_title_bar_shows_modes_and_switches_from_title_and_tray():
     app = QApplication.instance() or QApplication([])
 
     for poe_version, expected in (
-        (POE1, "（PoE1）"),
-        (POE2, "（PoE2）"),
+        (POE1, "PoE1"),
+        (POE2, "PoE2"),
     ):
         with patch(
             "src.ui.poetore_mode_window.ConfigManager.load_config",
@@ -110,25 +110,29 @@ def test_main_title_bar_shows_title_and_short_poe_version_without_eyebrow():
 
         window.show()
         app.processEvents()
-        assert window.title_label.parentWidget() is window.title_bar
-        assert window.mode_label.parentWidget() is window.title_bar
+        switcher = window.title_bar.mode_switcher
+        assert window.title_label is switcher.mode_buttons["poetore"]
+        assert window.mode_label is switcher.version_button
         assert window.title_label.text() == "ぽえとれ"
         assert window.mode_label.text() == expected
-        assert window.windowTitle() == "ぽえとれ"
+        assert window.windowTitle() == "ぽえとれ (Fork)"
+        assert window.tray_icon.toolTip() == window.windowTitle()
         assert all(
             label.text() != "価格チェック・トレード支援"
             for label in window.findChildren(QLabel)
         )
         assert window.mode_label.width() >= window.mode_label.sizeHint().width()
-        assert (
-            window.mode_label.font().pixelSize()
-            == window.title_label.font().pixelSize() - 4
-        )
-        assert window.mode_label.palette().color(
-            window.mode_label.foregroundRole()
-        ) == window.title_label.palette().color(
-            window.title_label.foregroundRole()
-        )
+        tray = window.tray_icon.contextMenu()
+        submenu, = [action.menu() for action in tray.actions() if action.menu()]
+        checked, = [action for action in submenu.actions() if action.isChecked()]
+        assert checked.text() == f"{expected} · ぽえとれ\t✓"
+        requested = Mock()
+        window.switch_requested.connect(requested)
+        switcher.mode_buttons["poenavi"].click()
+        next(action for action in submenu.actions() if action.text() == f"{expected} · ぽえなび").trigger()
+        assert requested.call_args_list == [
+            call("poenavi", poe_version), call("poenavi", poe_version),
+        ]
         window.close()
         app.processEvents()
 
@@ -661,11 +665,11 @@ def test_poetore_mode_starts_only_common_and_poetore_services():
     assert not window.rate_refresh_button.text()
     assert not window.rate_refresh_button.icon().isNull()
     assert window.rate_refresh_button.focusPolicy() == Qt.TabFocus
-    assert window.tray_icon.toolTip() == "ぽえとれ"
+    assert window.tray_icon.toolTip() == "ぽえとれ (Fork)"
     assert [
         action.text() for action in window.tray_icon.contextMenu().actions()
         if not action.isSeparator()
-    ] == ["ぽえとれを表示", "設定", "終了"]
+    ] == ["ぽえとれを表示", "設定", "モード・PoE版を切り替え", "終了"]
     hotkey_service.start.assert_called_once()
     window.close()
     app.processEvents()

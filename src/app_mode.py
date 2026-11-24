@@ -3,6 +3,16 @@
 POENAVI_MODE = "poenavi"
 POETORE_MODE = "poetore"
 VALID_APP_MODES = frozenset({POENAVI_MODE, POETORE_MODE})
+SKIP_STARTUP_SELECTOR_ARGUMENT = "--skip-startup-selector"
+
+
+def consume_skip_startup_selector_argument(arguments):
+    """今回の起動だけ選択画面を省略する内部引数を取り除く。"""
+    requested = SKIP_STARTUP_SELECTOR_ARGUMENT in arguments[1:]
+    arguments[1:] = [
+        argument for argument in arguments[1:] if argument != SKIP_STARTUP_SELECTOR_ARGUMENT
+    ]
+    return requested
 
 
 def normalize_app_mode(value):
@@ -12,12 +22,14 @@ def normalize_app_mode(value):
 
 def startup_preferences(config):
     """設定から (前回モード, 選択画面を表示するか) を安全に取得する。"""
-    startup = (config or {}).get("startup")
+    config = config or {}
+    startup = config.get("startup")
     if not isinstance(startup, dict):
         startup = {}
     return (
         normalize_app_mode(startup.get("preferred_mode")),
-        bool(startup.get("show_mode_selector", True)),
+        bool(startup.get("show_mode_selector", False))
+        or config.get("poe_version_mode") == "ask",
     )
 
 

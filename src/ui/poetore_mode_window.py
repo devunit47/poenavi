@@ -1,5 +1,6 @@
 """ぽえとれモードの軽量メイン画面。"""
 
+import logging
 import sys
 import threading
 import time
@@ -47,6 +48,7 @@ from src.ui.custom_command_settings import (
     normalized_custom_commands,
 )
 from src.ui.toolbar_button import ToolbarButton
+from src.ui.mode_switcher import ModeSwitcherWidget, add_mode_switch_menu
 from src.ui.toolbar_icons import (
     checking_icon, download_icon, finish_line_icon, hideout_notification_icon,
     line_icon_canvas, map_mod_manager_icon, update_check_icon,
@@ -72,7 +74,7 @@ from src.utils.global_hotkeys import (
 from src.utils.log_path_detector import fill_missing_client_log_paths
 from src.utils.poe_version_data import POE1, POE2
 from src.utils.stash_tab_scroll import StashTabScrollController
-from src.version import APP_VERSION
+from src.version import APP_VERSION, with_fork_label
 
 
 UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
@@ -215,16 +217,11 @@ class _PoetoreModeTitleBar(QWidget):
             UI_METRICS.control_gap, UI_METRICS.inline_gap,
         )
         layout.setSpacing(UI_METRICS.inline_gap)
-        self.title_label = QLabel("ぽえとれ", self)
-        mode_name = "PoE2" if poe_version == POE2 else "PoE1"
-        self.mode_label = QLabel(f"（{mode_name}）", self)
-        accent = resolve_app_theme(POETORE_THEME).accent
-        for label, size in ((self.title_label, 18), (self.mode_label, 14)):
-            label.setStyleSheet(
-                f"color: {accent}; font-size: {theme_font_size(size)}px; font-weight: bold;"
-            )
-            label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            layout.addWidget(label)
+        self.mode_switcher = ModeSwitcherWidget(POETORE_MODE, poe_version, self)
+        self.mode_switcher.switch_requested.connect(window.switch_requested)
+        self.title_label = self.mode_switcher.mode_buttons[POETORE_MODE]
+        self.mode_label = self.mode_switcher.version_button
+        layout.addWidget(self.mode_switcher)
         layout.addStretch()
 
         self.update_button = ToolbarButton(border_width=0)
@@ -251,6 +248,15 @@ class _PoetoreModeTitleBar(QWidget):
         layout.addWidget(self.close_button)
         equalize_button_sizes((self.minimize_button, self.close_button), minimum_width=32)
         self.update_button.setFixedSize(self.minimize_button.size())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        buttons = (self.update_button, self.minimize_button, self.close_button)
+        reserved = margins.left() + margins.right() + sum(button.width() for button in buttons)
+        reserved += 4 * layout.spacing()
+        self.mode_switcher.set_available_width(self._window.width(), self.width() - reserved)
 
     def mousePressEvent(self, event):
         if (
@@ -282,6 +288,7 @@ class _PoetoreModeTitleBar(QWidget):
 
 
 class PoetoreModeWindow(QMainWindow):
+    switch_requested = Signal(str, str)
     MODE_ACTION_DEFAULTS = {
         "exit": "F5",
         "monastery": "F12",
@@ -296,6 +303,17 @@ class PoetoreModeWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._session_closed = False
+        try:
+            self._initialize()
+        except Exception:
+            try:
+                self._shutdown()
+            except Exception:
+                logging.getLogger(__name__).exception("ぽえとれの初期化失敗後に終了処理が失敗しました")
+            raise
+
+    def _initialize(self):
         self.config = ConfigManager.load_config()
         if fill_missing_client_log_paths(self.config):
             ConfigManager.save_config(self.config)
@@ -324,7 +342,8 @@ class PoetoreModeWindow(QMainWindow):
         self._toolbar_update_action = None
         self._deferred_toolbar_update_message = None
         self._update_gate_open = False
-        self._league_signals = _LeagueSignals(self)
+        # League resolution can finish after the Qt window has been deleted.
+        self._league_signals = _LeagueSignals()
         self._league_signals.ready.connect(self._queue_rate_sync)
         self._league_signals.failed.connect(self._show_rate_error)
         self._screen_watcher = WindowScreenWatcher(self)
@@ -335,7 +354,7 @@ class PoetoreModeWindow(QMainWindow):
         self._screen_geometry_timer.setInterval(SCREEN_CHANGE_DEBOUNCE_MS)
         self._screen_geometry_timer.timeout.connect(self._refresh_screen_geometry)
 
-        self.setWindowTitle("ぽえとれ")
+        self.setWindowTitle(with_fork_label("ぽえとれ"))
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumWidth(500)
@@ -355,7 +374,7 @@ class PoetoreModeWindow(QMainWindow):
         self._hideout_notification = None
         self._build_tray_icon()
         self._apply_window_settings()
-        QTimer.singleShot(0, self._apply_startup_position)
+        QTimer.singleShot(0, self, self._apply_startup_position)
 
         self.stash_tab_scroll = StashTabScrollController(
             enabled=self.config.get("stash_tab_scroll_enabled", True)
@@ -370,7 +389,7 @@ class PoetoreModeWindow(QMainWindow):
         if sys.platform == "win32" and self._heist_curio_enabled():
             self._ensure_heist_curio_controller().warm_up()
 
-        QTimer.singleShot(0, self.refresh_currency_rate)
+        QTimer.singleShot(0, self, self.refresh_currency_rate)
         self._prepare_poetore_window()
         self._apply_obs_streaming_mode()
         self._map_mod_manager_timer = QTimer(self)
@@ -394,7 +413,7 @@ class PoetoreModeWindow(QMainWindow):
         self.setWindowIcon(icon)
 
         self.tray_icon = QSystemTrayIcon(icon, self)
-        self.tray_icon.setToolTip("ぽえとれ")
+        self.tray_icon.setToolTip(self.windowTitle())
         self.tray_icon.activated.connect(self._handle_tray_activation)
 
         menu = QMenu(self)
@@ -404,6 +423,7 @@ class PoetoreModeWindow(QMainWindow):
         self.tray_settings_action = QAction("設定", menu)
         self.tray_settings_action.triggered.connect(self.open_settings_from_tray)
         menu.addAction(self.tray_settings_action)
+        add_mode_switch_menu(menu, POETORE_MODE, self.poe_version, self.switch_requested.emit)
         menu.addSeparator()
         self.tray_exit_action = QAction("終了", menu)
         self.tray_exit_action.triggered.connect(self.quit_from_tray)
@@ -439,6 +459,9 @@ class PoetoreModeWindow(QMainWindow):
     def open_settings_from_tray(self):
         self.restore_from_tray()
         QTimer.singleShot(0, self.open_settings)
+
+    def save_session_state(self):
+        """ぽえとれの設定は変更時に保存済み。"""
 
     def quit_from_tray(self):
         self.close()
@@ -837,7 +860,7 @@ class PoetoreModeWindow(QMainWindow):
             mode_hotkeys.pop("expedition_reward_ocr", None)
             mode_hotkeys.pop("desecration_tier_ocr", None)
         self.hotkey_service = GlobalHotkeyService(
-            mode_hotkeys, action_filter=is_hotkey_action_allowed, parent=self,
+            mode_hotkeys, action_filter=is_hotkey_action_allowed,
         )
         self.hotkey_service.command.connect(self.handle_hotkey)
         self.hotkey_service.start()
@@ -943,7 +966,7 @@ class PoetoreModeWindow(QMainWindow):
         return "Standard"
 
     def refresh_currency_rate(self, *, manual=False):
-        if self._league_request_running:
+        if self._session_closed or self._league_request_running:
             return
         self._league_request_running = True
         self.rate_panel.begin_refresh()
@@ -959,11 +982,15 @@ class PoetoreModeWindow(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _queue_rate_sync(self, league, manual):
+        if self._session_closed:
+            return
         self._league_request_running = False
         self._resolved_rate_league = league
         self.rate_panel.refresh(manual=manual)
 
     def _show_rate_error(self, _message):
+        if self._session_closed:
+            return
         self._league_request_running = False
         self.rate_panel.refresh_failed()
 
@@ -1063,6 +1090,8 @@ class PoetoreModeWindow(QMainWindow):
             self.move(x, y)
 
     def handle_hotkey(self, command):
+        if getattr(self, "_session_closed", False) is True:
+            return
         if command.startswith("custom_command:"):
             index = int(command.split(":", 1)[1])
             commands = normalized_custom_commands(self.config.get("custom_commands", []))
@@ -1139,7 +1168,6 @@ class PoetoreModeWindow(QMainWindow):
             shared = self._ensure_screen_reading_coordinator()
             controller = ExpeditionRewardController(
                 self._currency_rate_league,
-                self,
                 region_getter=lambda: self.config.get("poetore", {}).get(
                     "expedition_reward_overlay", {}
                 ).get("region"),
@@ -1169,7 +1197,7 @@ class PoetoreModeWindow(QMainWindow):
 
             shared = self._ensure_screen_reading_coordinator()
             controller = HeistCurioController(
-                self, ocr_server=shared, scan_coordinator=shared,
+                ocr_server=shared, scan_coordinator=shared,
             )
             controller.status.connect(self._show_heist_curio_status)
             controller.failed.connect(self._show_heist_curio_error)
@@ -1205,7 +1233,6 @@ class PoetoreModeWindow(QMainWindow):
             from src.poetore.poe2.desecration_overlay import DesecrationTierController
             shared = self._ensure_screen_reading_coordinator()
             controller = DesecrationTierController(
-                self,
                 regions_getter=lambda: self.config.get("poetore", {}).get("desecration_tier_overlay", {}),
                 ocr_server=shared,
                 scan_coordinator=shared,
@@ -1220,7 +1247,7 @@ class PoetoreModeWindow(QMainWindow):
         if self._ndlocr_pack_controller is None:
             from src.poetore.poe2.ndlocr_pack import NdlOcrPackController
 
-            self._ndlocr_pack_controller = NdlOcrPackController(self)
+            self._ndlocr_pack_controller = NdlOcrPackController()
         return self._ndlocr_pack_controller
 
     def capture_desecration_tiers(self):
@@ -1748,39 +1775,56 @@ class PoetoreModeWindow(QMainWindow):
         send_chat_command(command)
 
     def closeEvent(self, event):
-        self._update_check_timer.stop()
-        for connection in self._update_connections:
+        self._shutdown()
+        super().closeEvent(event)
+
+    def _shutdown(self):
+        if self._session_closed:
+            return
+        self._session_closed = True
+        signals = getattr(self, "_league_signals", None)
+        if signals is not None:
+            signals.blockSignals(True)
+        for timer in self.findChildren(QTimer):
+            timer.stop()
+        for connection in getattr(self, "_update_connections", ()):
             QObject.disconnect(connection)
         self._update_connections = ()
-        self.tray_icon.hide()
-        if self._hideout_notification is not None:
+        tray_icon = getattr(self, "tray_icon", None)
+        if tray_icon is not None:
+            tray_icon.hide()
+        for name in (
+            "hotkey_service", "stash_tab_scroll", "suppressed_capture_hotkey",
+            "suppressed_expedition_hotkey", "suppressed_desecration_hotkey", "rate_panel",
+        ):
+            service = getattr(self, name, None)
+            if service is not None:
+                service.stop()
+        icon_cache = getattr(self, "_rate_icon_cache", None)
+        if icon_cache is not None:
+            icon_cache.close(wait=False)
+        if getattr(self, "_hideout_notification", None) is not None:
             self._hideout_notification.close()
-        self.rate_panel.stop()
-        self._rate_icon_cache.close(wait=False)
-        self.hotkey_service.stop()
-        self.stash_tab_scroll.stop()
-        if self.suppressed_capture_hotkey is not None:
-            self.suppressed_capture_hotkey.stop()
-        if self.suppressed_expedition_hotkey is not None:
-            self.suppressed_expedition_hotkey.stop()
-        if self.suppressed_desecration_hotkey is not None:
-            self.suppressed_desecration_hotkey.stop()
-        self._shutdown_screen_reading()
-        if self._ndlocr_pack_controller is not None:
+        if hasattr(self, "_screen_reading_coordinator"):
+            self._shutdown_screen_reading()
+        if getattr(self, "_ndlocr_pack_controller", None) is not None:
             self._ndlocr_pack_controller.close()
             self._ndlocr_pack_controller = None
-        if self._memo_dialog is not None:
+        if getattr(self, "_memo_dialog", None) is not None:
             self._memo_dialog.close()
-        if self._cheat_sheet_overlay is not None:
+        if getattr(self, "_cheat_sheet_overlay", None) is not None:
             self._cheat_sheet_overlay.hide_and_save()
             self._cheat_sheet_overlay.close()
-        if self._map_check_window is not None:
+            self._cheat_sheet_overlay.deleteLater()
+        if getattr(self, "_map_check_window", None) is not None:
             self._map_check_window.close()
             self._map_check_window.deleteLater()
             self._map_check_window = None
-        self._dispose_map_mod_manager_dialog()
+        if hasattr(self, "_map_mod_manager_timer"):
+            self._dispose_map_mod_manager_dialog()
         if getattr(self, "_poetore_window", None) is not None:
-            self._poetore_window.close()
-            self._poetore_window.deleteLater()
+            self._poetore_window.dispose()
             self._poetore_window = None
-        super().closeEvent(event)
+        for child in self.findChildren(QWidget):
+            if child.isWindow() and child.isVisible():
+                child.close()

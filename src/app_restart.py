@@ -8,18 +8,29 @@ from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from src.ui.appearance import normalize_appearance, requested_appearance, resolve_app_theme, theme_color
-from src.app_mode import POETORE_MODE, normalize_app_mode, startup_preferences
+from src.app_mode import (
+    POETORE_MODE,
+    SKIP_STARTUP_SELECTOR_ARGUMENT,
+    VALID_APP_MODES,
+    normalize_app_mode,
+    startup_preferences,
+)
 from src.single_instance import RESTART_PID_PREFIX
 from src.ui.app_theme import POETORE_THEME
+from src.utils.config_manager import ConfigManager
+from src.utils.feature_support import POETORE, is_feature_supported
 from src.utils.poe_version_data import POE1, POE2, get_poe_label
 
 
-def _restart_command():
+def _restart_command(*, skip_startup_selector=False):
     """開発実行とPyInstaller版のそれぞれに合う再起動コマンドを返す。"""
     forwarded_arguments = [
         argument for argument in sys.argv[1:]
         if not argument.startswith(RESTART_PID_PREFIX)
+        and argument != SKIP_STARTUP_SELECTOR_ARGUMENT
     ]
+    if skip_startup_selector:
+        forwarded_arguments.append(SKIP_STARTUP_SELECTOR_ARGUMENT)
     forwarded_arguments.append(f"{RESTART_PID_PREFIX}{os.getpid()}")
     if getattr(sys, "frozen", False):
         return sys.executable, forwarded_arguments
@@ -27,9 +38,9 @@ def _restart_command():
     return sys.executable, [main_script, *forwarded_arguments]
 
 
-def restart_application():
+def restart_application(*, skip_startup_selector=False):
     """新しいプロセスを起動できた場合だけ、現在のアプリを終了する。"""
-    program, arguments = _restart_command()
+    program, arguments = _restart_command(skip_startup_selector=skip_startup_selector)
     result = QProcess.startDetached(program, arguments, os.getcwd())
     started = result[0] if isinstance(result, tuple) else result
     if not started:
@@ -38,6 +49,51 @@ def restart_application():
     if app is not None:
         app.quit()
     return True
+
+
+def is_valid_app_target(mode, poe_version):
+    if mode not in VALID_APP_MODES or poe_version not in (POE1, POE2):
+        return False
+    return mode != POETORE_MODE or is_feature_supported(POETORE, poe_version)
+
+
+def save_app_target(mode, poe_version):
+    """起動時の確認設定を保ったまま切替先を保存し、変更したキーを返す。"""
+    config = ConfigManager.load_config()
+    startup = config.get("startup")
+    changes = {
+        "poe_version": poe_version,
+        "startup": {
+            **(startup if isinstance(startup, dict) else {}),
+            "preferred_mode": mode,
+        },
+    }
+    if "poe_version_mode" in config:
+        version_mode = config["poe_version_mode"]
+        changes["poe_version_mode"] = poe_version if version_mode in (POE1, POE2) else version_mode
+    ConfigManager.save_config({**config, **changes})
+    return changes
+
+
+def switch_app_target_and_restart(parent, mode, poe_version):
+    """起動時の確認設定を保ったまま、指定したモードとPoE版で再起動する。"""
+    if not is_valid_app_target(mode, poe_version):
+        return False
+    try:
+        changes = save_app_target(mode, poe_version)
+    except OSError:
+        QMessageBox.warning(parent, "設定保存エラー", "切替先の設定を保存できませんでした。")
+        return False
+
+    # 終了時にウィンドウが設定を保存する場合も、切替先を維持する。
+    parent.config.update(changes)
+    if restart_application(skip_startup_selector=True):
+        return True
+    QMessageBox.warning(
+        parent, "再起動エラー",
+        "アプリを再起動できませんでした。切替先は保存済みです。",
+    )
+    return False
 
 
 def _poetore_message_box_style():

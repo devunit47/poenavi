@@ -2175,7 +2175,8 @@ class PoetoreWindow(QWidget):
         resize_row.addWidget(QSizeGrip(self))
         content_layout.addLayout(resize_row)
         self.apply_result_display_size()
-        self._trade_signals = _TradeSignals(self)
+        # Trade workers can outlive the result window.
+        self._trade_signals = _TradeSignals()
         self._trade_signals.conditions_ready.connect(self._apply_prepared_trade_conditions)
         self._trade_signals.completed.connect(self._search_completed)
         self._trade_signals.partial_completed.connect(self._search_partially_completed)
@@ -2349,7 +2350,7 @@ class PoetoreWindow(QWidget):
         if self._auto_search_queued:
             return
         self._auto_search_queued = True
-        QTimer.singleShot(0, self._run_queued_auto_search)
+        QTimer.singleShot(0, self, self._run_queued_auto_search)
 
     def _run_queued_auto_search(self):
         if not self._auto_search_queued:
@@ -4896,6 +4897,20 @@ class PoetoreWindow(QWidget):
             QApplication.instance().focusChanged.disconnect(self._close_when_focus_leaves_panel)
             self._focus_signal_connected = False
         super().closeEvent(event)
+
+    def dispose(self):
+        """Retire the reusable result window when its owning mode is closed."""
+        self._trade_signals.blockSignals(True)
+        self._search_generation += 1
+        self._search_cancel.set()
+        self._auto_search_queued = False
+        self._capture_release_generation = None
+        self._clipboard_wait_generation = None
+        self._native_hwnd_changed = None
+        for timer in self.findChildren(QTimer):
+            timer.stop()
+        self.close()
+        self.deleteLater()
 
     def set_obs_streaming_mode(self, enabled: bool):
         """Keep one stable HWND alive and collapse it to its title bar for OBS."""

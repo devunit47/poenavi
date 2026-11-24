@@ -849,6 +849,7 @@ class HeistCurioController(QObject):
         self._items = tuple(items or load_curio_items())
         self._running = False
         self._generation = 0
+        self._closed = False
         self._high_accuracy_overlay = None
         self.high_accuracy_started.connect(self._show_high_accuracy_status)
         self.high_accuracy_finished.connect(self._hide_high_accuracy_status)
@@ -858,15 +859,16 @@ class HeistCurioController(QObject):
         return self._running
 
     def close(self) -> None:
+        self._closed = True
         self._generation += 1
         self._running = False
         self._hide_high_accuracy_status()
         if self._scan_coordinator is not None:
             self._scan_coordinator.finish("heist_curio")
         if self._owns_ocr:
-            self._ocr.close()
+            self._ocr.close(permanent=True)
         if self._owns_ndl_ocr:
-            self._ndl_ocr.close()
+            self._ndl_ocr.close(permanent=True)
 
     def warm_up(self) -> None:
         threading.Thread(
@@ -880,7 +882,7 @@ class HeistCurioController(QObject):
             return
 
     def request_scan(self) -> bool:
-        if self._running:
+        if self._closed or self._running:
             return False
         if self._scan_coordinator is not None and not self._scan_coordinator.try_begin(
             "heist_curio"
@@ -955,7 +957,7 @@ class HeistCurioController(QObject):
                     )
                 )
             )
-            if (
+            if generation == self._generation and (
                 match is None or trinket_needs_confirmation
             ) and getattr(self._ndl_ocr, "is_available", False):
                 cold_start = getattr(self._ndl_ocr, "is_ready", False) is not True
@@ -1011,6 +1013,8 @@ class HeistCurioController(QObject):
     def _show_high_accuracy_status(
         self, cold_start: bool, client_rect: QRect, capture_rect: QRect
     ) -> None:
+        if self._closed:
+            return
         if self._high_accuracy_overlay is None:
             from src.poetore.poe2.desecration_overlay import (
                 HighAccuracyOcrStatusOverlay,

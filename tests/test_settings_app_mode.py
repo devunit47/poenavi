@@ -64,7 +64,7 @@ def test_settings_app_mode_uses_one_shared_startup_checkbox(monkeypatch, qapp):
     })
 
     assert dialog.app_mode_radios["poetore"].isChecked()
-    assert not dialog.skip_startup_selector_checkbox.isChecked()
+    assert dialog.skip_startup_selector_checkbox.isChecked()
     dialog.app_mode_radios["poenavi"].setChecked(True)
     dialog.skip_startup_selector_checkbox.setChecked(True)
     settings = dialog.get_settings()

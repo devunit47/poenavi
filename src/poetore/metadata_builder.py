@@ -59,6 +59,31 @@ def _is_skill_effect(kind: str, stat_id: str) -> bool:
     return (kind in SUPPORTED_KINDS or kind == "scourge") and stat_id.startswith(f"{kind}.effect_")
 
 
+def extract_effect_english_templates(en_trade: dict) -> dict[str, str]:
+    return dict(sorted(
+        (stat_id, str(entry["text"]))
+        for (kind, stat_id), entry in _trade_entries(en_trade).items()
+        if _is_skill_effect(kind, stat_id)
+    ))
+
+
+def diff_effect_english_templates(previous: dict[str, str], current: dict[str, str]) -> dict:
+    return {
+        "previous_count": len(previous),
+        "current_count": len(current),
+        "added": [
+            {"stat_id": key, "english": current[key]} for key in sorted(current.keys() - previous.keys())
+        ],
+        "removed": [
+            {"stat_id": key, "english": previous[key]} for key in sorted(previous.keys() - current.keys())
+        ],
+        "changed": [
+            {"stat_id": key, "previous_english": previous[key], "current_english": current[key]}
+            for key in sorted(previous.keys() & current.keys()) if previous[key] != current[key]
+        ],
+    }
+
+
 def _skill_effect_english_key(template: str) -> str:
     text = " ".join(template.casefold().split())
     support_prefix = "socketed gems are supported by level # "
@@ -112,6 +137,7 @@ def _add_effect_english_matchers(
 
 def add_english_matchers(
     payload: dict, awakened_lines: Iterable[str], effect_english: dict[str, str] | None = None,
+    *, stat_rules: dict | None = None, preserve_existing: bool = False,
 ) -> None:
     """固定済みAwakenedのTrade IDで、既存のModへ英語文型を追加する。"""
     matchers: dict[tuple[str, str], set[tuple[str, bool]]] = {}
@@ -134,8 +160,36 @@ def add_english_matchers(
                         # 同じ文型に相反する符号がある場合は両方残して実行時に曖昧扱いする。
                         matches.add((template, negated))
 
+    if preserve_existing:
+        for row in payload["mods"]:
+            key = (row["kind"], row["stat_id"])
+            for field, negated in (("english", False), ("english_negated", True)):
+                for template in row.get(field, ()):
+                    matchers.setdefault(key, set()).add((template or row["ref"], negated))
+
     if effect_english:
         _add_effect_english_matchers(payload["mods"], matchers, effect_english)
+
+    rules = (stat_rules or {}).get("rules", ())
+    if any(rule.get("english") for rule in rules):
+        active = {(row["kind"], row["stat_id"]) for row in payload["mods"]}
+        owners = defaultdict(set)
+        for (kind, stat_id), templates in matchers.items():
+            if (kind, stat_id) in active:
+                for template, _ in templates:
+                    owners[kind, _english_text(template)].add(stat_id)
+        authored = []
+        for rule in rules:
+            kind, stat_id = rule["kind"], rule["stat_id"]
+            if (kind, stat_id) not in active:
+                continue
+            for value in rule.get("english", ()):
+                if template := value.strip():
+                    owners[kind, _english_text(template)].add(stat_id)
+                    authored.append((kind, stat_id, template))
+        for kind, stat_id, template in authored:
+            if owners[kind, _english_text(template)] == {stat_id}:
+                matchers.setdefault((kind, stat_id), set()).add((template, False))
 
     compatibility_options = {
         (row["kind"], f"{row['stat_id']}|{option['value']}")
@@ -149,13 +203,17 @@ def add_english_matchers(
         ref_template = row["ref"].replace("+#", "#")
         for field, negated in (("english", False), ("english_negated", True)):
             templates = sorted(template for template, negate in matches if negate == negated)
-            row.pop(field, None)
+            previous = row.pop(field, ())
+            existing = previous if preserve_existing else ()
             if templates:
                 # nullは同じ文型のrefを再利用し、同梱データの重複を避ける。
-                row[field] = list(dict.fromkeys(
+                compact = (
                     None if template.replace("+#", "#") == ref_template else template
                     for template in templates
-                ))
+                )
+                row[field] = list(dict.fromkeys((*existing, *compact)))
+            elif existing:
+                row[field] = existing
         for option in row["options"]:
             templates = options.get((*key, str(option["value"])), ())
             if not option.get("english") and len(templates) == 1:
@@ -864,46 +922,48 @@ def unresolved_trade_entries(payload: dict, jp_trade: dict) -> list[dict]:
     return rows
 
 
-def official_trade_entry_snapshot(jp_trade: dict) -> dict:
+def official_trade_entry_snapshot(jp_trade: dict, en_trade: dict | None = None) -> dict:
     """新リーグ差分の基準にする、対応対象の公式Stat一覧を返す。"""
+    ja = _trade_entries(jp_trade)
+    en = _trade_entries(en_trade) if en_trade is not None else {}
     entries = [
-        {"kind": kind, "stat_id": stat_id, "japanese": str(entry.get("text", ""))}
-        for (kind, stat_id), entry in sorted(_trade_entries(jp_trade).items())
+        {
+            "kind": kind,
+            "stat_id": stat_id,
+            "japanese": ja[(kind, stat_id)].get("text") if (kind, stat_id) in ja else None,
+            **({"english": en.get((kind, stat_id), {}).get("text")} if en_trade is not None else {}),
+        }
+        for kind, stat_id in sorted(ja.keys() | en.keys())
         if kind in SUPPORTED_KINDS or _is_skill_effect(kind, stat_id)
     ]
     return {"schema_version": 1, "entries": entries}
 
 
 def diff_official_trade_entries(previous: dict, current: dict) -> dict:
-    """公式Trade Statの追加・削除・日本語文面変更をレビュー用に列挙する。"""
-    def keyed(payload: dict) -> dict[tuple[str, str], str]:
+    """公式Trade Statの追加・削除・文面変更をレビュー用に列挙する。"""
+    def keyed(payload: dict) -> dict[tuple[str, str], dict]:
         return {
-            (str(row.get("kind", "")), str(row.get("stat_id", ""))):
-                str(row.get("japanese", ""))
+            (row["kind"], row["stat_id"]): row
             for row in payload.get("entries", ())
         }
 
     old, new = keyed(previous), keyed(current)
+    changed = []
+    for key in sorted(old.keys() & new.keys()):
+        before, after = old[key], new[key]
+        languages = [lang for lang in ("japanese", "english") if lang in before and lang in after]
+        if any(before[lang] != after[lang] for lang in languages):
+            changed.append({
+                "kind": key[0], "stat_id": key[1],
+                **{f"previous_{lang}": before[lang] for lang in languages},
+                **{f"current_{lang}": after[lang] for lang in ("japanese", "english") if lang in after},
+            })
     return {
         "previous_count": len(old),
         "current_count": len(new),
-        "added": [
-            {"kind": kind, "stat_id": stat_id, "japanese": new[(kind, stat_id)]}
-            for kind, stat_id in sorted(set(new) - set(old))
-        ],
-        "removed": [
-            {"kind": kind, "stat_id": stat_id, "japanese": old[(kind, stat_id)]}
-            for kind, stat_id in sorted(set(old) - set(new))
-        ],
-        "changed": [
-            {
-                "kind": kind, "stat_id": stat_id,
-                "previous_japanese": old[(kind, stat_id)],
-                "current_japanese": new[(kind, stat_id)],
-            }
-            for kind, stat_id in sorted(set(old) & set(new))
-            if old[(kind, stat_id)] != new[(kind, stat_id)]
-        ],
+        "added": [new[key].copy() for key in sorted(new.keys() - old.keys())],
+        "removed": [old[key].copy() for key in sorted(old.keys() - new.keys())],
+        "changed": changed,
     }
 
 

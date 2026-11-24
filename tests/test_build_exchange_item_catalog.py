@@ -1,3 +1,8 @@
+import gzip
+import json
+import sys
+
+from scripts import build_exchange_item_catalog as builder
 from scripts.build_exchange_item_catalog import (
     POE1_REMOVED_EXCHANGE_ITEM_IDS,
     _category,
@@ -234,6 +239,14 @@ def test_confirmed_poe1_in_game_category_overrides_are_deterministic():
         "Metadata/Items/MapFragments/AtlasAllflamePack": "allflame",
         "Metadata/Items/MapFragments/CloisterAllflamePack": "allflame",
         "Metadata/Items/MapFragments/PantheonAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/BetrayalAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/ResplendenceAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/PropagationAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/MeatSackAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/WildwoodAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/CleansedAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/GoldAllflamePack": "allflame",
+        "Metadata/Items/MapFragments/ToadAllflamePack": "allflame",
     }
     assert {
         item_id: _category(POE1, "Fragments", item_id, "Example")
@@ -355,6 +368,66 @@ def test_confirmed_observed_message_in_a_bottle_is_added_without_static_row():
         "filename": "MessageInABottle.png",
     }
     assert result["unmapped_observed"] == []
+
+
+def test_catalog_cli_preserves_confirmed_ducats_and_prefers_restored_static(
+    monkeypatch, tmp_path
+):
+    output = tmp_path / "catalog.json"
+    monkeypatch.setattr(sys, "argv", ["build_exchange_item_catalog.py", "--output", str(output)])
+    static_by_url = {}
+    monkeypatch.setattr(
+        builder, "_fetch_json", lambda url: (static_by_url.get(url, {"result": []}), "0" * 64)
+    )
+
+    builder.main()
+    previous = json.loads(output.read_text(encoding="utf-8"))
+    ducats = {row["id"]: row for row in previous["realms"][POE1]["items"]}
+    assert len(ducats) == 11
+    assert all(row["category"] == "allflame" for row in ducats.values())
+    assert all(
+        row["icon"]["kind"] == "remote"
+        and row["icon"]["url"].startswith("https://web.poecdn.com/")
+        for row in ducats.values()
+    )
+    assert previous["realms"][POE1]["unmapped_observed"] == []
+
+    restored = "Metadata/Items/Deepwater/DeepwaterAbyssCurrency"
+    en, ja = _static("Ducats", "merricks-ducat", "Merrick's Ducat", "公式の表示名")
+    static_by_url[builder.STATIC_URLS[POE1]["en"]] = en
+    static_by_url[builder.STATIC_URLS[POE1]["ja"]] = ja
+    builder.main()
+    updated = json.loads(output.read_text(encoding="utf-8"))
+    rows = {row["id"]: row for row in updated["realms"][POE1]["items"]}
+    assert rows.pop(restored) == {
+        **ducats.pop(restored),
+        "ja": "公式の表示名",
+        "item_order": 0,
+        "icon": {"kind": "remote", "url": "https://web.poecdn.com/gen/example.png"},
+    }
+    assert rows == ducats
+
+
+def test_catalog_cli_combines_previous_and_current_observations(monkeypatch, tmp_path):
+    previous_ids = {"previous-mapped", "previous-unmapped"}
+    output = tmp_path / "catalog.json"
+    output.write_text(json.dumps({"realms": {POE2: {
+        "items": [{"id": "previous-mapped"}],
+        "unmapped_observed": [{"id": "previous-unmapped"}],
+    }}}), encoding="utf-8")
+    with gzip.open(tmp_path / "observation.json.gz", "wt", encoding="utf-8") as cache:
+        json.dump({"markets": [{"market_pair": ["current", "previous-mapped"]}]}, cache)
+    monkeypatch.setattr(sys, "argv", [
+        "build_exchange_item_catalog.py", "--output", str(output), "--poe2-observed", str(tmp_path),
+    ])
+    monkeypatch.setattr(builder, "_fetch_json", lambda url: ({"result": []}, "0" * 64))
+
+    builder.main()
+
+    updated = json.loads(output.read_text(encoding="utf-8"))
+    assert {row["id"] for row in updated["realms"][POE2]["unmapped_observed"]} == (
+        previous_ids | {"current"}
+    )
 
 
 def test_official_static_message_in_a_bottle_icon_replaces_bundled_fallback():

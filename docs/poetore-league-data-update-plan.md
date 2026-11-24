@@ -133,9 +133,15 @@ Markdownの先頭には次の要約を置く。
 
 ## 想定コマンド
 
-最終的には、総合入口を1つ用意する。
+週次ワークフローは毎週月曜 00:00 UTC に公式APIを確認する。手動起動でも同じ手順で、
+Statsの日英差分、英語effectの差分、Itemsの日英構造、PoE1・PoE2のstaticハッシュと
+未収録のカレンシー交換候補を確認できる。結果は `build/poetore-official-check-report.json`
+と `build/poetore-official-check-report.md` に出力する。
 
 ```bash
+# 公式APIの差分を軽量チェック
+python scripts/update_poetore_trade_data.py --check-official
+
 # lock済み入力と現在の公式日英データを監査
 python scripts/update_poetore_trade_data.py
 
@@ -163,11 +169,27 @@ python scripts/update_poetore_trade_data.py --refresh --official-mods-only
 2. 現行のsource lockと配布データのhashを記録する
 3. 上流障害と区別するため、日英公式Trade APIへ疎通確認する
 
+### カレンシー交換カタログの更新
+
+リポジトリのルートから、RePoE の PoE1 名称辞書を更新し、公式 Trade static の日英データでカタログを再生成する。
+次の PowerShell 例では Covens の観測キャッシュを追加で読み込む。
+
+```powershell
+python scripts/build_currency_exchange_item_names.py --repoe-url https://repoe-fork.github.io/base_items.min.json data/poetore/currency_exchange/poe1_item_names.json
+python scripts/build_exchange_item_catalog.py --poe1-observed "$env:APPDATA/PoENavi/poetore-official-exchange/raw/poe1/covens-f708ee75ff"
+python scripts/update_poetore_trade_data.py --check-official
+```
+
+リーグ更新時は `--poe1-observed` に対象リーグのキャッシュフォルダを指定する。
+`--poe2-observed` も同様に指定できる。どちらも省略可能で、生成先に既存カタログがあれば
+収録済み ID と `unmapped_observed` を引き継ぐ。Ducats は公式 static の収録が復帰するまで確認済みの定義を使う。
+再生成後は項目の増減と `unmapped_observed` を確認し、公式差分レポートで static の日英ハッシュと未収録候補を確認する。
+
 ### Dry-run
 
-1. `--refresh`で候補を取得・生成する
+1. `--check-official`で差分を確認し、必要なStatルールを追加して`--refresh`で候補を生成する
 2. Markdownレポートの先頭要約を確認する
-3. 新アイテム、新Stat、削除、日英欠落、pseudo差分を確認する
+3. 新アイテム、新Stat、削除、日英欠落、`effect_english_changes`、pseudo差分を確認する
 4. `BLOCKED`の場合は正本を変更せず原因を調査する
 
 ### レビュー
@@ -181,8 +203,8 @@ python scripts/update_poetore_trade_data.py --refresh --official-mods-only
 ### Apply
 
 1. レビューした候補manifestを指定して`--apply`する
-2. 配布データとsource lockを原子的に更新する
-3. 変更対象外ファイルに差分がないことを確認する
+2. 配布データ、source lock、公式Statsの日英基準、`scripts/poetore-effect-english.json` を原子的に更新する
+3. `--check-official` でStatsと英語effectの差分を再確認し、変更対象外ファイルの差分も確認する
 4. 更新レポートをレビュー記録として残す
 
 ### 公開前

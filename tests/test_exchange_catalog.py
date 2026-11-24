@@ -302,6 +302,12 @@ def test_poe1_late_330_exchange_additions_are_pinned():
             "神性のオールフレイムの残り火",
             "allflame",
         ),
+        "Metadata/Items/Currency/CurrencyAddModToRareOriginator": (
+            "Originator's Exalted Orb", "Originator's Exalted Orb", "currency"
+        ),
+        "Metadata/Items/Currency/CurrencyStackedExalt": (
+            "Primordial Exalted Orb", "Primordial Exalted Orb", "currency"
+        ),
     }
 
     assert {
@@ -420,6 +426,10 @@ def test_poe1_divination_cards_use_one_bundled_icon():
     cards = [item for item in exchange_catalog_items(POE1) if item.category == "cards"]
     assert len(cards) > 400
     assert {item.icon_kind for item in cards} == {"divination_card"}
+    assert {
+        "Metadata/Items/DivinationCards/DivinationCardRebirthAndRenewal",
+        "Metadata/Items/DivinationCards/DivinationCardTheReflectionoftheHeart",
+    } <= {item.item_id for item in cards}
     icon = divination_card_icon_path()
     assert icon.is_file()
     content = icon.read_bytes()
@@ -437,7 +447,9 @@ def test_current_unmapped_observed_items_are_explicit_and_not_catalog_items():
         version: {row["en"] for row in payload["realms"][version]["unmapped_observed"]}
         for version in (POE1, POE2)
     }
-    assert missing[POE1] == set()
+    assert payload["realms"][POE1]["unmapped_observed"] == []
+    assert len(payload["realms"][POE2]["items"]) == 754
+    assert len(payload["realms"][POE2]["unmapped_observed"]) == 6
     assert missing[POE2] == {
         "Raven's Reflection",
         "Helbrym's Hide",

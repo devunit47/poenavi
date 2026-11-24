@@ -1,11 +1,16 @@
 """切り離しパネル用の独立ウィンドウ。"""
 
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
 
-from src.ui.appearance import theme_rgba
+from src.app_mode import POENAVI_MODE
+from src.ui.appearance import theme_color
+from src.ui.app_theme import theme_for_mode
+from src.ui.dialog_theme import UI_METRICS
+from src.ui.toolbar_button import ToolbarButton
+from src.ui.toolbar_icons import panel_minimize_icon, panel_return_icon
 from src.ui.styles import Styles
 
 
@@ -30,41 +35,66 @@ class DetachedPanelWindow(QWidget):
         self._content_size_policy = content.sizePolicy()
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
         self.setWindowTitle(title)
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(f"background-color: {Styles.BACKGROUND_COLOR}; color: {Styles.TEXT_COLOR};")
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setObjectName("detachedPanelWindow")
+        border = theme_color("border", "#343B3E")
         self.setMinimumSize(320, 180)
-        self.resize(max(320, content.sizeHint().width()), max(180, content.sizeHint().height()))
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        self._container = QWidget(self)
+        self._container.setObjectName("detachedPanelRoot")
+        self._container.setAttribute(Qt.WA_StyledBackground, True)
+        self._container.setStyleSheet(f"""
+            QWidget#detachedPanelRoot {{
+                background-color: {Styles.BACKGROUND_COLOR};
+                border: 1px solid {border};
+                border-radius: 10px;
+            }}
+            QWidget#detachedPanelHeader {{ border-bottom: 1px solid {border}; }}
+        """)
+        outer_layout.addWidget(self._container)
+
+        self._content_layout = layout = QVBoxLayout(self._container)
+        layout.setContentsMargins(*([UI_METRICS.overlay_margin] * 4))
+        layout.setSpacing(UI_METRICS.inline_gap)
         self.header = QWidget()
+        self.header.setObjectName("detachedPanelHeader")
         self.header.setAttribute(Qt.WA_StyledBackground, True)
         self.header.setCursor(QCursor(Qt.OpenHandCursor))
-        self.header.setStyleSheet(
-            f"background-color: {Styles.BACKGROUND_COLOR}; border-bottom: 1px solid {theme_rgba('accent', 176, 255, 123, 0.35)};"
-        )
         self.header.installEventFilter(self)
         header_layout = QHBoxLayout(self.header)
-        header_layout.setContentsMargins(8, 5, 8, 5)
+        header_layout.setContentsMargins(0, 0, 0, UI_METRICS.inline_gap)
+        header_layout.setSpacing(UI_METRICS.inline_gap)
         self.title_label = QLabel(title)
         self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.title_label.setStyleSheet(f"color: {Styles.TEXT_COLOR}; font-weight: bold;")
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
-        minimize_button = QPushButton("─ 最小化")
-        minimize_button.setStyleSheet(Styles.BUTTON)
-        minimize_button.setCursor(QCursor(Qt.PointingHandCursor))
-        minimize_button.clicked.connect(self.minimize_panel)
-        header_layout.addWidget(minimize_button)
-        return_button = QPushButton("↙ 本体へ戻す")
-        return_button.setStyleSheet(Styles.BUTTON)
-        return_button.setCursor(QCursor(Qt.PointingHandCursor))
-        return_button.clicked.connect(self.return_to_main)
-        header_layout.addWidget(return_button)
-        self.header.setFixedHeight(self.header.sizeHint().height())
+        color = theme_for_mode(POENAVI_MODE).muted_text
+        self.minimize_button = ToolbarButton(border_width=0, mode=POENAVI_MODE)
+        self.return_button = ToolbarButton(border_width=0, mode=POENAVI_MODE)
+        for button, icon, tooltip, handler in (
+            (self.minimize_button, panel_minimize_icon(color), "このパネルを最小化", self.minimize_panel),
+            (self.return_button, panel_return_icon(color), "本体へ戻す", self.return_to_main),
+        ):
+            button.setFixedSize(UI_METRICS.overlay_control_height, UI_METRICS.overlay_control_height)
+            button.setIcon(icon)
+            button.setIconSize(QSize(18, 18))
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.setCursor(QCursor(Qt.PointingHandCursor))
+            button.clicked.connect(handler)
+            header_layout.addWidget(button)
         layout.addWidget(self.header)
         layout.addWidget(content, stretch=1)
+        margin = UI_METRICS.overlay_margin * 2
+        self.resize(
+            max(320, content.sizeHint().width() + margin),
+            max(180, content.sizeHint().height() + self.header.sizeHint().height() + margin + UI_METRICS.inline_gap),
+        )
         self.resize_grip = QSizeGrip(self)
         self.resize_grip.setFixedSize(18, 18)
         self.resize_grip.setToolTip("ドラッグしてサイズ変更")

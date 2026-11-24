@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QPushButto
 
 from src.ui.detached_panel import DetachedPanelWindow
 from src.ui.main_window import MainWindow
+from src.ui.toolbar_button import ToolbarButton
 from src.utils.config_manager import ConfigManager
 
 
@@ -423,7 +424,6 @@ def test_register_detachable_panel_places_button_on_title_row():
     window.panel_registry = {}
     window._register_detachable_panel(
         "timer", "タイマー", [title, body], layout, header_widgets=(panel_controls,),
-        header_right_margin=10,
     )
 
     record = window.panel_registry["timer"]
@@ -432,12 +432,16 @@ def test_register_detachable_panel_places_button_on_title_row():
     assert header_layout.indexOf(panel_controls) < header_layout.indexOf(record["minimize_button"])
     assert header_layout.indexOf(record["detach_button"]) >= 0
     assert header_layout.indexOf(record["minimize_button"]) < header_layout.indexOf(record["detach_button"])
-    assert record["minimize_button"].text() == "─ 最小化"
-    assert header_layout.contentsMargins().right() == 10
+    for operation in ("minimize_button", "detach_button"):
+        button = record[operation]
+        assert isinstance(button, ToolbarButton)
+        assert not button.icon().isNull()
+        assert button.toolTip() == button.accessibleName()
+    assert header_layout.contentsMargins().right() == 0
     assert record["content"].layout().count() == 2
 
 
-def test_minimize_attached_timer_keeps_global_controls_and_restore_all_returns_it(monkeypatch):
+def test_minimize_and_restore_timer_keep_global_controls_at_the_top(monkeypatch):
     _app()
     host = QWidget()
     main_layout = QVBoxLayout(host)
@@ -446,7 +450,7 @@ def test_minimize_attached_timer_keeps_global_controls_and_restore_all_returns_i
     timer_button_layout = QHBoxLayout(timer_body)
     global_controls = QWidget()
     restore_all_button = QPushButton("パネルを全て表示")
-    timer_button_layout.addWidget(global_controls)
+    main_layout.addWidget(global_controls)
     main_layout.addWidget(title)
     main_layout.addWidget(timer_body)
 
@@ -455,7 +459,6 @@ def test_minimize_attached_timer_keeps_global_controls_and_restore_all_returns_i
     window.config = {"detached_panels": {"timer": {"detached": False}}}
     window.panel_registry = {}
     window.detached_panel_windows = {}
-    window.timer_button_layout = timer_button_layout
     window.global_controls_widget = global_controls
     window.restore_all_panels_btn = restore_all_button
     window.poe_version = "poe1"
@@ -473,7 +476,8 @@ def test_minimize_attached_timer_keeps_global_controls_and_restore_all_returns_i
     window.restore_all_minimized_panels()
 
     assert not window.panel_registry["timer"]["content"].isHidden()
-    assert timer_button_layout.indexOf(global_controls) >= 0
+    assert main_layout.indexOf(global_controls) == 0
+    assert timer_button_layout.indexOf(global_controls) == -1
     assert window.config["detached_panels"]["timer"]["minimized"] is False
     assert restore_all_button.isHidden()
 
@@ -487,7 +491,11 @@ def test_minimize_detached_panel_hides_window_and_restore_all_shows_it(monkeypat
     window.detach_panel("timer")
     panel_window = window.detached_panel_windows["timer"]
 
-    window.minimize_panel("timer")
+    assert isinstance(panel_window.minimize_button, ToolbarButton)
+    assert isinstance(panel_window.return_button, ToolbarButton)
+    assert not panel_window.return_button.icon().isNull()
+    assert panel_window.return_button.accessibleName() == panel_window.return_button.toolTip()
+    panel_window.minimize_button.click()
 
     assert panel_window.isHidden()
     assert window.config["detached_panels"]["timer"]["detached"] is True
@@ -504,6 +512,7 @@ def test_minimize_detached_panel_hides_window_and_restore_all_shows_it(monkeypat
 def test_collapsing_guide_does_not_hide_the_attached_map_panel():
     _app()
     window = MainWindow.__new__(MainWindow)
+    window.config = {}
     window.guide_expanded = False
     window.zone_header_expanded = True
     window.guide_text_expanded = True
@@ -548,7 +557,7 @@ def test_detaching_timer_keeps_global_controls_in_main_and_timer_controls_detach
     start_button = QPushButton("Start")
     global_controls = QWidget()
     timer_button_layout.addWidget(start_button)
-    timer_button_layout.addWidget(global_controls)
+    main_layout.addWidget(global_controls)
     panel_layout.addWidget(timer_controls)
     main_layout.addWidget(timer_panel)
 
@@ -556,13 +565,12 @@ def test_detaching_timer_keeps_global_controls_in_main_and_timer_controls_detach
     QMainWindow.__init__(window)
     window.config = {"detached_panels": {"timer": {"detached": False}}}
     window.detached_panel_windows = {}
-    window.timer_button_layout = timer_button_layout
     window.global_controls_widget = global_controls
     window.panel_registry = {
         "timer": {
             "content": timer_panel,
             "layout": main_layout,
-            "index": 0,
+            "index": 1,
             "stretch": 0,
             "title": "タイマー",
             "detach_button": None,
@@ -579,8 +587,9 @@ def test_detaching_timer_keeps_global_controls_in_main_and_timer_controls_detach
 
     window.restore_panel("timer")
 
-    assert main_layout.indexOf(timer_panel) == 0
-    assert timer_button_layout.indexOf(global_controls) >= 0
+    assert main_layout.indexOf(timer_panel) == 1
+    assert main_layout.indexOf(global_controls) == 0
+    assert timer_button_layout.indexOf(global_controls) == -1
 
 
 def test_main_window_can_shrink_to_control_row_when_all_visible_panels_are_detached():
@@ -653,3 +662,15 @@ def test_main_window_stays_collapsed_after_layout_updates_when_last_panel_detach
     _app().processEvents()
 
     assert window.height() == window.DETACHED_ONLY_MIN_HEIGHT
+
+
+def test_detached_panel_paints_rounded_container_background():
+    _app()
+    panel_window = DetachedPanelWindow("timer", "タイマー", QWidget(), lambda *_args: None, lambda *_args: None)
+    panel_window.show()
+    _app().processEvents()
+    try:
+        image = panel_window.grab().toImage()
+        assert image.pixelColor(panel_window.width() // 2, panel_window.height() // 2).alpha() > 0
+    finally:
+        panel_window.close()

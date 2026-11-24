@@ -227,17 +227,23 @@ def test_timer_keeps_its_default_font_and_accepts_user_font(qapp, family, expect
 
 
 def test_main_background_override_preserves_existing_opacity(qapp):
-    from types import SimpleNamespace
-    from PySide6.QtWidgets import QWidget
+    from PySide6.QtWidgets import QFrame, QMainWindow, QWidget
     from src.ui.main_window import MainWindow
 
     configure_appearance({"overrides": {"overlay_bg": "#123456"}})
-    central = QWidget()
-    state = SimpleNamespace(centralWidget=lambda: central, guide_text_frame=QWidget(), guide_container=QWidget())
-    MainWindow._apply_bg_opacity(state, 50)
+    window = MainWindow.__new__(MainWindow)
+    QMainWindow.__init__(window)
+    central = QWidget(window)
+    central.setObjectName("centralWidget")
+    window.setCentralWidget(central)
+    window.guide_text_frame = QFrame(central)
+    window.guide_text_frame.setObjectName("guideTextFrame")
+    window.guide_container = QWidget(central)
+    window.guide_expanded = True
+    window._apply_bg_opacity(50)
     assert "rgba(18, 52, 86, 127)" in central.styleSheet()
-    assert "rgba(18, 52, 86, 80)" in state.guide_text_frame.styleSheet()
-    assert "rgba(18, 52, 86, 69)" in state.guide_container.styleSheet()
+    assert "rgba(18, 52, 86, 80)" in window.guide_text_frame.styleSheet()
+    assert "rgba(18, 52, 86, 69)" in window.guide_container.styleSheet()
 
 
 def test_trade_results_use_shared_colors_and_scale_existing_size_profile(qapp):

@@ -175,20 +175,24 @@ def test_main_window_drag_falls_back_when_system_move_is_unavailable():
     assert window.drag_position == QPoint(80, 70)
 
 
-def test_startup_check_skips_already_notified_release():
+def test_unowned_check_does_not_show_update_dialog():
     window = MainWindow.__new__(MainWindow)
     window.config = {"notified_update_version": "2.5.0"}
+    window._settings_update_open = False
     window._show_update_available = Mock()
 
-    window._on_update_check_finished(release_info(), False)
+    window._update_check_action = None
+    window._on_update_check_finished(release_info(), True)
 
     window._show_update_available.assert_not_called()
 
 
-def test_manual_check_shows_same_release_again():
+def test_manual_menu_check_shows_same_release_again():
     window = MainWindow.__new__(MainWindow)
     window.config = {"notified_update_version": "2.5.0"}
+    window._settings_update_open = False
     window._show_update_available = Mock()
+    window._update_check_action = "download"
 
     window._on_update_check_finished(release_info(), True)
 
@@ -197,6 +201,9 @@ def test_manual_check_shows_same_release_again():
 
 def test_manual_check_without_release_reports_latest():
     window = MainWindow.__new__(MainWindow)
+    window.config = {}
+    window._settings_update_open = False
+    window._update_check_action = "check"
     with patch("src.ui.main_window.show_update_message") as show_message:
         window._on_update_check_finished(None, True)
     show_message.assert_called_once_with(
@@ -209,7 +216,7 @@ def test_manual_check_without_release_reports_latest():
 
 def test_declining_apply_keeps_verified_download():
     window = MainWindow.__new__(MainWindow)
-    window._update_progress_dialog = None
+    progress = window._update_progress_dialog = Mock()
     window.update_controller = Mock()
 
     with patch(
@@ -218,6 +225,7 @@ def test_declining_apply_keeps_verified_download():
     ):
         window._on_update_download_ready(Path("PoENavi.zip"), release_info())
 
+    progress.accept.assert_called_once_with()
     window.update_controller.discard_download.assert_not_called()
     window.update_controller.launch_updater.assert_not_called()
 

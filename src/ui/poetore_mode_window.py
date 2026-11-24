@@ -4,7 +4,6 @@ import logging
 import sys
 import threading
 import time
-from math import cos, radians, sin
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -50,12 +49,15 @@ from src.ui.custom_command_settings import (
 from src.ui.toolbar_button import ToolbarButton
 from src.ui.mode_switcher import ModeSwitcherWidget, add_mode_switch_menu
 from src.ui.toolbar_icons import (
-    checking_icon, download_icon, finish_line_icon, hideout_notification_icon,
-    line_icon_canvas, map_mod_manager_icon, update_check_icon,
+    finish_line_icon, hideout_notification_icon,
+    image_manager_line_icon, line_icon_canvas, map_mod_manager_icon, memo_line_icon,
+    settings_line_icon,
 )
 from src.ui.window_screen import SCREEN_CHANGE_DEBOUNCE_MS, WindowScreenWatcher
-from src.update.release_client import parse_version
-from src.update.startup_gate import record_update_check_result, shared_update_controller
+from src.ui.update_dialogs import available_update_version, sync_update_action
+from src.update.startup_gate import (
+    UPDATE_CHECK_INTERVAL_MS, record_update_check_result, shared_update_controller,
+)
 from src.utils.chat_command import send_chat_command
 from src.utils.config_manager import ConfigManager
 from src.utils.feature_support import (
@@ -74,32 +76,11 @@ from src.utils.global_hotkeys import (
 from src.utils.log_path_detector import fill_missing_client_log_paths
 from src.utils.poe_version_data import POE1, POE2
 from src.utils.stash_tab_scroll import StashTabScrollController
-from src.version import APP_VERSION, with_fork_label
-
-
-UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
+from src.version import with_fork_label
 
 
 def _icon_canvas():
     return line_icon_canvas(resolve_app_theme(POETORE_THEME).muted_text)
-
-
-def _memo_icon() -> QIcon:
-    """A note page with a folded corner."""
-    pixmap, painter = _icon_canvas()
-    page = QPainterPath(QPointF(5.5, 3.5))
-    page.lineTo(14.5, 3.5)
-    page.lineTo(18.5, 7.5)
-    page.lineTo(18.5, 20.5)
-    page.lineTo(5.5, 20.5)
-    page.closeSubpath()
-    page.moveTo(14.5, 3.5)
-    page.lineTo(14.5, 7.5)
-    page.lineTo(18.5, 7.5)
-    painter.drawPath(page)
-    painter.drawLine(QPointF(8.5, 12.0), QPointF(15.5, 12.0))
-    painter.drawLine(QPointF(8.5, 16.0), QPointF(13.5, 16.0))
-    return finish_line_icon(pixmap, painter)
 
 
 def _heist_curio_icon() -> QIcon:
@@ -155,37 +136,6 @@ def _abyss_desecration_icon() -> QIcon:
     eye.quadTo(12.0, 19.2, 5.5, 12.0)
     painter.drawPath(eye)
     painter.drawEllipse(QPointF(12.0, 12.0), 1.9, 1.9)
-    return finish_line_icon(pixmap, painter)
-
-
-def _image_manager_icon() -> QIcon:
-    """Stacked picture cards."""
-    pixmap, painter = _icon_canvas()
-    back = QPainterPath(QPointF(3.5, 15.5))
-    back.lineTo(3.5, 5.5)
-    back.quadTo(3.5, 3.5, 5.5, 3.5)
-    back.lineTo(16.5, 3.5)
-    painter.drawPath(back)
-    painter.drawRoundedRect(QRectF(7.0, 7.0, 13.5, 13.5), 1.6, 1.6)
-    painter.drawEllipse(QPointF(16.5, 11.2), 1.0, 1.0)
-    mountain = QPainterPath(QPointF(7.4, 18.5))
-    mountain.lineTo(12.0, 13.8)
-    mountain.lineTo(17.1, 18.5)
-    painter.drawPath(mountain)
-    return finish_line_icon(pixmap, painter)
-
-
-def _settings_icon() -> QIcon:
-    """A six-tooth gear."""
-    pixmap, painter = _icon_canvas()
-    tooth = ((-28, 6.6), (-13, 6.6), (-10, 8.8), (10, 8.8), (13, 6.6), (28, 6.6))
-    outline = QPolygonF()
-    for center_angle in range(-90, 270, 60):
-        for offset, radius in tooth:
-            angle = radians(center_angle + offset)
-            outline.append(QPointF(12.0 + radius * cos(angle), 12.0 + radius * sin(angle)))
-    painter.drawPolygon(outline)
-    painter.drawEllipse(QPointF(12.0, 12.0), 2.6, 2.6)
     return finish_line_icon(pixmap, painter)
 
 
@@ -566,8 +516,9 @@ class PoetoreModeWindow(QMainWindow):
         self._focus_flash_timer.setInterval(1800)
         self._focus_flash_timer.timeout.connect(lambda: self._set_focus_button_flash(False))
 
+        icon_color = resolve_app_theme(POETORE_THEME).muted_text
         self.memo_button = self._header_button("", "共通メモを開く")
-        self.memo_button.setIcon(_memo_icon())
+        self.memo_button.setIcon(memo_line_icon(icon_color))
         self.memo_button.setIconSize(QSize(24, 24))
         self.heist_settings_button = self._header_button(
             "", "ハイスト報酬OCR設定を開く"
@@ -590,7 +541,7 @@ class PoetoreModeWindow(QMainWindow):
         self.cheat_sheets_button = self._header_button(
             "", "Cheat sheetsの画像を登録・管理"
         )
-        self.cheat_sheets_button.setIcon(_image_manager_icon())
+        self.cheat_sheets_button.setIcon(image_manager_line_icon(icon_color))
         self.cheat_sheets_button.setIconSize(QSize(24, 24))
         self.map_mods_button = self._header_button("", "Map Mod管理")
         self.map_mods_button.setIcon(map_mod_manager_icon(resolve_app_theme(POETORE_THEME).muted_text))
@@ -599,7 +550,7 @@ class PoetoreModeWindow(QMainWindow):
             is_feature_supported(MAP_CHECK, self.poe_version)
         )
         self.settings_button = self._header_button("", "設定画面を開く")
-        self.settings_button.setIcon(_settings_icon())
+        self.settings_button.setIcon(settings_line_icon(icon_color))
         self.settings_button.setIconSize(QSize(24, 24))
         self.memo_button.clicked.connect(self.open_memo)
         self.heist_settings_button.clicked.connect(self.open_heist_settings)
@@ -1655,32 +1606,11 @@ class PoetoreModeWindow(QMainWindow):
             self._deferred_toolbar_update_message = None
             self._show_toolbar_update_message(icon, message)
 
-    def _available_update_version(self):
-        version = str(self.config.get("notified_update_version", "")).strip()
-        try:
-            if parse_version(version) > parse_version(APP_VERSION):
-                return version.removeprefix("v")
-        except ValueError:
-            pass
-        return ""
-
     def _sync_update_button_from_config(self):
-        theme = resolve_app_theme(POETORE_THEME)
-        version = self._available_update_version()
-        checking = self._update_controller.checking or self._update_gate_open
-        if checking:
-            tooltip = "アプリの更新を確認中…"
-            icon = checking_icon(theme.muted_text)
-        elif version:
-            tooltip = f"v{version} に更新"
-            icon = download_icon(theme.accent)
-        else:
-            tooltip = "アプリの更新をチェック"
-            icon = update_check_icon(theme.muted_text)
-        self.update_button.setIcon(icon)
-        self.update_button.setToolTip(tooltip)
-        self.update_button.setAccessibleName(tooltip)
-        self.update_button.setEnabled(not checking)
+        sync_update_action(
+            self.update_button, resolve_app_theme(POETORE_THEME), self.config,
+            busy=self._update_controller.checking or self._update_gate_open,
+        )
 
     def _run_toolbar_update_action(self):
         self._start_update_check(manual=True)
@@ -1690,7 +1620,7 @@ class PoetoreModeWindow(QMainWindow):
             return
         if manual:
             self._toolbar_update_action = (
-                "download" if self._available_update_version() else "check"
+                "download" if available_update_version(self.config) else "check"
             )
         self._update_controller.check(manual)
 

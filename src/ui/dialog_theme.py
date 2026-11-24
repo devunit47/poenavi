@@ -137,9 +137,9 @@ POETORE_DIALOG_THEME = DialogTheme(
 
 
 def icon_button_stylesheet(*, selector="QPushButton", border_width=1, content="", text=None,
-                           disabled=None, focus_selector=":focus") -> str:
+                           disabled=None, focus_selector=":focus", mode=POETORE_MODE) -> str:
     """Paint icon-button states while keeping the existing box metrics."""
-    tokens = resolve_tokens(current_appearance(), POETORE_MODE)
+    tokens = resolve_tokens(current_appearance(), mode)
     gray = tokens.icon_button_gray
     radius = POETORE_DIALOG_THEME.radius
     return f"""
@@ -196,8 +196,10 @@ def build_dialog_stylesheet(theme: DialogTheme) -> str:
     if theme is POENAVI_DIALOG_THEME or theme is POETORE_DIALOG_THEME:
         theme = resolve_dialog_theme(theme)
     root = f'QDialog[dialogTheme="{theme.name}"]'
-    icon_buttons = (icon_button_stylesheet(selector=f'{root} QPushButton[buttonRole="icon"]')
-                    if theme.name == POETORE_MODE else "")
+    icon_buttons = icon_button_stylesheet(
+        selector=f'{root} QPushButton[buttonRole="icon"]', mode=theme.name,
+        text=theme.text, disabled=theme.disabled,
+    )
     checkbox_asset = _qss_url("ui-checkbox-checked.svg")
     radio_asset = _qss_url("ui-radio-checked.svg")
     return f"""

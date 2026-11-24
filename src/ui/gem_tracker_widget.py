@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor
 
-from src.ui.appearance import theme_color, theme_font_family, theme_font_size, theme_rgba
+from src.ui.appearance import theme_color, theme_font_size, theme_rgba
+from src.ui.dialog_theme import (
+    POENAVI_DIALOG_THEME, UI_METRICS, apply_dialog_theme, equalize_button_sizes, resolve_dialog_theme,
+)
 from src.ui.styles import Styles
 
 
@@ -48,41 +51,26 @@ class PoBImportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("PoBコードインポート")
-        self.setFixedSize(500, 350)
-        self.setStyleSheet(f"""
-            QDialog {{
-                background: {theme_color('background', '#1a1a2e')};
-                color: {Styles.TEXT_COLOR};
-            }}
-        """)
+        self.resize(500, 350)
+        apply_dialog_theme(self, resolve_dialog_theme(POENAVI_DIALOG_THEME))
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 15, 20, 15)
-        layout.setSpacing(10)
+        layout.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        layout.setSpacing(UI_METRICS.control_gap)
         
         # 説明
         desc = QLabel(
             "Path of Building のエクスポートコードを貼り付けてください。\n"
             "PoBで「Export」→「Copy」でクリップボードにコピーできます。"
         )
-        desc.setStyleSheet(f"color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(13)}px;")
+
         desc.setWordWrap(True)
         layout.addWidget(desc)
         
         # テキスト入力
         self.text_edit = QTextEdit()
         self.text_edit.setPlaceholderText("PoBコード（Base64）をここに貼り付け...")
-        self.text_edit.setStyleSheet(f"""
-            QTextEdit {{
-                background: {theme_color('control', '#2a2a2a')};
-                color: {Styles.TEXT_COLOR};
-                border: 1px solid {theme_color('border', '#555')};
-                border-radius: 4px;
-                padding: 8px;
-                font-family:  "{theme_font_family('Consolas')}";
-                font-size: {theme_font_size(12)}px;
-            }}
-        """)
+
         layout.addWidget(self.text_edit, stretch=1)
         
         # ボタン
@@ -90,30 +78,17 @@ class PoBImportDialog(QDialog):
         btn_layout.addStretch()
         
         cancel_btn = QPushButton("キャンセル")
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {theme_color('muted_text', '#888')};
-                border: 1px solid {theme_color('border', '#555')}; border-radius: 4px;
-                padding: 6px 16px; font-size: {theme_font_size(13)}px;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('control', 255, 255, 255, 0.1)}; }}
-        """)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
         
         import_btn = QPushButton("インポート")
-        import_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {theme_color('accent_soft', '#4488ff')}; color: {theme_color('text', '#ffffff')};
-                border: none; border-radius: 4px;
-                padding: 6px 16px; font-size: {theme_font_size(13)}px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {theme_color('accent_soft', '#5599ff')}; }}
-        """)
+        import_btn.setProperty("buttonRole", "primary")
         import_btn.clicked.connect(self.accept)
         btn_layout.addWidget(import_btn)
         
+        btn_layout.setSpacing(UI_METRICS.control_gap)
         layout.addLayout(btn_layout)
+        equalize_button_sizes((cancel_btn, import_btn), minimum_width=UI_METRICS.action_width)
     
     def get_pob_code(self) -> str:
         return self.text_edit.toPlainText().strip()
@@ -125,34 +100,28 @@ class PoBSkillSetSelectionDialog(QDialog):
     def __init__(self, skill_sets: list[dict], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Skill set選択")
-        self.setFixedSize(420, 420)
+        self.resize(420, 420)
         self._checkboxes = []
-        self.setStyleSheet(f"""
-            QDialog {{
-                background: {theme_color('background', '#1a1a2e')};
-                color: {Styles.TEXT_COLOR};
-            }}
-        """)
+        apply_dialog_theme(self, resolve_dialog_theme(POENAVI_DIALOG_THEME))
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 15, 20, 15)
-        layout.setSpacing(10)
+        layout.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        layout.setSpacing(UI_METRICS.control_gap)
 
         desc = QLabel(
             "ジェム取得支援に取り込むSkill setを選んでください。\n"
             "Act中に不要なEndgame用セットなどはチェックを外せます。"
         )
-        desc.setStyleSheet(f"color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(13)}px;")
+
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {theme_color('border', '#444')}; background: {theme_color('background', '#202035')}; }}")
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(10, 8, 10, 8)
-        content_layout.setSpacing(6)
+        content_layout.setContentsMargins(*([UI_METRICS.panel_padding] * 4))
+        content_layout.setSpacing(UI_METRICS.inline_gap)
 
         for skill_set in skill_sets:
             title = skill_set.get("title", "") or f"Skill set {skill_set.get('index', 0) + 1}"
@@ -162,10 +131,7 @@ class PoBSkillSetSelectionDialog(QDialog):
             cb = QCheckBox(label)
             cb.setChecked(True)
             cb.setProperty("skill_set_id", str(skill_set.get("id", "")))
-            cb.setStyleSheet(f"""
-                QCheckBox {{ color: {Styles.TEXT_COLOR}; font-size: {theme_font_size(13)}px; padding: 2px; }}
-                QCheckBox::indicator {{ width: 15px; height: 15px; }}
-            """)
+
             content_layout.addWidget(cb)
             self._checkboxes.append(cb)
 
@@ -174,11 +140,11 @@ class PoBSkillSetSelectionDialog(QDialog):
         layout.addWidget(scroll, stretch=1)
 
         quick_layout = QHBoxLayout()
+        quick_layout.setSpacing(UI_METRICS.control_gap)
         all_btn = QPushButton("すべて選択")
         act_btn = QPushButton("Actっぽいもの")
         clear_btn = QPushButton("すべて解除")
         for btn in (all_btn, act_btn, clear_btn):
-            btn.setStyleSheet(self._small_btn_style())
             quick_layout.addWidget(btn)
         quick_layout.addStretch()
         all_btn.clicked.connect(lambda: self._set_all_checked(True))
@@ -189,15 +155,16 @@ class PoBSkillSetSelectionDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         cancel_btn = QPushButton("キャンセル")
-        cancel_btn.setStyleSheet(self._cancel_btn_style())
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
 
         import_btn = QPushButton("選択してインポート")
-        import_btn.setStyleSheet(self._primary_btn_style())
+        import_btn.setProperty("buttonRole", "primary")
         import_btn.clicked.connect(self._accept_if_any_selected)
         btn_layout.addWidget(import_btn)
+        btn_layout.setSpacing(UI_METRICS.control_gap)
         layout.addLayout(btn_layout)
+        equalize_button_sizes((cancel_btn, import_btn), minimum_width=UI_METRICS.action_width)
 
     def selected_skill_set_ids(self) -> list[str]:
         return [
@@ -235,36 +202,6 @@ class PoBSkillSetSelectionDialog(QDialog):
             QMessageBox.warning(self, "Skill set未選択", "少なくとも1つSkill setを選択してください。")
             return
         self.accept()
-
-    def _small_btn_style(self):
-        return f"""
-            QPushButton {{
-                background: transparent; color: {theme_color('muted_text', '#bbbbbb')};
-                border: 1px solid {theme_color('border', '#555')}; border-radius: 4px;
-                padding: 4px 8px; font-size: {theme_font_size(12)}px;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('control', 255, 255, 255, 0.1)}; }}
-        """
-
-    def _cancel_btn_style(self):
-        return f"""
-            QPushButton {{
-                background: transparent; color: {theme_color('muted_text', '#888')};
-                border: 1px solid {theme_color('border', '#555')}; border-radius: 4px;
-                padding: 6px 16px; font-size: {theme_font_size(13)}px;
-            }}
-            QPushButton:hover {{ background: {theme_rgba('control', 255, 255, 255, 0.1)}; }}
-        """
-
-    def _primary_btn_style(self):
-        return f"""
-            QPushButton {{
-                background: {theme_color('accent_soft', '#4488ff')}; color: {theme_color('text', '#ffffff')};
-                border: none; border-radius: 4px;
-                padding: 6px 16px; font-size: {theme_font_size(13)}px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {theme_color('accent_soft', '#5599ff')}; }}
-        """
 
 
 class GemTrackerWidget(QWidget):
@@ -481,8 +418,9 @@ class GemTrackerWidget(QWidget):
             
             # ヘッダーフレーム
             header_frame = QFrame()
+            header_frame.setObjectName("gemQuestHeader")
             header_frame.setStyleSheet(f"""
-                QFrame {{
+                QFrame#gemQuestHeader {{
                     background: {theme_rgba('accent_soft', 176, 255, 123, 0.08)};
                     border: none;
                     border-radius: 3px;

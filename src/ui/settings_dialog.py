@@ -27,6 +27,8 @@ from src.ui.app_theme import POENAVI_THEME, POETORE_THEME
 from src.ui.dialog_theme import (
     POENAVI_DIALOG_THEME,
     DialogTheme,
+    UI_METRICS,
+    equalize_button_sizes,
     apply_dialog_theme,
     build_dialog_stylesheet,
 )
@@ -2004,8 +2006,8 @@ class SettingsDialog(QDialog):
     def setup_ui(self):
         theme = self.theme
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(*([UI_METRICS.page_margin] * 4))
+        layout.setSpacing(UI_METRICS.section_gap)
 
         self.title_label = QLabel("設定")
         self.title_label.setProperty("uiRole", "title")
@@ -2840,6 +2842,8 @@ class SettingsDialog(QDialog):
 
         self.guide_progress_reset_btn.setProperty("buttonRole", "danger")
         self._clear_legacy_control_styles(self)
+        self.footer_layout.setSpacing(UI_METRICS.control_gap)
+        equalize_button_sizes((self.cancel_btn, self.ok_btn), minimum_width=UI_METRICS.action_width)
 
     @staticmethod
     def _clear_legacy_control_styles(root: QWidget) -> None:

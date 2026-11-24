@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.app_mode import POENAVI_MODE, POETORE_MODE
+from src.app_mode import POENAVI_MODE
 from src.ui.appearance import (
     resolve_app_theme,
     resolve_dialog_theme,
@@ -46,13 +46,13 @@ from src.ui.appearance import (
 )
 from src.poetore.window_position import path_of_exile_client_rect
 from src.ui.app_theme import POENAVI_THEME, POETORE_THEME
+from src.ui.toolbar_button import ToolbarButton
 from src.ui.dialog_theme import (
     UI_METRICS, equalize_button_sizes,
     POENAVI_DIALOG_THEME,
     POETORE_DIALOG_THEME,
     DialogTheme,
     apply_dialog_theme,
-    icon_button_stylesheet,
 )
 from src.ui.toolbar_icons import image_manager_icon
 from src.utils.config_manager import ConfigManager
@@ -161,7 +161,7 @@ class CheatSheetManagerDialog(QDialog):
         self._pending_deletions: list[dict] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(*([UI_METRICS.page_margin] * 4))
         layout.setSpacing(12)
 
         self.title_label = QLabel("Cheat sheet画像の管理")
@@ -261,11 +261,9 @@ class CheatSheetManagerDialog(QDialog):
         self.footer_layout.addWidget(self.save_button)
         layout.addLayout(self.footer_layout)
         self._refresh_list()
-        if self.theme.name == "poetore":
-            layout.setContentsMargins(*([UI_METRICS.page_margin] * 4))
-            layout.setSpacing(UI_METRICS.section_gap)
-            equalize_button_sizes((self.cancel_button, self.save_button), minimum_width=UI_METRICS.action_width)
-            equalize_button_sizes((self.up_button, self.down_button), expanding=True)
+        layout.setSpacing(UI_METRICS.section_gap)
+        equalize_button_sizes((self.cancel_button, self.save_button), minimum_width=UI_METRICS.action_width)
+        equalize_button_sizes((self.up_button, self.down_button), expanding=True)
 
     @staticmethod
     def _dialog_theme(theme) -> DialogTheme:
@@ -407,11 +405,10 @@ class CheatSheetOverlay(QWidget):
         manage = QPushButton("管理")
         manage.clicked.connect(self.manage_requested.emit)
         title_row.addWidget(manage)
-        close = QPushButton("×")
-        close.setFixedWidth(34)
-        if app_mode == POETORE_MODE:
-            close.setAccessibleName("閉じる")
-            close.setStyleSheet(icon_button_stylesheet())
+        close = ToolbarButton("×", mode=app_mode)
+        close.setFixedSize(34, UI_METRICS.overlay_control_height)
+        close.setToolTip("閉じる")
+        close.setAccessibleName(close.toolTip())
         close.clicked.connect(self.hide_and_save)
         title_row.addWidget(close)
         layout.addLayout(title_row)

@@ -1,5 +1,7 @@
 """Small theme-aware vector icons used by compact toolbar buttons."""
 
+from math import cos, radians, sin
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
@@ -214,6 +216,90 @@ def hideout_notification_icon(color, active) -> QIcon:
     painter.drawLine(QPointF(15.3, 20), QPointF(16.7, 20))
     if not active:
         painter.drawLine(QPointF(11.5, 10), QPointF(21, 19.5))
+    return finish_line_icon(pixmap, painter)
+
+
+def memo_line_icon(color) -> QIcon:
+    """A note page with a folded corner."""
+    pixmap, painter = line_icon_canvas(color)
+    page = QPainterPath(QPointF(5.5, 3.5))
+    page.lineTo(14.5, 3.5)
+    page.lineTo(18.5, 7.5)
+    page.lineTo(18.5, 20.5)
+    page.lineTo(5.5, 20.5)
+    page.closeSubpath()
+    page.moveTo(14.5, 3.5)
+    page.lineTo(14.5, 7.5)
+    page.lineTo(18.5, 7.5)
+    painter.drawPath(page)
+    painter.drawLine(QPointF(8.5, 12.0), QPointF(15.5, 12.0))
+    painter.drawLine(QPointF(8.5, 16.0), QPointF(13.5, 16.0))
+    return finish_line_icon(pixmap, painter)
+
+
+def image_manager_line_icon(color) -> QIcon:
+    """Stacked picture cards."""
+    pixmap, painter = line_icon_canvas(color)
+    back = QPainterPath(QPointF(3.5, 15.5))
+    back.lineTo(3.5, 5.5)
+    back.quadTo(3.5, 3.5, 5.5, 3.5)
+    back.lineTo(16.5, 3.5)
+    painter.drawPath(back)
+    painter.drawRoundedRect(QRectF(7.0, 7.0, 13.5, 13.5), 1.6, 1.6)
+    painter.drawEllipse(QPointF(16.5, 11.2), 1.0, 1.0)
+    mountain = QPainterPath(QPointF(7.4, 18.5))
+    mountain.lineTo(12.0, 13.8)
+    mountain.lineTo(17.1, 18.5)
+    painter.drawPath(mountain)
+    return finish_line_icon(pixmap, painter)
+
+
+def settings_line_icon(color) -> QIcon:
+    """A six-tooth gear."""
+    pixmap, painter = line_icon_canvas(color)
+    tooth = ((-28, 6.6), (-13, 6.6), (-10, 8.8), (10, 8.8), (13, 6.6), (28, 6.6))
+    outline = QPolygonF()
+    for center_angle in range(-90, 270, 60):
+        for offset, radius in tooth:
+            angle = radians(center_angle + offset)
+            outline.append(QPointF(12.0 + radius * cos(angle), 12.0 + radius * sin(angle)))
+    painter.drawPolygon(outline)
+    painter.drawEllipse(QPointF(12.0, 12.0), 2.6, 2.6)
+    return finish_line_icon(pixmap, painter)
+
+
+def vendor_presets_line_icon(color) -> QIcon:
+    """A stash box with a search magnifier."""
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawRoundedRect(QRectF(3, 5, 16, 4), 1, 1)
+    painter.drawPolyline(QPolygonF([
+        QPointF(4, 9), QPointF(4, 19), QPointF(11, 19),
+    ]))
+    painter.drawLine(QPointF(18, 9), QPointF(18, 10))
+    painter.drawEllipse(QPointF(15.5, 14.5), 3.5, 3.5)
+    painter.drawLine(QPointF(18, 17), QPointF(21, 20))
+    return finish_line_icon(pixmap, painter)
+
+
+def panel_minimize_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawLine(QPointF(5, 14), QPointF(19, 14))
+    return finish_line_icon(pixmap, painter)
+
+
+def panel_detach_icon(color) -> QIcon:
+    return external_link_icon(color)
+
+
+def panel_return_icon(color) -> QIcon:
+    pixmap, painter = line_icon_canvas(color)
+    painter.drawPolyline(QPolygonF([
+        QPointF(5, 8), QPointF(5, 19), QPointF(19, 19), QPointF(19, 12),
+    ]))
+    painter.drawLine(QPointF(20, 4), QPointF(10, 14))
+    painter.drawPolyline(QPolygonF([
+        QPointF(10, 9), QPointF(10, 14), QPointF(15, 14),
+    ]))
     return finish_line_icon(pixmap, painter)
 
 

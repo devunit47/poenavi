@@ -13,7 +13,36 @@ from PySide6.QtWidgets import (
 from src.ui.appearance import resolve_dialog_theme
 from src.ui.dialog_theme import POENAVI_DIALOG_THEME, POETORE_DIALOG_THEME
 from src.ui.styles import Styles
-from src.update.release_client import ReleaseInfo
+from src.ui.toolbar_icons import checking_icon, download_icon, update_check_icon
+from src.update.release_client import ReleaseInfo, parse_version
+from src.version import APP_VERSION
+
+
+def available_update_version(config):
+    version = str(config.get("notified_update_version", "")).strip()
+    try:
+        if parse_version(version) > parse_version(APP_VERSION):
+            return version.removeprefix("v")
+    except ValueError:
+        pass
+    return ""
+
+
+def sync_update_action(button, theme, config, *, busy):
+    version = available_update_version(config)
+    if busy:
+        tooltip = "アプリの更新を確認中…"
+        icon = checking_icon(theme.muted_text)
+    elif version:
+        tooltip = f"v{version} に更新"
+        icon = download_icon(theme.accent)
+    else:
+        tooltip = "アプリの更新をチェック"
+        icon = update_check_icon(theme.muted_text)
+    button.setIcon(icon)
+    button.setToolTip(tooltip)
+    button.setAccessibleName(tooltip)
+    button.setEnabled(not busy)
 
 
 def _update_message_theme(parent):

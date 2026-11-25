@@ -61,6 +61,21 @@ PYTHONPATH=. python scripts/build_poetore_metadata.py --english-matchers-only --
 
 ### リーグ更新時
 
+毎週月曜 00:00 UTC の GitHub Actions と手動実行で、公式Tradeの差分を検知できる。
+`python scripts/update_poetore_trade_data.py --check-official` は公式Stats・Items・staticを
+照合し、`build/poetore-official-check-report.json` と同名のMarkdownレポートを生成する。
+`--fail-on-updates` を付けると差分ありで終了コード3を返す。取得・比較失敗時は2を返す。
+
+更新時は必要なStatルールと任意の英語文型 `english` を追加してから、
+`python scripts/update_poetore_trade_data.py --refresh` で候補を作る。
+レポートの `official_trade_changes` と `effect_english_changes`、候補のテスト結果を確認し、
+`python scripts/update_poetore_trade_data.py --apply build/poetore-update-candidate/manifest.json`
+で確認済みの候補を反映する。公式Statsの日英基準と `scripts/poetore-effect-english.json` は
+同じ候補に含まれる。反映後は `--check-official` でStatsと英語effectの差分を再確認する。
+Awakenedのアイテム入力が同じ場合は、確認済みのGem・Unique・関連品などの定義を引き継ぐ。
+
+メタデータ生成を単独で行う場合の手順は次のとおり。
+
 1. 公式Trade API／RePoEを更新し、必要なら比較対象Awakenedのcommitも変更する。
 2. 次のdry-runで新しいSHA、差分レポート、全テスト結果を確認する。
 

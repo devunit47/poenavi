@@ -89,3 +89,30 @@ def test_english_affliction_keeps_the_existing_matcher_when_text_is_shared():
     assert [(mod.stat_id, mod.values) for mod in item.modifiers] == [
         ("explicit.stat_3486646279", (20,)),
     ]
+
+
+@pytest.mark.parametrize(("stat_id", "ja", "en", "value"), (
+    ("explicit.effect_2031996092",
+     "ソケットされたジェムはレベル20 \u200b神のセンチネルサポートによってサポートされる",
+     "Socketed Gems are Supported by Level 20 Divine Sentinel Support", 20),
+    ("explicit.effect_3251718963",
+     "ソケットされたジェムはレベル18 \u200b殲滅サポートによってサポートされる",
+     "Socketed Gems are Supported by Level 18 Annihilation Support", 18),
+    ("fractured.stat_1351682252",
+     "設置したトラップまたはマイン1個ごとにダメージが5%増加する",
+     "5% increased Damage for each Trap and Mine you have", 5),
+    ("fractured.stat_181387736", "1個のプレフィックスモッドが変化しない",
+     "1 Prefix Modifier cannot be changed", 1),
+    ("fractured.stat_181387736", "2個のプレフィックスモッドが変化しない",
+     "2 Prefix Modifiers cannot be changed", 2),
+))
+def test_new_official_stats_resolve_from_bilingual_clipboard(stat_id, ja, en, value):
+    fractured = stat_id.startswith("fractured.")
+    for prefix, header, text in (
+        ("アイテムクラス: 手袋\nレアリティ: レア\nテスト\n指無しシルクグローブ\n--------\nアイテムレベル: 85",
+         "{ フラクチャー プレフィックスモッド「テスト」 (ティア: 1) }", ja),
+        ("Item Class: Gloves\nRarity: Rare\nTest\nFingerless Silk Gloves\n--------\nItem Level: 85",
+         '{ Fractured Prefix Modifier "Test" (Tier: 1) }', en),
+    ):
+        item = parse_item_text(f"{prefix}\n--------\n" + (header + "\n" if fractured else "") + text)
+        assert [(mod.stat_id, mod.values) for mod in item.modifiers] == [(stat_id, (value,))]

@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts import build_poetore_metadata as builder
+from scripts import update_poetore_trade_data as updater
 from scripts.build_poetore_map_mods import source_from_lock
 from scripts.build_poetore_metadata import _run_regression_tests
 from scripts.update_poetore_trade_data import (
@@ -231,3 +233,158 @@ def test_pseudo_diff_reports_added_removed_and_changed_rows():
     assert [row["pseudo_ref"] for row in result["added"]] == ["added"]
     assert [row["pseudo_ref"] for row in result["removed"]] == ["removed"]
     assert [row["pseudo_ref"] for row in result["changed"]] == ["changed"]
+
+
+def _write_json(root, relative, payload):
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _official_payload(*entries):
+    return {"result": [{"id": "Currency", "entries": list(entries)}]}
+
+
+def test_official_check_reports_changes_without_building_or_applying(tmp_path, monkeypatch):
+    stat_id = "fractured.effect_1"
+    en = _official_payload({"id": stat_id, "type": "fractured", "text": "Grants A"})
+    ja = _official_payload({"id": stat_id, "type": "fractured", "text": "付与 A"})
+    effect_path = _write_json(tmp_path, updater.AUTHORITATIVE["effect_english"], {
+        "templates": {stat_id: "Grants Old"},
+    })
+    _write_json(tmp_path, updater.AUTHORITATIVE["official_stats_baseline"], {
+        "entries": [{"kind": "fractured", "stat_id": stat_id, "japanese": "付与 A", "english": "Grants Old"}],
+    })
+    _write_json(tmp_path, "scripts/poetore-stat-rules.json", {"rules": [{"stat_id": stat_id}]})
+    catalog = {
+        "sources": {
+            realm: {lang: {"sha256": "old"} for lang in urls}
+            for realm, urls in updater.STATIC_URLS.items()
+        },
+        "realms": {realm: {"items": [{"en": "Existing"}]} for realm in updater.STATIC_URLS},
+    }
+    _write_json(tmp_path, updater.EXCHANGE_CATALOG, catalog)
+    payloads = {
+        updater.OFFICIAL_URLS["stats_en"]: (en, "latest"),
+        updater.OFFICIAL_URLS["stats_ja"]: (ja, "latest"),
+        **{
+            url: (_official_payload(), "same")
+            for name, url in updater.OFFICIAL_URLS.items() if name.startswith("items")
+        },
+        **{
+            url: (_official_payload(
+                {"id": "new", "text": "New" if lang == "en" else "新規"},
+                {"id": "sep", "text": "Category header"},
+            ), "latest")
+            for urls in updater.STATIC_URLS.values() for lang, url in urls.items()
+        },
+    }
+    monkeypatch.setattr(updater, "run_audit", lambda **_: pytest.fail("heavy audit was called"))
+    run_check = updater.run_official_check
+    monkeypatch.setattr(updater, "run_official_check", lambda: run_check(tmp_path, payloads.__getitem__))
+    assert updater.main(["--check-official", "--fail-on-updates"]) == 3
+    assert updater.main(["--check-official"]) == 0
+    report = updater.load_json(tmp_path / "build/poetore-official-check-report.json")
+    changed = report["metadata"]["official_trade_changes"]["changed"][0]
+    assert changed["in_stat_rules"] and changed["is_skill_effect"]
+    assert changed["previous_english"] == "Grants Old"
+    assert changed["current_english"] == "Grants A"
+    effects = report["metadata"]["effect_english_changes"]
+    assert effects["current_kind_counts"] == {"fractured.effect_": 1, "crafted.effect_": 0}
+    assert report["static"]["poe1"]["sources"]["ja"]["changed"]
+    assert report["static"]["poe1"]["candidates"] == [
+        {"group": "Currency", "id": "new", "english": "New", "japanese": "新規"},
+    ]
+    assert "Grants Old → Grants A" in (tmp_path / "build/poetore-official-check-report.md").read_text(encoding="utf-8")
+    assert updater.load_json(effect_path)["templates"][stat_id] == "Grants Old"
+
+    _write_json(tmp_path, updater.AUTHORITATIVE["effect_english"], {"templates": {stat_id: "Grants A"}})
+    _write_json(tmp_path, updater.AUTHORITATIVE["official_stats_baseline"],
+                updater.official_trade_entry_snapshot(ja, en))
+    for sources in catalog["sources"].values():
+        for source in sources.values():
+            source["sha256"] = "latest"
+    _write_json(tmp_path, updater.EXCHANGE_CATALOG, catalog)
+    assert updater.main(["--check-official", "--fail-on-updates"]) == 0
+    assert updater.load_json(tmp_path / "build/poetore-official-check-report.json")["status"] == "UP TO DATE"
+
+
+def test_official_check_blocks_when_api_is_unavailable(tmp_path, monkeypatch):
+    def unavailable(_url, **_kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(updater, "fetch_json", unavailable)
+    run_check = updater.run_official_check
+    monkeypatch.setattr(updater, "run_official_check", lambda: run_check(tmp_path))
+    assert updater.main(["--check-official", "--fail-on-updates"]) == 2
+    assert updater.main(["--check-official"]) == 2
+    report = updater.load_json(tmp_path / "build/poetore-official-check-report.json")
+    assert report["status"] == "BLOCKED"
+    assert len(report["failures"]) == 8
+
+
+def test_refresh_syncs_effect_source_and_manifest_publishes_it(tmp_path, monkeypatch):
+    en_url = "https://www.pathofexile.com/api/trade/data/stats"
+    stat_id = "explicit.effect_1"
+    templates = {stat_id: "Grants A"}
+    official_en = json.dumps(_official_payload({
+        "id": stat_id, "type": "explicit", "text": templates[stat_id],
+    })).encode()
+    blobs = {
+        "awakened_poe_trade": b"", "awakened_items": b"", "awakened_item_drops": b"[]",
+        "jp_trade_api": json.dumps(_official_payload({
+            "id": stat_id, "type": "explicit", "text": "付与 A",
+        })).encode(),
+        "repoe_stats": b"{}", "repoe_mods": b"{}",
+    }
+    lock = _write_json(tmp_path, "lock.json", {"generated_at": "today", "sources": {
+        name: {"url": name, "sha256": updater.sha256_bytes(blob)} for name, blob in blobs.items()
+    }})
+    baseline = _write_json(tmp_path, "baseline.json", {"entries": []})
+    target = _write_json(tmp_path, updater.AUTHORITATIVE["effect_english"], {
+        "url": en_url, "sha256": "old", "templates": {},
+    })
+    candidate_dir = tmp_path / "candidate"
+    candidate = _write_json(candidate_dir, target.name, updater.load_json(target))
+    monkeypatch.setattr(updater, "CANDIDATE_DIR", candidate_dir)
+    command = updater._metadata_command(candidate=True)
+    assert command[command.index("--effect-english") + 1] == str(candidate)
+
+    fetched = []
+
+    def get(url):
+        fetched.append(url)
+        return official_en if url == en_url else blobs[url]
+
+    args = [
+        "build_poetore_metadata.py", "--lock", str(lock),
+        "--official-baseline", str(baseline), "--effect-english", str(candidate),
+        "--stat-rules", str(_write_json(tmp_path, "rules.json", {"rules": []})),
+        "--japanese-overrides", str(_write_json(tmp_path, "overrides.json", {})),
+        "--output", str(tmp_path / "metadata.json"), "--report", str(tmp_path / "report.json"),
+    ]
+    monkeypatch.setattr(builder, "_get", get)
+    monkeypatch.setattr(builder, "_run_regression_tests", lambda _: None)
+    monkeypatch.setattr(builder.sys, "argv", args + ["--apply"])
+    assert builder.main() == 0
+    assert en_url not in fetched
+    previous = updater.load_json(tmp_path / "metadata.json")
+    previous["gems"] = {"reviewed": {"trade_type": "Reviewed", "max_level": 20}}
+    _write_json(tmp_path, "metadata.json", previous)
+    monkeypatch.setattr(builder.sys, "argv", args + ["--refresh-lock"])
+    assert builder.main() == 0
+    assert en_url in fetched
+    assert updater.load_json(candidate)["templates"] == {}
+    monkeypatch.setattr(builder.sys, "argv", args + ["--refresh-lock", "--apply"])
+    assert builder.main() == 0
+    assert list(updater.load_json(candidate)) == ["sha256", "templates", "url"]
+    assert updater.load_json(candidate)["sha256"] == updater.sha256_bytes(official_en)
+    metadata = updater.load_json(tmp_path / "metadata.json")
+    assert metadata["mods"][0]["english"] == ["Grants A"]
+    assert metadata["gems"] == previous["gems"]
+    report = updater.load_json(tmp_path / "report.json")
+    assert report["effect_english_changes"]["added"] == [{"stat_id": stat_id, "english": "Grants A"}]
+    manifest = _manifest(tmp_path, {"effect_english": (target, candidate)})
+    assert atomic_apply_manifest(manifest, tmp_path) == [target]
+    assert updater.load_json(target)["templates"] == templates

@@ -18,18 +18,61 @@ from src.poetore.metadata import (
     validate_pseudo_payload,
 )
 from src.poetore.metadata_builder import (
+    add_english_matchers,
     apply_japanese_trade_overrides,
     audit_awakened_stat_rules,
     build_minimal_index,
     build_official_index,
     build_related_item_groups,
+    diff_effect_english_templates,
     diff_minimal_indexes,
     diff_official_trade_entries,
     excessive_removal,
+    extract_effect_english_templates,
     official_trade_entry_snapshot,
     unresolved_trade_entries,
     validate_minimal_index,
 )
+
+
+def test_effect_english_templates_extract_supported_ids_and_report_each_change():
+    payload = {"result": [{"entries": [
+        {"type": "scourge", "id": "scourge.effect_2", "text": "Grants B"},
+        {"type": "explicit", "id": "explicit.effect_1", "text": "Grants A"},
+        {"type": "explicit", "id": "explicit.stat_1", "text": "Regular mod"},
+        {"type": "pseudo", "id": "pseudo.effect_1", "text": "Ignored"},
+    ]}]}
+    current = extract_effect_english_templates(payload)
+    assert list(current) == ["explicit.effect_1", "scourge.effect_2"]
+    changes = diff_effect_english_templates(
+        {"explicit.effect_1": "Old A", "implicit.effect_3": "Removed"}, current,
+    )
+    assert changes == {
+        "previous_count": 2,
+        "current_count": 2,
+        "added": [{"stat_id": "scourge.effect_2", "english": "Grants B"}],
+        "removed": [{"stat_id": "implicit.effect_3", "english": "Removed"}],
+        "changed": [{"stat_id": "explicit.effect_1", "previous_english": "Old A", "current_english": "Grants A"}],
+    }
+
+
+def test_authored_english_is_compacted_and_keeps_existing_matcher_on_collision():
+    jp = {"result": [{"entries": [
+        {"type": "fractured", "id": "fractured.stat_1", "text": "一 #"},
+        {"type": "fractured", "id": "fractured.stat_2", "text": "二 #"},
+    ]}]}
+    rules = {"rules": [
+        {"kind": "fractured", "stat_id": "fractured.stat_1", "ref": "One #"},
+        {"kind": "fractured", "stat_id": "fractured.stat_2", "ref": "Two #",
+         "english": ["One #", "Two #", "Another #"]},
+    ]}
+    awakened = [json.dumps({
+        "ref": "One #", "matchers": [{"string": "One #"}],
+        "trade": {"ids": {"fractured": ["fractured.stat_1"]}},
+    })]
+    payload = build_official_index(jp, rules)
+    add_english_matchers(payload, awakened, stat_rules=rules)
+    assert [row["english"] for row in payload["mods"]] == [[None], ["Another #", None]]
 
 
 def test_official_builder_uses_official_japanese_repoe_tiers_and_poetore_rules():

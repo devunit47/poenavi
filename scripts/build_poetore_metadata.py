@@ -16,9 +16,11 @@ from src.poetore.metadata_builder import (
     audit_awakened_stat_rules,
     build_official_index,
     build_related_item_groups,
+    diff_effect_english_templates,
     diff_minimal_indexes,
     diff_official_trade_entries,
     excessive_removal,
+    extract_effect_english_templates,
     official_trade_entry_snapshot,
     unresolved_trade_entries,
     validate_minimal_index,
@@ -129,6 +131,8 @@ def main() -> int:
         help="固定済みAwakened statsから既存Modの英語matcherだけを更新する",
     )
     args = parser.parse_args()
+    if args.refresh_lock and (args.english_matchers_only or args.related_items_only):
+        parser.error("--refresh-lock requires a full or --official-mods-only build")
     lock = _load_json(args.lock)
     source_rows = lock.get("sources", {})
     required = {
@@ -147,6 +151,7 @@ def main() -> int:
         add_english_matchers(
             payload, blob.decode("utf-8").splitlines(),
             _load_json(args.effect_english)["templates"],
+            stat_rules=_load_json(args.stat_rules),
         )
         payload["sources"]["awakened_poe_trade"] = source
         integrity = validate_minimal_index(payload)
@@ -232,10 +237,28 @@ def main() -> int:
                 sources[name] = previous["sources"][name]
     awakened = blobs.get("awakened_poe_trade", b"").decode("utf-8").splitlines()
     raw_jp_trade = json.loads(blobs["jp_trade_api"])
-    official_snapshot = official_trade_entry_snapshot(raw_jp_trade)
-    official_changes = diff_official_trade_entries(
-        _load_json(args.official_baseline), official_snapshot,
-    )
+    effect_source = _load_json(args.effect_english)
+    previous_templates = effect_source["templates"]
+    en_trade = None
+    if args.refresh_lock:
+        url = effect_source["url"]
+        blob = _get(url)
+        en_trade = json.loads(blob)
+        if not en_trade.get("result"):
+            raise SystemExit("English official Trade stats returned no results")
+        effect_source = {
+            "url": url,
+            "sha256": hashlib.sha256(blob).hexdigest(),
+            "templates": extract_effect_english_templates(en_trade),
+        }
+    official_snapshot = official_trade_entry_snapshot(raw_jp_trade, en_trade)
+    previous_official = _load_json(args.official_baseline)
+    if en_trade is None:
+        # 通常モードでは日本語APIしか取得しないため、英語のみの項目は比較対象外。
+        previous_official["entries"] = [
+            row for row in previous_official["entries"] if row.get("japanese") is not None
+        ]
+    official_changes = diff_official_trade_entries(previous_official, official_snapshot)
     jp_trade, japanese_overrides = apply_japanese_trade_overrides(
         raw_jp_trade, _load_json(args.japanese_overrides),
     )
@@ -250,12 +273,18 @@ def main() -> int:
         sources=sources,
         generated_at=str(effective_lock["generated_at"]),
     )
-    if args.official_mods_only:
+    item_sources_unchanged = all(
+        sources[name] == previous.get("sources", {}).get(name)
+        for name in ("awakened_items", "awakened_item_drops")
+    )
+    if args.official_mods_only or (args.refresh_lock and item_sources_unchanged):
+        # Trade Stat更新で、同じ固定入力から確認済みのアイテム定義を書き換えない。
         for field in (
             "base_armour", "gems", "unique_fixed_stats", "unique_icons",
             "unique_disenchant_values", "related_item_groups",
         ):
             candidate[field] = previous.get(field, candidate.get(field))
+    if args.official_mods_only:
         previous_mods = {(row["kind"], row["stat_id"]): row for row in previous["mods"]}
         for row in candidate["mods"]:
             old = previous_mods.get((row["kind"], row["stat_id"]), {})
@@ -267,8 +296,13 @@ def main() -> int:
             for option in row["options"]:
                 if not option.get("english") and str(option["value"]) in english_options:
                     option["english"] = english_options[str(option["value"])]
+        if args.refresh_lock or any(rule.get("english") for rule in stat_rules["rules"]):
+            add_english_matchers(
+                candidate, (), effect_source["templates"] if args.refresh_lock else None,
+                stat_rules=stat_rules, preserve_existing=True,
+            )
     else:
-        add_english_matchers(candidate, awakened, _load_json(args.effect_english)["templates"])
+        add_english_matchers(candidate, awakened, effect_source["templates"], stat_rules=stat_rules)
     integrity = validate_minimal_index(candidate)
     differences = diff_minimal_indexes(previous, candidate)
     unresolved = unresolved_trade_entries(candidate, jp_trade)
@@ -292,6 +326,9 @@ def main() -> int:
         "diff": differences,
         "unresolved_japanese_stats": unresolved,
         "official_trade_changes": official_changes,
+        "effect_english_changes": diff_effect_english_templates(
+            previous_templates, effect_source["templates"],
+        ),
         "japanese_overrides": japanese_overrides,
         "awakened_comparison": awakened_audit,
         "failures": failures,
@@ -316,6 +353,10 @@ def main() -> int:
             )
             args.official_baseline.write_text(
                 json.dumps(official_snapshot, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            args.effect_english.write_text(
+                json.dumps(effect_source, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
         print(f"applied {integrity['record_count']} records atomically: {args.output}")

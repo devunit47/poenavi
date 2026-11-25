@@ -90646,6 +90646,20 @@
       "options": []
     },
     {
+      "ref": "#% increased Damage for each Trap and Mine you have",
+      "stat_id": "fractured.stat_1351682252",
+      "kind": "fractured",
+      "better": 1,
+      "inverted": false,
+      "negated": false,
+      "exact": false,
+      "decimal": false,
+      "options": [],
+      "english": [
+        "#% increased Damage for each Trap and Mine you have"
+      ]
+    },
+    {
       "ref": "#% chance to Curse Enemies with Socketed Hex Curse Gem on Hit",
       "stat_id": "fractured.stat_1352418057",
       "kind": "fractured",
@@ -92650,6 +92664,21 @@
       "exact": false,
       "decimal": false,
       "options": []
+    },
+    {
+      "ref": "# Prefix Modifier cannot be changed",
+      "stat_id": "fractured.stat_181387736",
+      "kind": "fractured",
+      "better": 1,
+      "inverted": false,
+      "negated": false,
+      "exact": false,
+      "decimal": false,
+      "options": [],
+      "english": [
+        "# Prefix Modifier cannot be changed",
+        "# Prefix Modifiers cannot be changed"
+      ]
     },
     {
       "ref": "#% increased Damage with Hits and Ailments per Curse on Enemy",

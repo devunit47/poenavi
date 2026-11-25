@@ -18,6 +18,9 @@ if str(REPO_ROOT) not in sys.path:
 from src.poetore.official_exchange import normalize_name
 from src.utils.poe_version_data import POE1, POE2
 
+POETORE_DATA = REPO_ROOT / "data" / "poetore"
+EXCHANGE_DATA = POETORE_DATA / "currency_exchange"
+
 STATIC_URLS = {
     POE1: {
         "en": "https://www.pathofexile.com/api/trade/data/static",
@@ -135,12 +138,20 @@ POE1_CONFIRMED_CATEGORY_OVERRIDES = {
     "Metadata/Items/MapFragments/AtlasAllflamePack": "allflame",
     "Metadata/Items/MapFragments/CloisterAllflamePack": "allflame",
     "Metadata/Items/MapFragments/PantheonAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/BetrayalAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/ResplendenceAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/PropagationAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/MeatSackAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/WildwoodAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/CleansedAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/GoldAllflamePack": "allflame",
+    "Metadata/Items/MapFragments/ToadAllflamePack": "allflame",
 }
 
 # The Currency Exchange market feed identifies these items by game metadata ID,
 # while the official Trade static endpoint identifies the same rows by trade
-# tag.  The current RePoE name export still contains the former Coin names (or
-# no row at all), so name-based joining cannot connect the two official feeds.
+# tag. Some RePoE exports contain earlier names or lack these rows, so a
+# name-based join cannot always connect the two official feeds.
 # Keep the verified one-to-one bridge on stable machine IDs and let the static
 # endpoint remain authoritative for the localized names and icons.
 POE1_CONFIRMED_STATIC_ID_TO_ITEM_ID = {
@@ -162,6 +173,8 @@ POE1_CONFIRMED_STATIC_ID_TO_ITEM_ID = {
     "allflame-ember-of-the-divine": "Metadata/Items/MapFragments/PantheonAllflamePack",
     "cursed-poppet": "Metadata/Items/MapFragments/CurrencyAuguryBossKey",
     "royal-visage": "Metadata/Items/MapFragments/CurrencyIncursionUberFragment",
+    "originators-exalted-orb": "Metadata/Items/Currency/CurrencyAddModToRareOriginator",
+    "primordial-exalted-orb": "Metadata/Items/Currency/CurrencyStackedExalt",
 }
 
 # These stable metadata IDs belonged to exchange rows that 3.30 either removed
@@ -225,6 +238,56 @@ POE1_CONFIRMED_OBSERVED_ITEMS = {
         "icon_filename": "MessageInABottle.png",
     },
 }
+
+# Previously published Trade static rows still available in Currency Exchange.
+# Keep these independent of the current observation window and prefer live static rows.
+POE1_CONFIRMED_DUCATS = {
+    "Metadata/Items/Deepwater/DeepwaterAbyssCurrency": (
+        "Merrick's Ducat", "メリックのダカット", 20_000,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0QWJ5c3NhbCIsInNjYWxlIjoxfV0/fba53bdbf2/DucatAbyssal.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterMercenaryCurrency": (
+        "Cyaxan's Ducat", "シアクサンのダカット", 20_001,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0VHJhcnRoYW4iLCJzY2FsZSI6MX1d/08f59a8203/DucatTrarthan.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterBlankCurrency": (
+        "The Changeling's Ducat", "変身者のダカット", 20_002,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0TXlzdGVyaW91cyIsInNjYWxlIjoxfV0/6900b734c2/DucatMysterious.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterAttributeSwap": (
+        "The Genteel's Ducat", "ジェンティールのダカット", 20_003,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0QXR0cmlidXRlU3dhcCIsInNjYWxlIjoxfV0/716776d684/DucatAttributeSwap.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterItemSplit": (
+        "Kishara's Ducat", "キシャラのダカット", 20_004,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0U3BsaXR0aW5nIiwic2NhbGUiOjF9XQ/d3ada0747b/DucatSplitting.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterChartReroll": (
+        "Telesia's Ducat", "テレシアのダカット", 20_005,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0Q2hhcnRSZXJvbGwiLCJzY2FsZSI6MX1d/9f995f7ad7/DucatChartReroll.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterSaboteur": (
+        "Rotmother's Ducat", "ロットマザーのダカット", 20_006,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0U2Fib3RldXIiLCJzY2FsZSI6MX1d/76cccb3289/DucatSaboteur.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterPantheon": (
+        "Brinehook's Ducat", "ブラインフックのダカット", 20_007,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0UGFudGhlb24iLCJzY2FsZSI6MX1d/98f288b9d4/DucatPantheon.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterTatttoo": (
+        "Katakohi's Ducat", "カタコヒのダカット", 20_008,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0VGF0dG9vaWZpY2F0aW9uIiwic2NhbGUiOjF9XQ/f78b329b65/DucatTattooification.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterGhostbuster": (
+        "Tzamoto's Ducat", "ツァモトのダカット", 20_009,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0UmVkdWNpbmciLCJzY2FsZSI6MX1d/346f6e5138/DucatReducing.png",
+    ),
+    "Metadata/Items/Deepwater/DeepwaterEldritch": (
+        "Ukatoa's Ducat", "ウカトアのダカット", 20_010,
+        "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRGVlcHdhdGVyL0R1Y2F0RWxkcml0Y2giLCJzY2FsZSI6MX1d/2f8809ba8a/DucatEldritch.png",
+    ),
+}
+
 
 # These two observed market IDs are present in the official Trade2 item list
 # and in game, but are still absent from the Trade2 static endpoint.  Their
@@ -392,10 +455,20 @@ def build_realm(
             "item_order": item_order,
             "icon": icon,
         }
-    # A newly released card can appear in Currency Exchange before the static
-    # endpoint gains its entry.  The bundled, independently verified Japanese
-    # card list is sufficient because all PoE 1 cards use one common icon here.
     if poe_version == POE1:
+        for item_id in POE1_CONFIRMED_DUCATS.keys() & (active_ids - items.keys()):
+            english, japanese, item_order, icon_url = POE1_CONFIRMED_DUCATS[item_id]
+            items[item_id] = {
+                "id": item_id,
+                "en": english,
+                "ja": japanese,
+                "category": "allflame",
+                "category_order": category_order["allflame"],
+                "item_order": item_order,
+                "icon": {"kind": "remote", "url": icon_url},
+            }
+        # Newly released cards can reach Currency Exchange before Trade static.
+        # The verified Japanese card list and shared icon cover that gap.
         next_card_order = 999_999
         for item_id in sorted(active_ids - set(items)):
             if _is_removed_exchange_item(poe_version, item_id):
@@ -486,13 +559,14 @@ def build_realm(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--poe1-names", type=Path, required=True)
-    parser.add_argument("--poe2-names", type=Path, required=True)
-    parser.add_argument("--poe1-observed", type=Path, required=True)
-    parser.add_argument("--poe2-observed", type=Path, required=True)
-    parser.add_argument("--cards", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--poe1-names", type=Path, default=EXCHANGE_DATA / "poe1_item_names.json")
+    parser.add_argument("--poe2-names", type=Path, default=EXCHANGE_DATA / "poe2_item_names.json")
+    parser.add_argument("--poe1-observed", type=Path)
+    parser.add_argument("--poe2-observed", type=Path)
+    parser.add_argument("--cards", type=Path, default=POETORE_DATA / "divination_cards_ja.json")
+    parser.add_argument("--output", type=Path, default=EXCHANGE_DATA / "exchange_item_catalog.json")
     args = parser.parse_args()
+    previous_realms = _load_json(args.output)["realms"] if args.output.exists() else {}
     cards = _card_names(args.cards)
     realms = {}
     sources = {}
@@ -500,6 +574,18 @@ def main() -> None:
         (POE1, args.poe1_names, args.poe1_observed),
         (POE2, args.poe2_names, args.poe2_observed),
     ):
+        previous = previous_realms.get(version, {})
+        active_ids = {
+            row["id"]
+            for key in ("items", "unmapped_observed")
+            for row in previous.get(key, ())
+        }
+        if version == POE1:
+            active_ids.update(POE1_CONFIRMED_DUCATS)
+        if observed_path is not None:
+            if not observed_path.is_dir():
+                parser.error(f"observed directory does not exist: {observed_path}")
+            active_ids.update(observed_ids(observed_path))
         en, en_sha = _fetch_json(STATIC_URLS[version]["en"])
         ja, ja_sha = _fetch_json(STATIC_URLS[version]["ja"])
         realms[version] = build_realm(
@@ -507,7 +593,7 @@ def main() -> None:
             _load_json(names_path),
             en,
             ja,
-            observed_ids(observed_path),
+            active_ids,
             cards,
         )
         sources[version] = {

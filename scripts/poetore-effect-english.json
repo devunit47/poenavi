@@ -1,6 +1,5 @@
 {
-  "url": "https://www.pathofexile.com/api/trade/data/stats",
-  "sha256": "b1ff712d28525f876b610e485b2d4648d846cba7829f93b8750656a8cbfe4be5",
+  "sha256": "513eecd14a5da3c55dcbdaa950bbffbd4c18a43009e0c209663986f4d15c6241",
   "templates": {
     "enchant.effect_2236653998": "Grants Level # Envy",
     "explicit.effect_1059201360": "Socketed Gems are Supported by Level # Physical to Lightning Support",
@@ -70,6 +69,7 @@
     "explicit.effect_1979264894": "Socketed Gems are Supported by Level # Enlighten Support",
     "explicit.effect_1994599451": "Socketed Gems are Supported by Level # Innervate Support",
     "explicit.effect_2014162730": "Grants Level # Anger",
+    "explicit.effect_2031996092": "Socketed Gems are Supported by Level # Divine Sentinel Support",
     "explicit.effect_2052193809": "Socketed Gems are Supported by Level # Awakened Added Chaos Damage Support",
     "explicit.effect_2092916684": "Grants Level # Summon Bestial Ursa",
     "explicit.effect_2100902429": "Socketed Gems are Supported by Level # Multistrike Support",
@@ -152,6 +152,7 @@
     "explicit.effect_3184099572": "Grants Summon Greater Harbinger of Brutality",
     "explicit.effect_3188237829": "Grants Level # Penance Mark",
     "explicit.effect_3232631539": "Socketed Gems are Supported by Level # Elemental Penetration Support",
+    "explicit.effect_3251718963": "Socketed Gems are Supported by Level # Annihilation Support",
     "explicit.effect_3257625635": "Socketed Gems are Supported by Level # Awakened Blasphemy Support",
     "explicit.effect_3293595800": "Socketed Gems are Supported by Level # Concentrated Effect Support",
     "explicit.effect_3311634296": "Socketed Gems are Supported by Level # Awakened Added Lightning Damage Support",
@@ -363,5 +364,6 @@
     "scourge.effect_3362019776": "Socketed Gems are Supported by Level # Added Cold Damage Support",
     "scourge.effect_3607696303": "Socketed Gems are Supported by Level # Added Lightning Damage Support",
     "scourge.effect_415209642": "Grants Level # Herald of Ash"
-  }
+  },
+  "url": "https://www.pathofexile.com/api/trade/data/stats"
 }

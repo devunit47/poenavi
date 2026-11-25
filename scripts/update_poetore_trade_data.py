@@ -13,25 +13,38 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-try:
-    from scripts.build_poetore_map_mods import build_catalog, source_from_lock
-    from scripts.extract_poetore_pseudo_relations import extract_relations
-except ModuleNotFoundError:  # `python scripts/update_*.py`で直接起動する場合
-    from build_poetore_map_mods import build_catalog, source_from_lock
-    from extract_poetore_pseudo_relations import extract_relations
-
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.build_exchange_item_catalog import GROUP_CATEGORIES, STATIC_URLS, _static_rows
+from scripts.build_poetore_map_mods import build_catalog, source_from_lock
+from scripts.extract_poetore_pseudo_relations import extract_relations
+from src.poetore.metadata_builder import (
+    _is_skill_effect,
+    diff_effect_english_templates,
+    diff_official_trade_entries,
+    extract_effect_english_templates,
+    official_trade_entry_snapshot,
+)
+from src.poetore.official_exchange import normalize_name
+
 BUILD_DIR = ROOT / "build"
 CANDIDATE_DIR = BUILD_DIR / "poetore-update-candidate"
 REPORT_JSON = BUILD_DIR / "poetore-update-report.json"
 REPORT_MD = BUILD_DIR / "poetore-update-report.md"
+OFFICIAL_CHECK_JSON = BUILD_DIR / "poetore-official-check-report.json"
+OFFICIAL_CHECK_MD = BUILD_DIR / "poetore-official-check-report.md"
 MANIFEST_PATH = CANDIDATE_DIR / "manifest.json"
+EXCHANGE_CATALOG = Path("data/poetore/currency_exchange/exchange_item_catalog.json")
+DIFF_KEYS = ("added", "removed", "changed")
 
 OFFICIAL_URLS = {
     "items_en": "https://www.pathofexile.com/api/trade/data/items",
@@ -45,6 +58,7 @@ AUTHORITATIVE = {
     "map_mods": Path("data/poetore/map_mods.json"),
     "source_lock": Path("scripts/poetore-sources.lock.json"),
     "official_stats_baseline": Path("scripts/poetore-official-stats-baseline.json"),
+    "effect_english": Path("scripts/poetore-effect-english.json"),
     "pseudo_relations": Path("data/poetore/pseudo_relations.json"),
 }
 PSEUDO_FILES = (
@@ -69,9 +83,9 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def fetch_json(url: str) -> tuple[dict, str]:
+def fetch_json(url: str, *, timeout: float = 120) -> tuple[dict, str]:
     request = Request(url, headers={"User-Agent": "PoENavi/trade-data-audit"})
-    with urlopen(request, timeout=120) as response:
+    with urlopen(request, timeout=timeout) as response:
         blob = response.read()
     return json.loads(blob), sha256_bytes(blob)
 
@@ -292,30 +306,93 @@ def overall_status(report: dict) -> str:
         items["structure_mismatches"],
     ))
     metadata = report.get("metadata", {})
-    metadata_diff = metadata.get("diff", {})
-    review = review or any(metadata_diff.get(key) for key in ("added", "removed", "changed"))
+    review = review or any(
+        metadata.get(section, {}).get(key)
+        for section in ("diff", "official_trade_changes", "effect_english_changes")
+        for key in DIFF_KEYS
+    )
+    if report["mode"] == "check-official":
+        review = review or any(
+            source["changed"]
+            for realm in report["static"].values() for source in realm["sources"].values()
+        )
+        return "UPDATE AVAILABLE" if review else "UP TO DATE"
     pseudo_diff = report.get("pseudo", {}).get("diff", {})
     review = review or any(pseudo_diff.get(key) for key in ("added", "removed", "changed"))
     return "REVIEW REQUIRED" if review else "PASS"
 
 
+def _diff_markdown(title: str, diff: dict) -> list[str]:
+    lines = [f"## {title}", ""]
+    for key, label in zip(DIFF_KEYS, ("追加", "削除", "変更"), strict=True):
+        rows = diff.get(key, ())
+        lines.append(f"- {label} {len(rows)}件")
+        for row in rows[:25]:
+            texts = []
+            for lang in ("japanese", "english"):
+                if f"previous_{lang}" in row:
+                    value = f"{row[f'previous_{lang}'] or '—'} → {row.get(f'current_{lang}') or '—'}"
+                else:
+                    value = row.get(lang) or row.get(f"current_{lang}")
+                if value:
+                    texts.append(" ".join(str(value).splitlines()))
+            if "in_stat_rules" in row:
+                texts.append(f"effect={row['is_skill_effect']}, rule={row['in_stat_rules']}")
+            lines.append(f"  - `{row['stat_id']}` " + " / ".join(texts))
+        if len(rows) > 25:
+            lines.append("  - 全項目はJSONレポートに記録")
+    return lines + [""]
+
+
 def render_markdown(report: dict) -> str:
-    stats = report["official_trade"]["stats"]
-    items = report["official_trade"]["items"]
-    metadata = report.get("metadata", {})
-    diff = metadata.get("diff", {})
-    pseudo = report["pseudo"]
     lines = [
         "# ぽえとれ Tradeデータ更新レポート", "",
         f"- 判定: **{report['status']}**",
         f"- モード: `{report['mode']}`",
         f"- 生成時刻: `{report['generated_at']}`", "",
+    ]
+    if report["mode"] == "check-official" and not report.get("official_trade"):
+        return "\n".join(lines + ["## 停止理由", ""] + [
+            f"- {value}" for value in report["failures"]
+        ] + [""])
+    stats = report["official_trade"]["stats"]
+    items = report["official_trade"]["items"]
+    metadata = report.get("metadata", {})
+    diff = metadata.get("diff", {})
+    lines.extend([
         "## 公式Trade日英監査", "",
         f"- Stats: EN {stats['english_count']} / JA {stats['japanese_count']}",
         f"- Stats片側欠落: ENのみ {len(stats['english_only'])} / JAのみ {len(stats['japanese_only'])}",
         f"- option差分 {len(stats['option_mismatches'])} / type差分 {len(stats['type_mismatches'])}",
         f"- Itemsカテゴリ: EN {items['english_groups']} / JA {items['japanese_groups']}",
+        f"- Items片側カテゴリ: ENのみ {len(items['english_only_groups'])} / JAのみ {len(items['japanese_only_groups'])}",
         f"- Items構造差分: {len(items['structure_mismatches'])}", "",
+    ])
+    if report["mode"] == "check-official" and items["structure_mismatches"]:
+        groups = ", ".join(f"`{row['group']}`" for row in items["structure_mismatches"])
+        lines.extend([f"- Items構造差分のあるカテゴリ: {groups}", ""])
+    lines.extend(_diff_markdown("公式Trade Statsの差分", metadata.get("official_trade_changes", {})))
+    effect = metadata.get("effect_english_changes", {})
+    lines.extend(_diff_markdown("公式effect英語テンプレートの差分", effect))
+    if report["mode"] == "check-official":
+        for prefix, count in effect["current_kind_counts"].items():
+            lines.append(f"- `{prefix}` 現在 {count}件")
+        lines.extend(["", "## 公式Trade static", ""])
+        for realm, result in report["static"].items():
+            hashes = ", ".join(
+                f"{lang.upper()} {'変更あり' if source['changed'] else '一致'}"
+                for lang, source in result["sources"].items()
+            )
+            candidates = result["candidates"]
+            lines.append(f"- {realm}: {hashes} / 未収録の候補 {len(candidates)}件")
+            for row in candidates[:25]:
+                lines.append(f"  - `{row['group']}` {row['english']} / {row['japanese'] or '—'}")
+            if len(candidates) > 25:
+                lines.append("  - 全項目はJSONレポートに記録")
+        return "\n".join(lines + [""])
+
+    pseudo = report["pseudo"]
+    lines.extend([
         "## Modメタデータ", "",
         f"- 追加 {len(diff.get('added', ())) } / 削除 {len(diff.get('removed', ())) } / 変更 {len(diff.get('changed', ())) }",
         f"- 未解決日本語Stat: {len(metadata.get('unresolved_japanese_stats', ())) }", "",
@@ -323,7 +400,7 @@ def render_markdown(report: dict) -> str:
         f"- definitions {pseudo['definitions']} / relations {pseudo['relations']}",
         f"- relations追加 {len(pseudo.get('diff', {}).get('added', ())) } / 削除 {len(pseudo.get('diff', {}).get('removed', ())) } / 変更 {len(pseudo.get('diff', {}).get('changed', ())) }",
         f"- エラー: {len(pseudo['errors'])}", "",
-    ]
+    ])
     if report.get("manifest"):
         lines.extend(["## 候補", "", f"- manifest: `{report['manifest']}`", ""])
     if report.get("representative_api") is not None:
@@ -363,6 +440,111 @@ def _fetch_official(fetcher: Callable[[str], tuple[dict, str]] = fetch_json) -> 
         "stats": audit_bilingual_stats(payloads["stats_en"], payloads["stats_ja"]),
         "items": audit_bilingual_items(payloads["items_en"], payloads["items_ja"]),
     }
+
+
+def _check_stats(root: Path, english: dict, japanese: dict) -> dict:
+    previous = load_json(root / AUTHORITATIVE["official_stats_baseline"])
+    current = official_trade_entry_snapshot(japanese, english)
+    changes = diff_official_trade_entries(previous, current)
+    rules = {
+        row["stat_id"]: row
+        for row in load_json(root / "scripts/poetore-stat-rules.json")["rules"]
+    }
+    for key in DIFF_KEYS:
+        for row in changes[key]:
+            stat_id = row["stat_id"]
+            row["is_skill_effect"] = _is_skill_effect(row["kind"], stat_id)
+            row["in_stat_rules"] = stat_id in rules
+    return changes
+
+
+def _check_static(payloads: dict, hashes: dict, catalog: dict) -> dict:
+    result = {}
+    for realm, urls in STATIC_URLS.items():
+        sources = {}
+        for lang, url in urls.items():
+            previous = catalog["sources"][realm][lang]["sha256"]
+            current = hashes[realm, lang]
+            sources[lang] = {
+                "url": url, "previous_sha256": previous, "current_sha256": current,
+                "changed": previous != current,
+            }
+        known = {normalize_name(item["en"]) for item in catalog["realms"][realm]["items"]}
+        candidates = []
+        for group, _, en, ja in _static_rows(payloads[realm, "en"], payloads[realm, "ja"]):
+            english = str(en.get("text", "")).strip()
+            if (
+                group in GROUP_CATEGORIES[realm] and en["id"] != "sep"
+                and english and normalize_name(english) not in known
+            ):
+                candidates.append({
+                    "group": group, "id": en["id"], "english": english, "japanese": ja.get("text"),
+                })
+        result[realm] = {"sources": sources, "candidates": candidates}
+    return result
+
+
+def run_official_check(
+    root: Path = ROOT, fetcher: Callable[[str], tuple[dict, str]] | None = None,
+) -> dict:
+    if fetcher is None:
+        def fetcher(url: str) -> tuple[dict, str]:
+            return fetch_json(url, timeout=10)
+
+    report = {
+        "schema_version": 1,
+        "mode": "check-official",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "failures": [],
+    }
+    urls = OFFICIAL_URLS | {
+        (realm, lang): url for realm, sources in STATIC_URLS.items() for lang, url in sources.items()
+    }
+    payloads, hashes = {}, {}
+    with ThreadPoolExecutor(max_workers=len(urls)) as executor:
+        futures = {key: executor.submit(fetcher, url) for key, url in urls.items()}
+        for key, future in futures.items():
+            try:
+                payload, digest = future.result()
+                groups = payload.get("result")
+                if not isinstance(groups, list) or not groups or not all(
+                    isinstance(group, dict) and isinstance(group.get("entries"), list)
+                    and all(isinstance(entry, dict) for entry in group["entries"])
+                    for group in groups
+                ):
+                    raise ValueError("invalid Trade result")
+                payloads[key], hashes[key] = payload, digest
+            except (OSError, HTTPException, ValueError, AttributeError) as error:
+                report["failures"].append(f"{urls[key]} — {error}")
+
+    if not report["failures"]:
+        try:
+            english, japanese = payloads["stats_en"], payloads["stats_ja"]
+            stats = _check_stats(root, english, japanese)
+            effect_source = load_json(root / AUTHORITATIVE["effect_english"])
+            templates = extract_effect_english_templates(english)
+            effects = diff_effect_english_templates(effect_source["templates"], templates)
+            effects["current_kind_counts"] = {
+                prefix: sum(stat_id.startswith(prefix) for stat_id in templates)
+                for prefix in ("fractured.effect_", "crafted.effect_")
+            }
+            static = _check_static(payloads, hashes, load_json(root / EXCHANGE_CATALOG))
+            official = {
+                "sources": {
+                    name: {"url": url, "sha256": hashes[name]} for name, url in OFFICIAL_URLS.items()
+                },
+                "stats": audit_bilingual_stats(english, japanese),
+                "items": audit_bilingual_items(payloads["items_en"], payloads["items_ja"]),
+            }
+            report.update(
+                official_trade=official,
+                metadata={"official_trade_changes": stats, "effect_english_changes": effects},
+                static=static,
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            report["failures"].append(f"公式データの比較に失敗 — {error}")
+    write_report(report, root / OFFICIAL_CHECK_JSON.relative_to(ROOT), root / OFFICIAL_CHECK_MD.relative_to(ROOT))
+    return report
 
 
 def verify_representative_trade_api(
@@ -418,6 +600,7 @@ def _metadata_command(candidate: bool, official_mods_only: bool = False) -> list
             "--output", str(CANDIDATE_DIR / "mod_metadata.json"),
             "--report", str(CANDIDATE_DIR / "metadata-report.json"),
             "--official-baseline", str(CANDIDATE_DIR / "poetore-official-stats-baseline.json"),
+            "--effect-english", str(CANDIDATE_DIR / AUTHORITATIVE["effect_english"].name),
             "--refresh-lock", "--apply",
         ])
     if official_mods_only:
@@ -608,6 +791,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--refresh", action="store_true", help="最新候補と差分レポートを生成する")
     group.add_argument("--apply", type=Path, metavar="MANIFEST", help="レビュー済み候補を原子的に反映する")
+    group.add_argument("--check-official", action="store_true", help="公式Trade APIの変更を軽量チェックする")
+    parser.add_argument("--fail-on-updates", action="store_true", help="公式差分があれば終了コード3を返す")
     parser.add_argument(
         "--official-mods-only", action="store_true",
         help="Awakened取得不能時に公式Trade＋RePoE＋独自台帳だけで監査・更新する",
@@ -621,6 +806,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="--refresh用のレビュー対象lock。正本lockは候補反映まで変更しない",
     )
     args = parser.parse_args(argv)
+    if args.fail_on_updates and not args.check_official:
+        parser.error("--fail-on-updates requires --check-official")
+    if args.check_official:
+        if args.official_mods_only or args.verify_api or args.source_lock:
+            parser.error("--official-mods-only/--verify-api/--source-lock cannot be combined with --check-official")
+        report = run_official_check()
+        status = report["status"]
+        print(f"{status}: {OFFICIAL_CHECK_MD.relative_to(ROOT)}")
+        if status == "BLOCKED":
+            return 2
+        return 3 if args.fail_on_updates and status == "UPDATE AVAILABLE" else 0
     if args.apply:
         if args.official_mods_only or args.verify_api or args.source_lock:
             parser.error(

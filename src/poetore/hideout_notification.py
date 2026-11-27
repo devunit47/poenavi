@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
+
+from src.utils.state_machine import StateMachine
 
 BUNDLED_SOUND_OPTIONS = (
     ("standard_1", "標準音1", "hideout_focus_notification.wav"),
@@ -159,58 +162,140 @@ def latest_zone_since_process_start(
     return None
 
 
-@dataclass
+class HideoutTimerPhase(StrEnum):
+    DISABLED = "disabled"
+    AWAITING_ZONE = "awaiting_zone"
+    OUTSIDE_HIDEOUT = "outside_hideout"
+    IN_HIDEOUT = "in_hideout"
+    NOTIFIED = "notified"
+
+
+HIDEOUT_TIMER_TRANSITIONS = {
+    HideoutTimerPhase.DISABLED: frozenset({
+        HideoutTimerPhase.AWAITING_ZONE, HideoutTimerPhase.OUTSIDE_HIDEOUT,
+        HideoutTimerPhase.IN_HIDEOUT,
+    }),
+    HideoutTimerPhase.AWAITING_ZONE: frozenset({
+        HideoutTimerPhase.DISABLED, HideoutTimerPhase.OUTSIDE_HIDEOUT,
+        HideoutTimerPhase.IN_HIDEOUT,
+    }),
+    HideoutTimerPhase.OUTSIDE_HIDEOUT: frozenset({
+        HideoutTimerPhase.DISABLED, HideoutTimerPhase.AWAITING_ZONE,
+        HideoutTimerPhase.IN_HIDEOUT,
+    }),
+    HideoutTimerPhase.IN_HIDEOUT: frozenset({
+        HideoutTimerPhase.DISABLED, HideoutTimerPhase.AWAITING_ZONE,
+        HideoutTimerPhase.OUTSIDE_HIDEOUT, HideoutTimerPhase.NOTIFIED,
+    }),
+    HideoutTimerPhase.NOTIFIED: frozenset({
+        HideoutTimerPhase.DISABLED, HideoutTimerPhase.AWAITING_ZONE,
+        HideoutTimerPhase.OUTSIDE_HIDEOUT, HideoutTimerPhase.IN_HIDEOUT,
+    }),
+}
+
+
+@dataclass(init=False)
 class HideoutTimerState:
+    # Keep the dataclass fields available for repr, equality, and replace().
     duration_seconds: int = 60
     repeat: bool = False
-    active: bool = False
-    zone_known: bool = False
-    in_hideout: bool = False
+    active: bool
+    zone_known: bool
+    in_hideout: bool
     started_at: float | None = None
-    notified: bool = False
+    notified: bool
     last_due_slot: int = 0
 
-    def enable(self, current_zone: str | None, now: float) -> None:
-        self.active = True
-        self.zone_known = current_zone is not None
-        self.in_hideout = is_hideout_zone(current_zone)
-        self.started_at = now if self.in_hideout else None
-        self.notified = False
+    def __init__(
+        self,
+        duration_seconds: int = 60,
+        repeat: bool = False,
+        active: bool = False,
+        zone_known: bool = False,
+        in_hideout: bool = False,
+        started_at: float | None = None,
+        notified: bool = False,
+        last_due_slot: int = 0,
+    ):
+        self.duration_seconds = duration_seconds
+        self.repeat = repeat
+        if not active:
+            phase = HideoutTimerPhase.DISABLED
+        elif not zone_known:
+            phase = HideoutTimerPhase.AWAITING_ZONE
+        elif not in_hideout:
+            phase = HideoutTimerPhase.OUTSIDE_HIDEOUT
+        else:
+            if started_at is None:
+                raise ValueError("A hideout timer requires a start time")
+            phase = (
+                HideoutTimerPhase.NOTIFIED
+                if notified and not repeat else HideoutTimerPhase.IN_HIDEOUT
+            )
+        self._sm = StateMachine("hideout timer", phase, HIDEOUT_TIMER_TRANSITIONS)
+        self.started_at = started_at if self.in_hideout else None
+        self.last_due_slot = last_due_slot if self.in_hideout else 0
+
+    @property
+    def phase(self) -> HideoutTimerPhase:
+        return self._sm.state
+
+    @property
+    def active(self) -> bool:
+        return self.phase is not HideoutTimerPhase.DISABLED
+
+    @property
+    def zone_known(self) -> bool:
+        return self._sm.is_in(
+            HideoutTimerPhase.OUTSIDE_HIDEOUT, HideoutTimerPhase.IN_HIDEOUT,
+            HideoutTimerPhase.NOTIFIED,
+        )
+
+    @property
+    def in_hideout(self) -> bool:
+        return self._sm.is_in(HideoutTimerPhase.IN_HIDEOUT, HideoutTimerPhase.NOTIFIED)
+
+    @property
+    def notified(self) -> bool:
+        return self.phase is HideoutTimerPhase.NOTIFIED
+
+    def _reset_timer(self, phase: HideoutTimerPhase, started_at: float | None = None) -> None:
+        if phase is HideoutTimerPhase.IN_HIDEOUT and started_at is None:
+            raise ValueError("A hideout timer requires a start time")
+        self.started_at = started_at
         self.last_due_slot = 0
+        self._sm.transition(phase, allow_same=True)
+
+    def enable(self, current_zone: str | None, now: float) -> None:
+        if current_zone is None:
+            self._reset_timer(HideoutTimerPhase.AWAITING_ZONE)
+        elif is_hideout_zone(current_zone):
+            self._reset_timer(HideoutTimerPhase.IN_HIDEOUT, now)
+        else:
+            self._reset_timer(HideoutTimerPhase.OUTSIDE_HIDEOUT)
 
     def disable(self) -> None:
-        self.active = False
-        self.reset_to_unknown()
+        self._reset_timer(HideoutTimerPhase.DISABLED)
 
     def reset_to_unknown(self) -> None:
-        self.zone_known = False
-        self.in_hideout = False
-        self.started_at = None
-        self.notified = False
-        self.last_due_slot = 0
+        phase = HideoutTimerPhase.AWAITING_ZONE if self.active else HideoutTimerPhase.DISABLED
+        self._reset_timer(phase)
 
     def enter_zone(self, zone_name: str, now: float) -> None:
-        hideout = is_hideout_zone(zone_name)
-        was_hideout = self.zone_known and self.in_hideout
-        self.zone_known = True
-        self.in_hideout = hideout
-        if hideout:
-            if not was_hideout or self.started_at is None:
-                self.started_at = now
-                self.notified = False
-                self.last_due_slot = 0
+        if not self.active:
             return
-        self.started_at = None
-        self.notified = False
-        self.last_due_slot = 0
+        if not is_hideout_zone(zone_name):
+            self._reset_timer(HideoutTimerPhase.OUTSIDE_HIDEOUT)
+        elif not self.in_hideout or self.started_at is None:
+            self._reset_timer(HideoutTimerPhase.IN_HIDEOUT, now)
 
     def elapsed_seconds(self, now: float) -> int:
-        if not self.active or not self.in_hideout or self.started_at is None:
+        if not self.in_hideout or self.started_at is None:
             return 0
         return max(0, int(now - self.started_at))
 
     def consume_due_notification(self, now: float) -> int | None:
-        if not self.active or not self.in_hideout or self.started_at is None:
+        if self.phase is not HideoutTimerPhase.IN_HIDEOUT or self.started_at is None:
             return None
         slot = self.elapsed_seconds(now) // max(1, int(self.duration_seconds))
         if slot < 1:
@@ -220,26 +305,29 @@ class HideoutTimerState:
                 return None
             self.last_due_slot = slot
             return slot
-        if self.notified:
-            return None
-        self.notified = True
-        self.last_due_slot = max(1, slot)
-        return self.last_due_slot
+        self.last_due_slot = slot
+        self._sm.transition(HideoutTimerPhase.NOTIFIED)
+        return slot
 
     def set_duration(self, duration_seconds: int, now: float) -> None:
         self.duration_seconds = max(
             MIN_DURATION_SECONDS,
             min(MAX_DURATION_SECONDS, int(duration_seconds)),
         )
-        if self.active and self.in_hideout:
-            self.started_at = now
-        self.notified = False
-        self.last_due_slot = 0
+        if self.in_hideout:
+            self._reset_timer(HideoutTimerPhase.IN_HIDEOUT, now)
+        else:
+            self.last_due_slot = 0
 
     def set_repeat(self, repeat: bool) -> None:
         self.repeat = bool(repeat)
-        if not self.repeat and self.last_due_slot:
-            self.notified = True
+        if self.repeat and self.notified:
+            self._sm.transition(HideoutTimerPhase.IN_HIDEOUT)
+        elif (
+            not self.repeat and self.phase is HideoutTimerPhase.IN_HIDEOUT
+            and self.last_due_slot > 0
+        ):
+            self._sm.transition(HideoutTimerPhase.NOTIFIED)
 
     def button_text(self, now: float) -> str:
         if not self.active:

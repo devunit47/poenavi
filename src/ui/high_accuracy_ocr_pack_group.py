@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGroupBox, QLabel, QProgressBar, QPushButton, QVBoxLayout
 
-from src.poetore.poe2.ndlocr_pack import PACK_VERSION
+from src.poetore.poe2.ndlocr_pack import PACK_VERSION, PackInstallState
 
 
 class HighAccuracyOcrPackGroup(QGroupBox):
@@ -47,25 +47,28 @@ class HighAccuracyOcrPackGroup(QGroupBox):
             self._controller.retry()
 
     def update_status(self, status) -> None:
-        state = getattr(status, "state", "unavailable")
+        try:
+            state = PackInstallState(getattr(status, "state", PackInstallState.UNAVAILABLE))
+        except ValueError:
+            state = PackInstallState.UNAVAILABLE
         detail = getattr(status, "detail", "")
         done = int(getattr(status, "done", 0) or 0)
         total = int(getattr(status, "total", 0) or 0)
-        self.progress_bar.setVisible(state == "downloading")
-        self.retry_button.setVisible(state == "error")
+        self.progress_bar.setVisible(state is PackInstallState.DOWNLOADING)
+        self.retry_button.setVisible(state is PackInstallState.ERROR)
 
-        if state == "ready":
+        if state is PackInstallState.READY:
             self.status_label.setText(
                 f"✓ 高精度OCRを利用できます\nNDLOCR-Lite {PACK_VERSION}"
             )
             self._set_label_state("success")
-        elif state in {"checking", "idle"}:
+        elif state in {PackInstallState.CHECKING, PackInstallState.IDLE}:
             self.status_label.setText(
                 "高精度OCRを準備しています\n"
                 "初回のみ高精度OCRパックをダウンロードします"
             )
             self._set_label_state("")
-        elif state == "downloading":
+        elif state is PackInstallState.DOWNLOADING:
             percent = int(done * 100 / total) if total > 0 else 0
             self.progress_bar.setRange(0, 100 if total > 0 else 0)
             if total > 0:
@@ -76,10 +79,10 @@ class HighAccuracyOcrPackGroup(QGroupBox):
                 else "高精度OCRをダウンロードしています…"
             )
             self._set_label_state("")
-        elif state == "installing":
+        elif state is PackInstallState.INSTALLING:
             self.status_label.setText("高精度OCRをインストールしています…")
             self._set_label_state("")
-        elif state == "error":
+        elif state is PackInstallState.ERROR:
             message = (
                 "高精度OCRを準備できませんでした\n"
                 "通常の読み取り機能は引き続き利用できます"

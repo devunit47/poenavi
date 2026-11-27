@@ -12,9 +12,12 @@ import threading
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QObject, Signal
+
+from src.utils.state_machine import StateMachine
 
 from src.update.artifacts import (
     DownloadCancelled,
@@ -192,10 +195,31 @@ def install_pack_archive(
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
+class PackInstallState(StrEnum):
+    IDLE = "idle"
+    CHECKING = "checking"
+    DOWNLOADING = "downloading"
+    INSTALLING = "installing"
+    READY = "ready"
+    ERROR = "error"
+    UNAVAILABLE = "unavailable"
+
+
+_PACK_OUTCOMES = frozenset({PackInstallState.IDLE, PackInstallState.READY, PackInstallState.ERROR})
+PACK_INSTALL_TRANSITIONS = {
+    PackInstallState.IDLE: frozenset({PackInstallState.CHECKING, PackInstallState.READY}),
+    PackInstallState.CHECKING: _PACK_OUTCOMES | {PackInstallState.DOWNLOADING},
+    PackInstallState.DOWNLOADING: _PACK_OUTCOMES | {PackInstallState.INSTALLING},
+    PackInstallState.INSTALLING: _PACK_OUTCOMES,
+    PackInstallState.READY: frozenset({PackInstallState.CHECKING}),
+    PackInstallState.ERROR: frozenset({PackInstallState.CHECKING, PackInstallState.READY}),
+}
+
+
 def download_and_install_pack(
     *,
     progress: Callable[[int, int], None] = lambda _done, _total: None,
-    phase: Callable[[str], None] = lambda _phase: None,
+    phase: Callable[[PackInstallState], None] = lambda _phase: None,
     cancelled: Callable[[], bool] = lambda: False,
     downloader=download_file,
 ) -> Path:
@@ -205,7 +229,7 @@ def download_and_install_pack(
     _cleanup_stale_work_dirs(parent)
     with tempfile.TemporaryDirectory(prefix="ndlocr-download-", dir=parent) as work:
         work_dir = Path(work)
-        phase("checking")
+        phase(PackInstallState.CHECKING)
         checksum_path = downloader(
             checksum_url,
             work_dir / PACK_CHECKSUM_NAME,
@@ -216,23 +240,26 @@ def download_and_install_pack(
             checksum_path.read_text(encoding="utf-8"),
             filename=PACK_ASSET_NAME,
         )
-        phase("downloading")
+        phase(PackInstallState.DOWNLOADING)
         archive_path = downloader(
             archive_url,
             work_dir / PACK_ASSET_NAME,
             progress,
             cancelled,
         )
-        phase("installing")
+        phase(PackInstallState.INSTALLING)
         return install_pack_archive(archive_path, expected)
 
 
 @dataclass(frozen=True)
 class PackStatus:
-    state: str
+    state: PackInstallState | str
     detail: str = ""
     done: int = 0
     total: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "state", PackInstallState(self.state))
 
 
 class NdlOcrPackController(QObject):
@@ -244,51 +271,67 @@ class NdlOcrPackController(QObject):
         super().__init__(parent)
         self._worker = worker
         self._cancel = threading.Event()
-        self._running = False
         self._lock = threading.Lock()
-        self.status = PackStatus("ready" if pack_is_installed() else "idle")
+        initial = PackInstallState.READY if pack_is_installed() else PackInstallState.IDLE
+        self._sm: StateMachine[PackInstallState] = StateMachine(
+            "NDLOCR pack", initial, PACK_INSTALL_TRANSITIONS,
+        )
+        self.status = PackStatus(initial)
 
-    def _publish(self, state: str, detail: str = "", done: int = 0, total: int = 0):
-        self.status = PackStatus(state, detail, done, total)
-        self.status_changed.emit(self.status)
+    @property
+    def state(self) -> PackInstallState:
+        with self._lock:
+            return self._sm.state
+
+    @property
+    def _running(self) -> bool:
+        # The caller holds the lock.
+        return self._sm.is_in(
+            PackInstallState.CHECKING, PackInstallState.DOWNLOADING, PackInstallState.INSTALLING,
+        )
+
+    def _set_status(self, status: PackStatus) -> None:
+        self._sm.transition(PackInstallState(status.state), allow_same=True)
+        self.status = status
+
+    def _publish(self, status: PackStatus) -> None:
+        with self._lock:
+            if status == self.status:
+                return
+            self._set_status(status)
+        self.status_changed.emit(status)
 
     def ensure_started(self) -> None:
-        if pack_is_installed():
-            self._publish("ready")
-            return
         with self._lock:
             if self._running:
                 return
-            self._running = True
-        self._cancel.clear()
+            installed = pack_is_installed()
+            status = PackStatus(PackInstallState.READY if installed else PackInstallState.CHECKING)
+            self._set_status(status)
+            if not installed:
+                self._cancel.clear()
+        self.status_changed.emit(status)
+        if installed:
+            return
 
         def run():
-            outcome = PackStatus("ready")
+            outcome = PackStatus(PackInstallState.READY)
             try:
                 self._worker(
                     progress=lambda done, total: self._publish(
-                        "downloading", done=done, total=total
+                        PackStatus(PackInstallState.DOWNLOADING, done=done, total=total)
                     ),
-                    phase=lambda value: self._publish(value),
+                    phase=lambda value: self._publish(PackStatus(value)),
                     cancelled=self._cancel.is_set,
                 )
             except DownloadCancelled:
-                outcome = PackStatus("idle")
+                outcome = PackStatus(PackInstallState.IDLE)
             except Exception as exc:  # noqa: BLE001 - worker boundary
-                outcome = PackStatus("error", str(exc))
+                outcome = PackStatus(PackInstallState.ERROR, str(exc))
             finally:
-                with self._lock:
-                    self._running = False
-                # Publish the terminal state only after the controller accepts
-                # another start request.  The retry button is driven by this
-                # signal, so exposing ``error`` while ``_running`` is still
-                # true creates a short window where an immediate retry is lost.
-                self._publish(
-                    outcome.state,
-                    outcome.detail,
-                    outcome.done,
-                    outcome.total,
-                )
+                # Update the machine under the lock before signaling so a
+                # retry triggered by the terminal status can start immediately.
+                self._publish(outcome)
 
         threading.Thread(
             target=run,
@@ -300,4 +343,5 @@ class NdlOcrPackController(QObject):
         self.ensure_started()
 
     def close(self) -> None:
-        self._cancel.set()
+        with self._lock:
+            self._cancel.set()

@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
+from enum import StrEnum
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal, QUrl
@@ -40,6 +41,7 @@ from src.utils.window_focus import (
 )
 from src.utils.win32_suppressed_hotkey import pressed_modifiers
 from src.utils.poe_version_data import POE1, POE2
+from src.utils.state_machine import StateMachine
 
 from .parser import ItemParseError, parse_item_text
 from .clipboard import clipboard_change_token, read_item_clipboard
@@ -1331,8 +1333,60 @@ class _PoetoreTitleBar(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class AutoHideDisplayState(StrEnum):
+    INACTIVE = "inactive"
+    PASSIVE_HOLDING = "passive_holding"
+    PASSIVE_RELEASED = "passive_released"
+    INTERACTIVE = "interactive"
+
+
+AUTO_HIDE_DISPLAY_TRANSITIONS = {
+    AutoHideDisplayState.INACTIVE: frozenset({
+        AutoHideDisplayState.PASSIVE_HOLDING, AutoHideDisplayState.PASSIVE_RELEASED,
+        AutoHideDisplayState.INTERACTIVE,
+    }),
+    AutoHideDisplayState.PASSIVE_HOLDING: frozenset({
+        AutoHideDisplayState.PASSIVE_RELEASED, AutoHideDisplayState.INTERACTIVE,
+        AutoHideDisplayState.INACTIVE,
+    }),
+    AutoHideDisplayState.PASSIVE_RELEASED: frozenset({
+        AutoHideDisplayState.PASSIVE_HOLDING, AutoHideDisplayState.INTERACTIVE,
+        AutoHideDisplayState.INACTIVE,
+    }),
+    AutoHideDisplayState.INTERACTIVE: frozenset({
+        AutoHideDisplayState.INACTIVE, AutoHideDisplayState.PASSIVE_HOLDING,
+        AutoHideDisplayState.PASSIVE_RELEASED,
+    }),
+}
+
+
+class ObsWindowState(StrEnum):
+    DISABLED = "disabled"
+    COLLAPSED = "collapsed"
+    EXPANDING = "expanding"
+    EXPANDED = "expanded"
+
+
+OBS_WINDOW_TRANSITIONS = {
+    ObsWindowState.DISABLED: frozenset({ObsWindowState.EXPANDED}),
+    ObsWindowState.COLLAPSED: frozenset({
+        ObsWindowState.DISABLED, ObsWindowState.EXPANDING, ObsWindowState.EXPANDED,
+    }),
+    ObsWindowState.EXPANDING: frozenset({
+        ObsWindowState.DISABLED, ObsWindowState.COLLAPSED, ObsWindowState.EXPANDED,
+    }),
+    ObsWindowState.EXPANDED: frozenset({
+        ObsWindowState.DISABLED, ObsWindowState.COLLAPSED, ObsWindowState.EXPANDING,
+    }),
+}
+
+
 class PoetoreWindow(QWidget):
     """貼り付け解析だけを行う、Trade API未接続のローカル試作画面。"""
+
+    _auto_hide_sm: StateMachine[AutoHideDisplayState] | None = None
+    _obs_sm: StateMachine[ObsWindowState] | None = None
+    _capture_hotkey_released_before_show = False
 
     def __init__(self, parent=None, app_config=None, save_config=None):
         super().__init__(parent)
@@ -1415,7 +1469,6 @@ class PoetoreWindow(QWidget):
         self._poe_window_hwnd: int | None = None
         self._focus_signal_connected = False
         self._outside_click_listener = None
-        self._passive_hotkey_display = False
         self._capture_auto_hide = False
         self._capture_error_dialog: QMessageBox | None = None
         self._heist_unique_mod_item_key: str | None = None
@@ -1425,12 +1478,7 @@ class PoetoreWindow(QWidget):
         self._capture_hotkey = str(
             self._app_config.get("hotkeys", {}).get("poetore_capture", "alt+d")
         )
-        self._auto_hide_hotkey_released = False
         self._auto_hide_origin: QPoint | None = None
-        self._auto_hide_interactive = False
-        self._obs_streaming_mode = False
-        self._obs_collapsed = False
-        self._obs_transitioning = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -4890,8 +4938,7 @@ class PoetoreWindow(QWidget):
     def closeEvent(self, event):
         self._dismiss_capture_error_dialog()
         self._clear_pending_trade_conditions()
-        self._passive_hotkey_display = False
-        self._auto_hide_interactive = False
+        self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INACTIVE, allow_same=True)
         self._stop_outside_click_listener()
         if self._focus_signal_connected:
             QApplication.instance().focusChanged.disconnect(self._close_when_focus_leaves_panel)
@@ -4912,10 +4959,52 @@ class PoetoreWindow(QWidget):
         self.close()
         self.deleteLater()
 
+    def _ensure_obs_sm(self) -> StateMachine[ObsWindowState]:
+        if self._obs_sm is None:
+            self._obs_sm = StateMachine("Poetore OBS window", ObsWindowState.DISABLED, OBS_WINDOW_TRANSITIONS)
+        return self._obs_sm
+
+    @property
+    def obs_window_state(self) -> ObsWindowState:
+        return self._ensure_obs_sm().state
+
+    @property
+    def _obs_streaming_mode(self) -> bool:
+        return self.obs_window_state is not ObsWindowState.DISABLED
+
+    @_obs_streaming_mode.setter
+    def _obs_streaming_mode(self, enabled: bool):
+        if enabled and not self._obs_streaming_mode:
+            self._ensure_obs_sm().transition(ObsWindowState.EXPANDED)
+        elif not enabled:
+            self._ensure_obs_sm().transition(ObsWindowState.DISABLED, allow_same=True)
+
+    @property
+    def _obs_collapsed(self) -> bool:
+        return self.obs_window_state is ObsWindowState.COLLAPSED
+
+    @_obs_collapsed.setter
+    def _obs_collapsed(self, collapsed: bool):
+        if collapsed and self._obs_streaming_mode:
+            self._ensure_obs_sm().transition(ObsWindowState.COLLAPSED, allow_same=True)
+        elif not collapsed and self._obs_collapsed:
+            self._ensure_obs_sm().transition(ObsWindowState.EXPANDED)
+
+    @property
+    def _obs_transitioning(self) -> bool:
+        return self.obs_window_state is ObsWindowState.EXPANDING
+
+    @_obs_transitioning.setter
+    def _obs_transitioning(self, transitioning: bool):
+        if transitioning and self._obs_streaming_mode:
+            self._ensure_obs_sm().transition(ObsWindowState.EXPANDING, allow_same=True)
+        elif not transitioning and self._obs_transitioning:
+            self._ensure_obs_sm().transition(ObsWindowState.EXPANDED)
+
     def set_obs_streaming_mode(self, enabled: bool):
         """Keep one stable HWND alive and collapse it to its title bar for OBS."""
         enabled = bool(enabled)
-        was_enabled = getattr(self, "_obs_streaming_mode", False)
+        was_enabled = self._obs_streaming_mode
         self._obs_streaming_mode = enabled
         self.setWindowTitle("ぽえとれ - 検索結果ウィンドウ" if enabled else "ぽえとれ")
         if enabled:
@@ -4930,9 +5019,9 @@ class PoetoreWindow(QWidget):
             self._restore_obs_geometry()
             self.collapse_for_obs()
             self.show()
-        elif self.isVisible():
+        elif was_enabled or self.isVisible():
+            self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INACTIVE, allow_same=True)
             self.setWindowOpacity(1.0)
-            self._obs_collapsed = False
             self._title_bar.set_obs_collapsed(False)
             self._obs_content.show()
             self._content_scroll.show()
@@ -4947,15 +5036,16 @@ class PoetoreWindow(QWidget):
             self.setWindowFlag(Qt.WindowTransparentForInput, False)
 
     def collapse_for_obs(self):
-        if not getattr(self, "_obs_streaming_mode", False):
+        if not self._obs_streaming_mode:
             self.close()
             return
-        if not getattr(self, "_obs_collapsed", False) and (
+        if not self._obs_collapsed and (
             self.isVisible() or not hasattr(self, "_obs_expanded_size")
         ):
             self._obs_expanded_size = self.size()
         suspend_theme_fixed_geometry(self, True)
-        self._obs_collapsed = True
+        self._ensure_obs_sm().transition(ObsWindowState.COLLAPSED, allow_same=True)
+        self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INACTIVE, allow_same=True)
         self._obs_content.hide()
         self._content_scroll.hide()
         self._title_bar.set_obs_collapsed(True)
@@ -4970,14 +5060,13 @@ class PoetoreWindow(QWidget):
         self._persist_obs_geometry()
 
     def _expand_for_obs(self):
-        if not getattr(self, "_obs_streaming_mode", False):
+        if not self._obs_streaming_mode:
             return
         # 折りたたみ高の上限を解除した瞬間に、空の大きな中間フレームが
         # Windowsへ描画されないよう、完成状態まで非表示で組み替える。
-        self._obs_transitioning = True
+        self._ensure_obs_sm().transition(ObsWindowState.EXPANDING, allow_same=True)
         self.hide()
         self.setWindowOpacity(1.0)
-        self._obs_collapsed = False
         self._title_bar.set_obs_collapsed(False)
         self._obs_content.show()
         self._content_scroll.show()
@@ -5032,6 +5121,64 @@ class PoetoreWindow(QWidget):
         }
         if self._save_app_config is not None:
             self._save_app_config(self._app_config)
+
+    def _ensure_auto_hide_sm(self) -> StateMachine[AutoHideDisplayState]:
+        if self._auto_hide_sm is None:
+            self._auto_hide_sm = StateMachine(
+                "Poetore auto-hide display", AutoHideDisplayState.INACTIVE, AUTO_HIDE_DISPLAY_TRANSITIONS,
+            )
+        return self._auto_hide_sm
+
+    @property
+    def auto_hide_state(self) -> AutoHideDisplayState:
+        return self._ensure_auto_hide_sm().state
+
+    @property
+    def _passive_hotkey_display(self) -> bool:
+        return self.auto_hide_state in (
+            AutoHideDisplayState.PASSIVE_HOLDING, AutoHideDisplayState.PASSIVE_RELEASED,
+        )
+
+    @_passive_hotkey_display.setter
+    def _passive_hotkey_display(self, passive: bool):
+        sm = self._ensure_auto_hide_sm()
+        if passive:
+            target = (
+                AutoHideDisplayState.PASSIVE_RELEASED if self._auto_hide_hotkey_released
+                else AutoHideDisplayState.PASSIVE_HOLDING
+            )
+            sm.transition(target, allow_same=True)
+        elif self._passive_hotkey_display:
+            sm.transition(AutoHideDisplayState.INACTIVE)
+
+    @property
+    def _auto_hide_hotkey_released(self) -> bool:
+        return (
+            self.auto_hide_state is AutoHideDisplayState.PASSIVE_RELEASED
+            or self._capture_hotkey_released_before_show
+        )
+
+    @_auto_hide_hotkey_released.setter
+    def _auto_hide_hotkey_released(self, released: bool):
+        # A new capture can still be copying while an older result is visible.
+        self._capture_hotkey_released_before_show = bool(released)
+        if self._passive_hotkey_display:
+            target = (
+                AutoHideDisplayState.PASSIVE_RELEASED if released
+                else AutoHideDisplayState.PASSIVE_HOLDING
+            )
+            self._ensure_auto_hide_sm().transition(target, allow_same=True)
+
+    @property
+    def _auto_hide_interactive(self) -> bool:
+        return self.auto_hide_state is AutoHideDisplayState.INTERACTIVE
+
+    @_auto_hide_interactive.setter
+    def _auto_hide_interactive(self, interactive: bool):
+        if interactive:
+            self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INTERACTIVE, allow_same=True)
+        elif self._auto_hide_interactive:
+            self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INACTIVE)
 
     def capture_from_poe(
         self,
@@ -5503,11 +5650,16 @@ class PoetoreWindow(QWidget):
                 self._adjust_window_height_to_mod_rows()
                 position = position_from_relative(context, self.size(), saved_position)
                 self.move(position or position_for_context(context, self.size()))
-            self._passive_hotkey_display = not activate
+            if activate:
+                self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INACTIVE, allow_same=True)
+            else:
+                self._passive_hotkey_display = True
+            self._capture_hotkey_released_before_show = False
             self.show()
         finally:
             self._trade_placing_context = False
-        self._obs_transitioning = False
+        if self.obs_window_state is ObsWindowState.EXPANDING:
+            self._ensure_obs_sm().transition(ObsWindowState.EXPANDED)
         self.raise_()
         if activate:
             # QtのWindowDeactivateはWindows上でまれに届かないため、
@@ -5572,17 +5724,16 @@ class PoetoreWindow(QWidget):
 
     def _handle_global_mouse_move(self, x: int, y: int):
         """Mirror Awakened's AUTO-HIDE behavior without stealing PoE focus."""
-        if not self.isVisible() or not (
-            self._passive_hotkey_display or self._auto_hide_interactive
-        ):
+        state = self.auto_hide_state
+        if not self.isVisible() or state is AutoHideDisplayState.INACTIVE:
             return
         point = self._global_cursor_point(x, y)
-        if self._auto_hide_interactive:
+        if state is AutoHideDisplayState.INTERACTIVE:
             if not self._auto_hide_area_contains(point):
                 self._stop_outside_click_listener()
                 self._close_and_return_to_poe()
             return
-        if not self._auto_hide_hotkey_released:
+        if state is AutoHideDisplayState.PASSIVE_HOLDING:
             if self._auto_hide_area_contains(point):
                 self._enter_auto_hide_interactive()
             return
@@ -5593,8 +5744,7 @@ class PoetoreWindow(QWidget):
             self._dismiss_result()
 
     def _enter_auto_hide_interactive(self):
-        self._passive_hotkey_display = False
-        self._auto_hide_interactive = True
+        self._ensure_auto_hide_sm().transition(AutoHideDisplayState.INTERACTIVE, allow_same=True)
         self.activateWindow()
         self.setFocus(Qt.OtherFocusReason)
 

@@ -14,9 +14,12 @@ import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from src.utils.state_machine import StateMachine
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,25 @@ def _payload_result(payload: dict) -> NdlOcrResult:
     )
 
 
+class NdlOcrServerState(StrEnum):
+    STOPPED = "stopped"
+    STARTING = "starting"
+    READY = "ready"
+    RETIRED = "retired"
+
+
+NDLOCR_SERVER_TRANSITIONS = {
+    NdlOcrServerState.STOPPED: frozenset({NdlOcrServerState.STARTING, NdlOcrServerState.RETIRED}),
+    NdlOcrServerState.STARTING: frozenset({
+        NdlOcrServerState.READY, NdlOcrServerState.STOPPED, NdlOcrServerState.RETIRED,
+    }),
+    NdlOcrServerState.READY: frozenset({
+        NdlOcrServerState.STARTING, NdlOcrServerState.STOPPED, NdlOcrServerState.RETIRED,
+    }),
+    NdlOcrServerState.RETIRED: frozenset(),
+}
+
+
 class NdlOcrLiteServer:
     """Lazily start and reuse the bundled CPU-only NDLOCR process."""
 
@@ -106,15 +128,19 @@ class NdlOcrLiteServer:
         self._timer_generation = 0
         self._session_dir: Path | None = None
         self._request_number = 0
-        self._ready = False
-        self._retired = False
+        self._sm = StateMachine("NDLOCR server", NdlOcrServerState.STOPPED, NDLOCR_SERVER_TRANSITIONS)
         self.last_metrics: NdlOcrRequestMetrics | None = None
+
+    @property
+    def state(self) -> NdlOcrServerState:
+        with self._state_lock:
+            return self._sm.state
 
     @property
     def is_ready(self) -> bool:
         with self._state_lock:
             return bool(
-                self._ready
+                self._sm.state is NdlOcrServerState.READY
                 and self._process is not None
                 and self._process.poll() is None
             )
@@ -178,33 +204,36 @@ class NdlOcrLiteServer:
         return message
 
     def _start_if_needed(self) -> bool:
-        if self.is_ready:
-            return False
         with self._state_lock:
-            if self._retired:
+            if self.is_ready:
+                return False
+            if self._sm.is_in(NdlOcrServerState.RETIRED):
                 raise RuntimeError("NDLOCRは終了済みです。")
             old_process = self._process
             old_session_dir = self._session_dir
+            self._process = None
+            self._session_dir = None
+            self._sm.transition(NdlOcrServerState.STARTING)
         if old_process is not None:
             self._shutdown_process(
                 old_process, old_session_dir, reason="unexpected_exit",
             )
-        helper = self.helper or _helper_path()
-        if not helper.is_file():
-            raise RuntimeError(f"NDLOCRヘルパーが見つかりません: {helper}")
-        self._emit("ndl_resident_start_requested")
-        started = time.perf_counter()
-        session_dir = Path(tempfile.mkdtemp(prefix="poenavi-ndlocr-"))
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        environment = os.environ.copy()
-        environment["PYTHONUTF8"] = "1"
-        environment["PYTHONIOENCODING"] = "utf-8"
-        responses: queue.Queue[dict[str, object] | None] = queue.Queue()
-        stderr_tail: deque[str] = deque(maxlen=20)
+        session_dir = None
         try:
+            helper = self.helper or _helper_path()
+            if not helper.is_file():
+                raise RuntimeError(f"NDLOCRヘルパーが見つかりません: {helper}")
+            self._emit("ndl_resident_start_requested")
+            started = time.perf_counter()
+            session_dir = Path(tempfile.mkdtemp(prefix="poenavi-ndlocr-"))
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            environment = os.environ.copy()
+            environment["PYTHONUTF8"] = "1"
+            environment["PYTHONIOENCODING"] = "utf-8"
+            responses: queue.Queue[dict[str, object] | None] = queue.Queue()
+            stderr_tail: deque[str] = deque(maxlen=20)
             with self._state_lock:
-                if self._retired:
-                    raise RuntimeError("NDLOCRは終了済みです。")
+                self._check_starting()
                 process = self._process_factory(
                     [str(helper), "--server"],
                     stdin=subprocess.PIPE,
@@ -220,33 +249,37 @@ class NdlOcrLiteServer:
                 )
                 self._process = process
                 self._session_dir = session_dir
-                self._ready = False
                 self._responses = responses
                 self._stderr_tail = stderr_tail
         except Exception:
-            shutil.rmtree(session_dir, ignore_errors=True)
-            self._emit("ndl_resident_stopped", reason="startup_failed")
+            with self._state_lock:
+                if self._sm.is_in(NdlOcrServerState.STARTING):
+                    self._sm.transition(NdlOcrServerState.STOPPED)
+            if session_dir is not None:
+                shutil.rmtree(session_dir, ignore_errors=True)
+                self._emit("ndl_resident_stopped", reason="startup_failed")
             raise
-        threading.Thread(
-            target=self._read_stdout,
-            args=(process, responses),
-            name="ndlocr-stdout",
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self._read_stderr,
-            args=(process, stderr_tail),
-            name="ndlocr-stderr",
-            daemon=True,
-        ).start()
         try:
+            threading.Thread(
+                target=self._read_stdout,
+                args=(process, responses),
+                name="ndlocr-stdout",
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=self._read_stderr,
+                args=(process, stderr_tail),
+                name="ndlocr-stderr",
+                daemon=True,
+            ).start()
             message = self._next_message(self.timeout)
             if message.get("event") != "ready":
                 raise RuntimeError("NDLOCRの準備完了応答が不正です。")
             startup_ms = _optional_float(message.get("startup_ms"))
             wall_startup_ms = (time.perf_counter() - started) * 1000
             with self._state_lock:
-                self._ready = True
+                self._check_starting()
+                self._sm.transition(NdlOcrServerState.READY)
             self.last_metrics = NdlOcrRequestMetrics(
                 cold_start=True,
                 startup_ms=startup_ms,
@@ -262,6 +295,13 @@ class NdlOcrLiteServer:
         except Exception:
             self._shutdown_process(process, session_dir, reason="startup_failed")
             raise
+
+    def _check_starting(self) -> None:
+        """Check for cancellation while holding the state lock."""
+        if self._sm.is_in(NdlOcrServerState.RETIRED):
+            raise RuntimeError("NDLOCRは終了済みです。")
+        if not self._sm.is_in(NdlOcrServerState.STARTING):
+            raise RuntimeError("NDLOCRは中断されました。")
 
     def recognize(self, images: Sequence[bytes]) -> list[NdlOcrResult]:
         if not images:
@@ -358,7 +398,7 @@ class NdlOcrLiteServer:
 
     def _schedule_idle_stop(self) -> None:
         with self._state_lock:
-            if not self._ready:
+            if not self._sm.is_in(NdlOcrServerState.READY):
                 return
             if self._timer is not None:
                 self._timer.cancel()
@@ -409,7 +449,8 @@ class NdlOcrLiteServer:
                 if self._process is process:
                     self._process = None
                     self._session_dir = None
-                    self._ready = False
+                    if not self._sm.is_in(NdlOcrServerState.RETIRED):
+                        self._sm.transition(NdlOcrServerState.STOPPED, allow_same=True)
             self._emit("ndl_resident_stopped", reason=reason)
 
     def _stop(self, *, reason: str) -> None:
@@ -428,13 +469,14 @@ class NdlOcrLiteServer:
     def close(self, *, permanent: bool = False) -> None:
         # Explicit application/mode shutdown must not wait for a long inference.
         with self._state_lock:
-            self._retired = self._retired or permanent
+            if not self._sm.is_in(NdlOcrServerState.RETIRED):
+                target = NdlOcrServerState.RETIRED if permanent else NdlOcrServerState.STOPPED
+                self._sm.transition(target, allow_same=True)
             timer = self._timer
             self._timer = None
             self._timer_generation += 1
             process = self._process
             session_dir = self._session_dir
-            self._ready = False
         if timer is not None:
             timer.cancel()
         if process is not None:

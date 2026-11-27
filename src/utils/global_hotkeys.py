@@ -1,9 +1,12 @@
 """モード間で共有するグローバルホットキー監視。"""
 
 import sys
+from enum import StrEnum
+
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from src.utils.internal_key_input import is_internal_key_input
+from src.utils.state_machine import StateMachine
 from src.utils.window_focus import focus_window, get_foreground_window, is_path_of_exile_window
 from src.poetore.performance import record_hotkey_event
 
@@ -221,6 +224,29 @@ class GlobalHotkeyService(QObject):
         return None
 
 
+class SuppressedHotkeyState(StrEnum):
+    STOPPED = "stopped"
+    ARMED = "armed"
+    AWAITING_RELEASE = "awaiting_release"
+
+
+SUPPRESSED_HOTKEY_TRANSITIONS = {
+    SuppressedHotkeyState.STOPPED: frozenset({SuppressedHotkeyState.ARMED}),
+    SuppressedHotkeyState.ARMED: frozenset({
+        SuppressedHotkeyState.AWAITING_RELEASE, SuppressedHotkeyState.STOPPED,
+    }),
+    SuppressedHotkeyState.AWAITING_RELEASE: frozenset({
+        SuppressedHotkeyState.ARMED, SuppressedHotkeyState.STOPPED,
+    }),
+}
+
+
+class ForegroundContext(StrEnum):
+    OUTSIDE = "outside"
+    POE = "poe"
+    RESULT = "result"
+
+
 class ForegroundSuppressedHotkeyService(QObject):
     """PoEが前面の間だけ、Windowsで元キーを通さずホットキーを発火する。"""
 
@@ -257,20 +283,34 @@ class ForegroundSuppressedHotkeyService(QObject):
         self._platform = sys.platform if platform is None else platform
         self._poll_interval_ms = poll_interval_ms
         self._native_hook = None
-        self._running = False
+        self._sm = StateMachine(
+            "suppressed hotkey", SuppressedHotkeyState.STOPPED,
+            SUPPRESSED_HOTKEY_TRANSITIONS,
+        )
         self._foreground_timer = QTimer(self)
         self._foreground_timer.setInterval(self._poll_interval_ms)
         self._foreground_timer.timeout.connect(self._refresh_foreground_context)
-        self._waiting_for_release = False
         self._pending_focus_target = None
-        self._foreground_context = "outside"
+        self._foreground_context = ForegroundContext.OUTSIDE
         self._cached_focus_target = None
         self._native_pressed.connect(self._on_native_pressed)
         self._native_released.connect(self._on_native_released)
 
     @property
+    def state(self) -> SuppressedHotkeyState:
+        return self._sm.state
+
+    @property
+    def foreground_context(self) -> ForegroundContext:
+        return self._foreground_context
+
+    @property
     def is_running(self):
-        return self._running
+        return self.state is not SuppressedHotkeyState.STOPPED
+
+    @property
+    def _waiting_for_release(self) -> bool:
+        return self.state is SuppressedHotkeyState.AWAITING_RELEASE
 
     @property
     def is_registered(self):
@@ -286,7 +326,7 @@ class ForegroundSuppressedHotkeyService(QObject):
 
     def start(self):
         self.stop()
-        self._running = True
+        self._sm.transition(SuppressedHotkeyState.ARMED)
         if not self.is_supported:
             return
         self._refresh_foreground_context()
@@ -294,15 +334,14 @@ class ForegroundSuppressedHotkeyService(QObject):
         self._register()
 
     def stop(self):
-        self._running = False
+        self._sm.transition(SuppressedHotkeyState.STOPPED, allow_same=True)
         self._foreground_timer.stop()
-        self._waiting_for_release = False
         self._pending_focus_target = None
         self._unregister()
 
     def refresh(self):
         """Restart only when the native hook thread has actually stopped."""
-        if not self._running or not self.is_supported:
+        if not self.is_running or not self.is_supported:
             return
         if not self.is_registered:
             self._register()
@@ -340,12 +379,12 @@ class ForegroundSuppressedHotkeyService(QObject):
 
     def _should_suppress_native_event(self):
         """Called in the hook thread; only read precomputed state."""
-        if not self._running:
+        if not self.is_running:
             return False
         context = self._foreground_context
-        if context not in {"poe", "result"}:
+        if context is ForegroundContext.OUTSIDE:
             return False
-        if context == "result" and not self._cached_focus_target:
+        if context is ForegroundContext.RESULT and not self._cached_focus_target:
             return False
         if is_internal_key_input():
             return False
@@ -358,27 +397,25 @@ class ForegroundSuppressedHotkeyService(QObject):
             self._native_released.emit()
 
     def _on_native_pressed(self):
-        if not self._running or self._waiting_for_release:
+        if self.state is not SuppressedHotkeyState.ARMED:
             return
         context = self._foreground_context
         record_hotkey_event("pressed", hotkey=self._hotkey, context=context)
-        self._waiting_for_release = True
         self._pending_focus_target = (
-            self._cached_focus_target if context == "result" else None
+            self._cached_focus_target if context is ForegroundContext.RESULT else None
         )
+        self._sm.transition(SuppressedHotkeyState.AWAITING_RELEASE)
 
     def _on_native_released(self):
         if not self._waiting_for_release:
             return
-        self._waiting_for_release = False
+        self._sm.transition(SuppressedHotkeyState.ARMED)
         focus_target = self._pending_focus_target
         self._pending_focus_target = None
-        if not self._running:
-            return
         if self._action == "poetore_capture":
             # A previous copy can activate the result window while the keys are held.
             self._refresh_foreground_context()
-            if self._foreground_context == "outside":
+            if self._foreground_context is ForegroundContext.OUTSIDE:
                 return
             focus_target = self._cached_focus_target
         if focus_target is not None and not self._focus_target(focus_target):
@@ -390,12 +427,12 @@ class ForegroundSuppressedHotkeyService(QObject):
 
     def _refresh_foreground_context(self):
         """Resolve the active app outside the low-level keyboard-hook callback."""
-        context = "outside"
+        context = ForegroundContext.OUTSIDE
         focus_target = None
         try:
             foreground = self._foreground_getter()
             if foreground and self._poe_window_checker(foreground):
-                context = "poe"
+                context = ForegroundContext.POE
             elif (
                 foreground
                 and self._result_window_checker is not None
@@ -404,7 +441,7 @@ class ForegroundSuppressedHotkeyService(QObject):
             ):
                 candidate = self._poe_target_getter()
                 if candidate and self._poe_window_checker(candidate):
-                    context = "result"
+                    context = ForegroundContext.RESULT
                     focus_target = candidate
         except Exception as exc:
             record_hotkey_event("context_check_failed", error=str(exc))

@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+from enum import StrEnum
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QCursor, QMouseEvent
@@ -32,11 +33,32 @@ from src.ui.window_flags import (
     set_native_window_topmost,
 )
 from src.utils.config_manager import ConfigManager
+from src.utils.state_machine import StateMachine
 from src.utils.window_focus import (
     get_foreground_window,
     get_next_visible_window_after,
     is_path_of_exile_window,
 )
+
+
+class TopmostForegroundKind(StrEnum):
+    UNKNOWN = "unknown"
+    NONE = "none"
+    MINI_NAVI = "mini_navi"
+    MINI_NAVI_OVER_POE = "mini_navi_over_poe"
+    POE = "poe"
+    OTHER = "other"
+
+
+class MiniNaviObsState(StrEnum):
+    ACTIVE = "active"
+    WAITING = "waiting"
+
+
+MINI_NAVI_OBS_TRANSITIONS = {
+    MiniNaviObsState.ACTIVE: frozenset({MiniNaviObsState.WAITING}),
+    MiniNaviObsState.WAITING: frozenset({MiniNaviObsState.ACTIVE}),
+}
 
 
 class MiniNaviLockButtonWindow(QWidget):
@@ -170,6 +192,8 @@ class MiniNaviLockButtonWindow(QWidget):
 class MiniNaviOverlay(QWidget):
     """みになび表示ウィンドウ。"""
 
+    _obs_sm: StateMachine[MiniNaviObsState] | None = None
+
     WAITING_FOR_AREA_TEXT = "エリアに入場すると攻略ガイドが表示されます"
     OBS_WINDOW_TITLE = "みになび - OBSキャプチャ"
     OBS_WAITING_SIZE = 8
@@ -240,7 +264,6 @@ class MiniNaviOverlay(QWidget):
         self._current_has_area_note = False
         self._muted_content = False
         self._lock_button_hidden_for_drag = False
-        self._obs_waiting = False
         self._fade_timer = QTimer(self)
         self._fade_timer.setSingleShot(True)
         self._fade_timer.timeout.connect(self._fade_to_idle_opacity)
@@ -250,7 +273,7 @@ class MiniNaviOverlay(QWidget):
         self._last_topmost_state = None
         self._last_topmost_tick_at = None
         self._last_topmost_foreground = None
-        self._last_topmost_foreground_kind = "unknown"
+        self._last_topmost_foreground_kind = TopmostForegroundKind.UNKNOWN
         self._topmost_diagnostic_generation = 0
         self.setMouseTracking(True)
         self.setMinimumSize(220, 70)
@@ -437,11 +460,29 @@ class MiniNaviOverlay(QWidget):
         self._sync_lock_button()
         self._show_strong_opacity(restart_fade=True)
 
+    def _ensure_obs_sm(self) -> StateMachine[MiniNaviObsState]:
+        if self._obs_sm is None:
+            self._obs_sm = StateMachine("Mini Navi OBS", MiniNaviObsState.ACTIVE, MINI_NAVI_OBS_TRANSITIONS)
+        return self._obs_sm
+
+    @property
+    def obs_state(self) -> MiniNaviObsState:
+        return self._ensure_obs_sm().state
+
+    @property
+    def _obs_waiting(self) -> bool:
+        return self.obs_state is MiniNaviObsState.WAITING
+
+    @_obs_waiting.setter
+    def _obs_waiting(self, waiting: bool):
+        target = MiniNaviObsState.WAITING if waiting else MiniNaviObsState.ACTIVE
+        self._ensure_obs_sm().transition(target, allow_same=True)
+
     def collapse_for_obs(self):
         """同じネイティブウィンドウを維持したまま、画面端へ極小透明で収納する。"""
         self._fade_timer.stop()
         suspend_theme_fixed_geometry(self, True)
-        self._obs_waiting = True
+        self._ensure_obs_sm().transition(MiniNaviObsState.WAITING, allow_same=True)
         self.lock_button_window.hide()
         self.outer.hide()
         self.setMinimumSize(0, 0)
@@ -456,7 +497,7 @@ class MiniNaviOverlay(QWidget):
         """OBS待機状態を解除し、保存済みのみになび表示へ戻す。"""
         if not self._obs_waiting:
             return
-        self._obs_waiting = False
+        self._ensure_obs_sm().transition(MiniNaviObsState.ACTIVE)
         self.setMaximumSize(16777215, 16777215)
         self.setMinimumSize(220, 70)
         suspend_theme_fixed_geometry(self, False)
@@ -712,24 +753,26 @@ class MiniNaviOverlay(QWidget):
         foreground = get_foreground_window()
         self._last_topmost_foreground = foreground
         if not foreground:
-            self._last_topmost_foreground_kind = "none"
+            self._last_topmost_foreground_kind = TopmostForegroundKind.NONE
             return False
         own_windows = {int(self.winId()), int(self.lock_button_window.winId())}
         checklist = getattr(self.main_window, "act4_checklist_window", None)
         if checklist is not None:
             own_windows.add(int(checklist.winId()))
         if int(foreground) in own_windows:
-            self._last_topmost_foreground_kind = "mini_navi"
+            self._last_topmost_foreground_kind = TopmostForegroundKind.MINI_NAVI
             foreground = get_next_visible_window_after(
                 foreground,
                 skip_current_process=True,
             )
             if foreground and is_path_of_exile_window(foreground):
-                self._last_topmost_foreground_kind = "mini_navi_over_poe"
+                self._last_topmost_foreground_kind = TopmostForegroundKind.MINI_NAVI_OVER_POE
                 return True
             return False
         is_poe = bool(is_path_of_exile_window(foreground))
-        self._last_topmost_foreground_kind = "poe" if is_poe else "other"
+        self._last_topmost_foreground_kind = (
+            TopmostForegroundKind.POE if is_poe else TopmostForegroundKind.OTHER
+        )
         return is_poe
 
     def _refresh_topmost_state(self):

@@ -10,6 +10,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import QDialog, QMessageBox
 from src.poetore.expedition_ocr_probe import WindowsOcrServer
 from src.poetore.poe2.ndlocr_lite import NdlOcrLiteServer
 from src.poetore.window_position import PlacementContext, path_of_exile_client_rect
+from src.utils.state_machine import StateMachine
 
 CURIO_MIN_SCORE = 0.90
 CURIO_MIN_MARGIN = 0.15
@@ -824,6 +826,23 @@ class CurioRegionSelector(QDialog):
         )
 
 
+class HeistCurioState(StrEnum):
+    IDLE = "idle"
+    SELECTING_REGION = "selecting_region"
+    PROCESSING = "processing"
+    CLOSED = "closed"
+
+
+HEIST_CURIO_TRANSITIONS = {
+    HeistCurioState.IDLE: frozenset({HeistCurioState.SELECTING_REGION, HeistCurioState.CLOSED}),
+    HeistCurioState.SELECTING_REGION: frozenset({
+        HeistCurioState.PROCESSING, HeistCurioState.IDLE, HeistCurioState.CLOSED,
+    }),
+    HeistCurioState.PROCESSING: frozenset({HeistCurioState.IDLE, HeistCurioState.CLOSED}),
+    HeistCurioState.CLOSED: frozenset(),
+}
+
+
 class HeistCurioController(QObject):
     status = Signal(str)
     failed = Signal(str)
@@ -847,30 +866,56 @@ class HeistCurioController(QObject):
         self._owns_ndl_ocr = ndl_ocr_server is None
         self._scan_coordinator = scan_coordinator
         self._items = tuple(items or load_curio_items())
-        self._running = False
+        self._lock = threading.Lock()
+        self._sm = StateMachine("heist curio", HeistCurioState.IDLE, HEIST_CURIO_TRANSITIONS)
         self._generation = 0
-        self._closed = False
         self._high_accuracy_overlay = None
         self.high_accuracy_started.connect(self._show_high_accuracy_status)
         self.high_accuracy_finished.connect(self._hide_high_accuracy_status)
 
     @property
+    def state(self) -> HeistCurioState:
+        with self._lock:
+            return self._sm.state
+
+    @property
     def running(self) -> bool:
-        return self._running
+        with self._lock:
+            return self._sm.is_in(HeistCurioState.SELECTING_REGION, HeistCurioState.PROCESSING)
+
+    @property
+    def _running(self) -> bool:
+        return self.running
+
+    @_running.setter
+    def _running(self, running: bool) -> None:
+        # Legacy callers can seed a worker without opening the region selector.
+        with self._lock:
+            if running and self._sm.is_in(HeistCurioState.IDLE):
+                self._sm.transition(HeistCurioState.SELECTING_REGION)
+                self._sm.transition(HeistCurioState.PROCESSING)
+            elif not running and self._sm.is_in(
+                HeistCurioState.SELECTING_REGION, HeistCurioState.PROCESSING,
+            ):
+                self._sm.transition(HeistCurioState.IDLE)
 
     def close(self) -> None:
-        self._closed = True
-        self._generation += 1
-        self._running = False
+        with self._lock:
+            if self._sm.is_in(HeistCurioState.CLOSED):
+                return
+            self._sm.transition(HeistCurioState.CLOSED)
+            self._generation += 1
+            if self._scan_coordinator is not None:
+                self._scan_coordinator.finish("heist_curio")
         self._hide_high_accuracy_status()
-        if self._scan_coordinator is not None:
-            self._scan_coordinator.finish("heist_curio")
         if self._owns_ocr:
             self._ocr.close(permanent=True)
         if self._owns_ndl_ocr:
             self._ndl_ocr.close(permanent=True)
 
     def warm_up(self) -> None:
+        if self.state is HeistCurioState.CLOSED:
+            return
         threading.Thread(
             target=self._safe_start, name="heist-curio-warmup", daemon=True
         ).start()
@@ -882,37 +927,44 @@ class HeistCurioController(QObject):
             return
 
     def request_scan(self) -> bool:
-        if self._closed or self._running:
-            return False
-        if self._scan_coordinator is not None and not self._scan_coordinator.try_begin(
-            "heist_curio"
-        ):
+        with self._lock:
+            if not self._sm.is_in(HeistCurioState.IDLE):
+                return False
+            acquired = self._scan_coordinator is None or self._scan_coordinator.try_begin("heist_curio")
+            if acquired:
+                self._sm.transition(HeistCurioState.SELECTING_REGION)
+                self._generation += 1
+                generation = self._generation
+        if not acquired:
             self.failed.emit("別の画面読み取り処理中です。")
             return False
         client_rect = path_of_exile_client_rect()
         if client_rect is None:
-            self._finish_error("Path of Exileのゲーム画面が見つかりませんでした。")
+            self._finish_error("Path of Exileのゲーム画面が見つかりませんでした。", generation)
             return False
-        self._running = True
-        self._generation += 1
-        generation = self._generation
         selector = CurioRegionSelector(client_rect)
         if not selector.exec() or selector.selected_rect is None:
-            self._finish_cancelled()
+            self._finish_scan(generation)
             return False
         capture_rect = selector.selected_rect
         placement = PlacementContext(QRect(client_rect), capture_rect.center())
         selector.hide()
         QGuiApplication.processEvents()
+        if self.state is HeistCurioState.CLOSED:
+            return False
         image = self._grab(capture_rect)
         if image.isNull():
-            self._finish_error("ゲーム画面をキャプチャできませんでした。")
+            self._finish_error("ゲーム画面をキャプチャできませんでした。", generation)
             return False
         try:
             payload = prepare_curio_ocr_image(image)
         except Exception as exc:  # noqa: BLE001 - image conversion errors are user-facing
-            self._finish_error(str(exc))
+            self._finish_error(str(exc), generation)
             return False
+        with self._lock:
+            if generation != self._generation:
+                return False
+            self._sm.transition(HeistCurioState.PROCESSING)
         self.status.emit("ハイスト報酬を読み取っています…")
         threading.Thread(
             target=self._process,
@@ -940,6 +992,8 @@ class HeistCurioController(QObject):
         capture_rect: QRect,
         generation: int,
     ) -> None:
+        if not self._is_processing(generation):
+            return
         try:
             self._ocr.start()
             raw_text = self._ocr.recognize([payload])[0]
@@ -957,7 +1011,7 @@ class HeistCurioController(QObject):
                     )
                 )
             )
-            if generation == self._generation and (
+            if self._is_processing(generation) and (
                 match is None or trinket_needs_confirmation
             ) and getattr(self._ndl_ocr, "is_available", False):
                 cold_start = getattr(self._ndl_ocr, "is_ready", False) is not True
@@ -988,32 +1042,35 @@ class HeistCurioController(QObject):
                         secondary_trinket_mods,
                     ),
                 )
-            if generation == self._generation:
+            if self._is_processing(generation):
                 self.resolved.emit(match, placement)
         except Exception as exc:  # noqa: BLE001 - worker boundary reports to UI
-            if generation == self._generation:
+            if self._is_processing(generation):
                 self.failed.emit(str(exc))
         finally:
-            if generation == self._generation:
-                self._running = False
-                if self._scan_coordinator is not None:
-                    self._scan_coordinator.finish("heist_curio")
+            self._finish_scan(generation)
 
-    def _finish_error(self, message: str) -> None:
-        self._running = False
-        if self._scan_coordinator is not None:
-            self._scan_coordinator.finish("heist_curio")
-        self.failed.emit(message)
+    def _is_processing(self, generation: int) -> bool:
+        with self._lock:
+            return generation == self._generation and self._sm.is_in(HeistCurioState.PROCESSING)
 
-    def _finish_cancelled(self) -> None:
-        self._running = False
-        if self._scan_coordinator is not None:
-            self._scan_coordinator.finish("heist_curio")
+    def _finish_scan(self, generation: int) -> bool:
+        with self._lock:
+            if generation != self._generation or not self._sm.can_transition(HeistCurioState.IDLE):
+                return False
+            self._sm.transition(HeistCurioState.IDLE)
+            if self._scan_coordinator is not None:
+                self._scan_coordinator.finish("heist_curio")
+            return True
+
+    def _finish_error(self, message: str, generation: int) -> None:
+        if self._finish_scan(generation):
+            self.failed.emit(message)
 
     def _show_high_accuracy_status(
         self, cold_start: bool, client_rect: QRect, capture_rect: QRect
     ) -> None:
-        if self._closed:
+        if self.state is HeistCurioState.CLOSED:
             return
         if self._high_accuracy_overlay is None:
             from src.poetore.poe2.desecration_overlay import (

@@ -16,10 +16,13 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
+from enum import StrEnum
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage
+
+from src.utils.state_machine import StateMachine
 
 OCR_ENGINES = ("tesseract", "windows")
 OCR_MAX_IMAGE_DIMENSION = 2400
@@ -803,6 +806,27 @@ def _windows_ocr_command(helper: Path) -> list[str]:
     return [dotnet, str(helper)]
 
 
+class WindowsOcrServerState(StrEnum):
+    STOPPED = "stopped"
+    STARTING = "starting"
+    READY = "ready"
+    RETIRED = "retired"
+
+
+WINDOWS_OCR_SERVER_TRANSITIONS = {
+    WindowsOcrServerState.STOPPED: frozenset({
+        WindowsOcrServerState.STARTING, WindowsOcrServerState.RETIRED,
+    }),
+    WindowsOcrServerState.STARTING: frozenset({
+        WindowsOcrServerState.READY, WindowsOcrServerState.STOPPED, WindowsOcrServerState.RETIRED,
+    }),
+    WindowsOcrServerState.READY: frozenset({
+        WindowsOcrServerState.STOPPED, WindowsOcrServerState.RETIRED,
+    }),
+    WindowsOcrServerState.RETIRED: frozenset(),
+}
+
+
 class WindowsOcrServer:
     """Long-lived Windows OCR helper using an in-memory request protocol."""
 
@@ -818,12 +842,19 @@ class WindowsOcrServer:
         self.request_timeout = request_timeout
         self._state_lock = threading.Lock()
         self._operation_lock = threading.Lock()
-        self._retired = threading.Event()
+        self._sm = StateMachine(
+            "Windows OCR server", WindowsOcrServerState.STOPPED, WINDOWS_OCR_SERVER_TRANSITIONS,
+        )
         self._close_generation = 0
         self._process = None
         self._responses: queue.Queue[str | None] = queue.Queue()
         self._stderr: list[str] = []
         self._next_id = 0
+
+    @property
+    def state(self) -> WindowsOcrServerState:
+        with self._state_lock:
+            return self._sm.state
 
     def start(self) -> None:
         with self._operation_lock:
@@ -861,8 +892,9 @@ class WindowsOcrServer:
 
     def close(self, *, permanent: bool = False) -> None:
         with self._state_lock:
-            if permanent:
-                self._retired.set()
+            if not self._sm.is_in(WindowsOcrServerState.RETIRED):
+                target = WindowsOcrServerState.RETIRED if permanent else WindowsOcrServerState.STOPPED
+                self._sm.transition(target, allow_same=True)
             self._close_generation += 1
             process = self._process
             self._process = None
@@ -876,7 +908,7 @@ class WindowsOcrServer:
 
     def _check_open(self, generation: int) -> None:
         """Check cancellation while holding the state lock."""
-        if self._retired.is_set():
+        if self._sm.is_in(WindowsOcrServerState.RETIRED):
             raise RuntimeError("Windows OCRは終了済みです。")
         if generation != self._close_generation:
             raise RuntimeError("Windows OCRは中断されました。")
@@ -887,10 +919,15 @@ class WindowsOcrServer:
             if sys.platform != "win32":
                 raise RuntimeError("Windows標準OCRはWindows上でのみ実行できます。")
             process = self._process
+            # The operation lock serializes startup and keeps callers from
+            # reusing the process before the handshake completes.
             if process is not None and process.poll() is None:
                 return
         if process is not None:
             self._stop_process()
+        with self._state_lock:
+            self._check_open(generation)
+            self._sm.transition(WindowsOcrServerState.STARTING)
         command = _windows_ocr_command(_windows_ocr_helper())
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         with self._state_lock:
@@ -919,8 +956,13 @@ class WindowsOcrServer:
             ready = json.loads(ready_line)
         except json.JSONDecodeError as exc:
             raise RuntimeError("Windows OCRヘルパーの起動応答が不正です。") from exc
-        if not isinstance(ready, dict) or ready.get("ready") is not True:
+        if not isinstance(ready, dict):
+            raise RuntimeError("Windows OCRヘルパーの起動応答が不正です。")
+        if ready.get("ready") is not True:
             raise RuntimeError(str(ready.get("error") or "Windows OCRヘルパーを起動できません。"))
+        with self._state_lock:
+            self._check_open(generation)
+            self._sm.transition(WindowsOcrServerState.READY)
 
     def _recognize_once(self, images: Sequence[bytes], generation: int) -> list[str]:
         self._ensure_started(generation)
@@ -1002,6 +1044,8 @@ class WindowsOcrServer:
         with self._state_lock:
             process = self._process
             self._process = None
+            if not self._sm.is_in(WindowsOcrServerState.RETIRED):
+                self._sm.transition(WindowsOcrServerState.STOPPED, allow_same=True)
         if process is not None:
             self._terminate_process(process)
             self._finish_process(process)

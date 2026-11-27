@@ -3,8 +3,23 @@
 from __future__ import annotations
 
 import threading
+from enum import StrEnum
 
 from src.poetore.expedition_ocr_probe import WindowsOcrServer
+from src.utils.state_machine import StateMachine
+
+
+class ScreenReadingState(StrEnum):
+    IDLE = "idle"
+    BUSY = "busy"
+    CLOSED = "closed"
+
+
+SCREEN_READING_TRANSITIONS = {
+    ScreenReadingState.IDLE: frozenset({ScreenReadingState.BUSY, ScreenReadingState.CLOSED}),
+    ScreenReadingState.BUSY: frozenset({ScreenReadingState.IDLE, ScreenReadingState.CLOSED}),
+    ScreenReadingState.CLOSED: frozenset(),
+}
 
 
 class ScreenReadingCoordinator:
@@ -14,7 +29,14 @@ class ScreenReadingCoordinator:
         self.ocr = ocr_server or WindowsOcrServer()
         self._lock = threading.Lock()
         self._owner: str | None = None
-        self._closed = False
+        self._sm = StateMachine(
+            "screen reading", ScreenReadingState.IDLE, SCREEN_READING_TRANSITIONS,
+        )
+
+    @property
+    def state(self) -> ScreenReadingState:
+        with self._lock:
+            return self._sm.state
 
     @property
     def owner(self) -> str | None:
@@ -23,15 +45,17 @@ class ScreenReadingCoordinator:
 
     def try_begin(self, owner: str) -> bool:
         with self._lock:
-            if self._closed or self._owner is not None:
+            if not self._sm.is_in(ScreenReadingState.IDLE):
                 return False
             self._owner = owner
+            self._sm.transition(ScreenReadingState.BUSY)
             return True
 
     def finish(self, owner: str) -> None:
         with self._lock:
-            if self._owner == owner:
+            if self._sm.is_in(ScreenReadingState.BUSY) and self._owner == owner:
                 self._owner = None
+                self._sm.transition(ScreenReadingState.IDLE)
 
     def start(self) -> None:
         self.ocr.start()
@@ -41,8 +65,8 @@ class ScreenReadingCoordinator:
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
+            if self._sm.is_in(ScreenReadingState.CLOSED):
                 return
-            self._closed = True
+            self._sm.transition(ScreenReadingState.CLOSED)
             self._owner = None
         self.ocr.close(permanent=True)

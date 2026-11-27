@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from array import array
+from enum import StrEnum
 from importlib import import_module
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from src.poetore.hideout_notification import (
     DEFAULT_BUNDLED_SOUND_ID,
 )
 from src.utils.config_manager import ConfigManager
+from src.utils.state_machine import StateMachine
 
 CUSTOM_AUDIO_STEM = "poetore-hideout-notification"
 SUPPORTED_AUDIO_SUFFIXES = {".wav", ".mp3"}
@@ -130,6 +132,21 @@ def scale_signed16(samples, volume: int) -> array:
     return scaled
 
 
+class AudioPlaybackState(StrEnum):
+    IDLE = "idle"
+    PLAYING = "playing"
+    STOPPING = "stopping"
+
+
+AUDIO_PLAYBACK_TRANSITIONS = {
+    AudioPlaybackState.IDLE: frozenset({AudioPlaybackState.PLAYING}),
+    AudioPlaybackState.PLAYING: frozenset({
+        AudioPlaybackState.IDLE, AudioPlaybackState.STOPPING,
+    }),
+    AudioPlaybackState.STOPPING: frozenset({AudioPlaybackState.IDLE}),
+}
+
+
 class NotificationAudioPlayer(QObject):
     fallback_used = Signal(str)
     failed = Signal(str)
@@ -138,30 +155,58 @@ class NotificationAudioPlayer(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._lock = threading.Lock()
-        self._playing = False
+        self._sm = StateMachine(
+            "notification audio", AudioPlaybackState.IDLE, AUDIO_PLAYBACK_TRANSITIONS,
+        )
         self._stop_event = threading.Event()
+
+    @property
+    def state(self) -> AudioPlaybackState:
+        with self._lock:
+            return self._sm.state
 
     @property
     def is_playing(self) -> bool:
         with self._lock:
-            return self._playing
+            return self._sm.is_in(AudioPlaybackState.PLAYING, AudioPlaybackState.STOPPING)
+
+    @property
+    def _playing(self) -> bool:
+        return self.is_playing
+
+    @_playing.setter
+    def _playing(self, playing: bool) -> None:
+        # Keep direct worker test setup compatible without storing a second state.
+        with self._lock:
+            if playing and self._sm.state is AudioPlaybackState.IDLE:
+                self._sm.transition(AudioPlaybackState.PLAYING)
+            elif not playing:
+                self._sm.transition(AudioPlaybackState.IDLE, allow_same=True)
 
     def play(self, primary: Path, fallback: Path, volume: int) -> bool:
         with self._lock:
-            if self._playing:
+            if self._sm.state is not AudioPlaybackState.IDLE:
                 return False
-            self._playing = True
-        self._stop_event.clear()
-        threading.Thread(
-            target=self._play_worker,
-            args=(Path(primary), Path(fallback), int(volume)),
-            daemon=True,
-            name="PoEToreNotificationAudio",
-        ).start()
+            self._stop_event.clear()
+            self._sm.transition(AudioPlaybackState.PLAYING)
+        try:
+            threading.Thread(
+                target=self._play_worker,
+                args=(Path(primary), Path(fallback), int(volume)),
+                daemon=True,
+                name="PoEToreNotificationAudio",
+            ).start()
+        except Exception:
+            with self._lock:
+                self._sm.transition(AudioPlaybackState.IDLE)
+            raise
         return True
 
     def stop(self) -> None:
-        self._stop_event.set()
+        with self._lock:
+            self._stop_event.set()
+            if self._sm.state is AudioPlaybackState.PLAYING:
+                self._sm.transition(AudioPlaybackState.STOPPING)
 
     def _play_worker(self, primary: Path, fallback: Path, volume: int) -> None:
         try:
@@ -178,7 +223,7 @@ class NotificationAudioPlayer(QObject):
             self.failed.emit(f"通知音を再生できませんでした: {error}")
         finally:
             with self._lock:
-                self._playing = False
+                self._sm.transition(AudioPlaybackState.IDLE, allow_same=True)
             self.finished.emit()
 
     def _play_file(self, path: Path, volume: int) -> None:

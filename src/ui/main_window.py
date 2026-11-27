@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from copy import deepcopy
+from enum import StrEnum
 
 from pynput import keyboard as pynput_keyboard
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -29,6 +30,7 @@ from src.ui.detached_panel import DetachedPanelWindow
 from src.ui.settings_dialog import AreaNoteDialog, SettingsDialog
 from src.ui.map_viewer import MapThumbnailWidget
 from src.utils.config_manager import ConfigManager
+from src.utils.state_machine import StateMachine
 from src.utils.lap_recorder import LapRecorder
 from src.utils.segment_recorder import SegmentRecorder
 from src.utils.log_watcher import LogWatcher
@@ -124,6 +126,21 @@ DEFAULT_CLICK_THROUGH_HOTKEY = "F6"
 DEFAULT_GEM_SHOP_SEARCH_HOTKEY = "F2"
 
 
+class RunTimerState(StrEnum):
+    IDLE = "idle"
+    READY = "ready"
+    RUNNING = "running"
+    PAUSED = "paused"
+
+
+RUN_TIMER_TRANSITIONS = {
+    RunTimerState.IDLE: frozenset({RunTimerState.READY, RunTimerState.RUNNING, RunTimerState.PAUSED}),
+    RunTimerState.READY: frozenset({RunTimerState.IDLE, RunTimerState.RUNNING}),
+    RunTimerState.RUNNING: frozenset({RunTimerState.PAUSED, RunTimerState.IDLE}),
+    RunTimerState.PAUSED: frozenset({RunTimerState.IDLE, RunTimerState.READY, RunTimerState.RUNNING}),
+}
+
+
 def _listener_hotkey_name(key_text: str) -> str:
     """設定画面の表記をpynputのキー名表記へ揃える。"""
     return listener_hotkey_name(key_text)
@@ -149,6 +166,7 @@ class _MainWindowWorkerSignals(QObject):
 
 
 class MainWindow(QMainWindow):
+    _timer_sm: StateMachine[RunTimerState] | None = None
     # Qt may call an overridden showEvent from QMainWindow.__init__ before
     # this class' __init__ body can initialize instance attributes.
     _initial_positioned = False
@@ -630,8 +648,6 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.update_display)
         self.start_time = 0.0
         self.accumulated_time = 0.0
-        self.is_running = False
-        self.timer_ready = False
         self._normal_log_poll_interval_ms = 500
         
         # ラップタイム用
@@ -2723,12 +2739,54 @@ class MainWindow(QMainWindow):
         self._apply_guide_background(self.config.get("window_opacity", 100))
         self.guide_toggle_btn.setText("▼ ガイド" if self.guide_expanded else "▶ ガイド")
     
+    def _ensure_timer_sm(self) -> StateMachine[RunTimerState]:
+        if self._timer_sm is None:
+            self._timer_sm = StateMachine("run timer", RunTimerState.IDLE, RUN_TIMER_TRANSITIONS)
+        return self._timer_sm
+
+    @property
+    def timer_state(self) -> RunTimerState:
+        return self._ensure_timer_sm().state
+
+    def _transition_timer(self, target: RunTimerState):
+        was_ready = self.timer_ready
+        self._ensure_timer_sm().transition(target, allow_same=True)
+        if was_ready != self.timer_ready:
+            watcher = getattr(self, "log_watcher", None)
+            if watcher is not None:
+                interval = 100 if self.timer_ready else self._normal_log_poll_interval_ms
+                watcher.set_poll_interval(interval)
+
+    @property
+    def is_running(self) -> bool:
+        return self.timer_state is RunTimerState.RUNNING
+
+    @is_running.setter
+    def is_running(self, running: bool):
+        if running:
+            self._transition_timer(RunTimerState.RUNNING)
+        elif self.is_running:
+            self._transition_timer(self._stopped_timer_state())
+
+    @property
+    def timer_ready(self) -> bool:
+        return self.timer_state is RunTimerState.READY
+
+    @timer_ready.setter
+    def timer_ready(self, ready: bool):
+        if ready and not self.is_running and not self._has_timer_record():
+            self._transition_timer(RunTimerState.READY)
+        elif not ready and self.timer_ready:
+            self._transition_timer(RunTimerState.IDLE)
+
+    def _stopped_timer_state(self) -> RunTimerState:
+        return RunTimerState.PAUSED if self._has_timer_record() else RunTimerState.IDLE
+
     def start_timer(self):
-        self._set_timer_ready(False)
         if not self.is_running:
             self.start_time = time.time()
             self.timer.start(10)
-            self.is_running = True
+            self._transition_timer(RunTimerState.RUNNING)
             if self.current_zone:
                 self.segment_recorder.record_entry(
                     self._get_zone_id(self.current_zone) or self.current_zone,
@@ -2742,7 +2800,7 @@ class MainWindow(QMainWindow):
         if self.is_running:
             self.timer.stop()
             self.accumulated_time += time.time() - self.start_time
-            self.is_running = False
+            self._transition_timer(self._stopped_timer_state())
             self._save_timer_state()
         self._refresh_ready_button()
             
@@ -2768,6 +2826,7 @@ class MainWindow(QMainWindow):
         
         self._set_timer_ready(False)
         self.stop_timer()
+        self._transition_timer(RunTimerState.IDLE)
         self.accumulated_time = 0.0
         self.update_text(0.0)
         self.reset_laps()
@@ -2777,8 +2836,8 @@ class MainWindow(QMainWindow):
     def _has_timer_record(self):
         """自動開始を禁止すべき既存タイマー記録があるか。"""
         return (
-            self.accumulated_time > 0
-            or any(t is not None for t in self.lap_times)
+            getattr(self, "accumulated_time", 0.0) > 0
+            or any(t is not None for t in getattr(self, "lap_times", ()))
             or bool(getattr(self, "lap_record_order", []))
             or bool(getattr(getattr(self, "segment_recorder", None), "segments", []))
         )
@@ -2823,14 +2882,10 @@ class MainWindow(QMainWindow):
         self.ready_btn.setToolTip(tooltip)
 
     def _set_timer_ready(self, ready: bool):
-        ready = bool(ready)
-        if ready and not self._can_set_timer_ready():
-            ready = False
-        self.timer_ready = ready
-        watcher = getattr(self, "log_watcher", None)
-        if watcher is not None:
-            interval = 100 if ready else self._normal_log_poll_interval_ms
-            watcher.set_poll_interval(interval)
+        if ready and self._can_set_timer_ready():
+            self._transition_timer(RunTimerState.READY)
+        elif self.timer_ready:
+            self._transition_timer(RunTimerState.IDLE)
         self._refresh_ready_button()
 
     def toggle_timer_ready(self):
@@ -2851,7 +2906,6 @@ class MainWindow(QMainWindow):
         if (
             self._restoring
             or self.poe_version != POE1
-            or self.is_running
             or self._has_timer_record()
         ):
             self._set_timer_ready(False)
@@ -2958,6 +3012,8 @@ class MainWindow(QMainWindow):
     
     def _restore_timer_state(self):
         """起動時に現在のPoEバージョンの保存済みタイマー状態を復元"""
+        if not self.is_running:
+            self._transition_timer(RunTimerState.IDLE)
         saved = self._load_timer_state_payload() or self._migrate_legacy_timer_state_from_config()
         if not saved:
             return
@@ -2969,6 +3025,8 @@ class MainWindow(QMainWindow):
         self.lap_record_order = [lap for lap in saved.get("lap_record_order", []) if 1 <= lap <= len(self.lap_labels)]
         self.current_act = saved.get("current_act", 1)
         self.segment_recorder = SegmentRecorder(saved.get("segments", []))
+        if not self.is_running:
+            self._transition_timer(self._stopped_timer_state())
         if self.accumulated_time > 0:
             self.update_text(self.accumulated_time)
             self.update_lap_display()

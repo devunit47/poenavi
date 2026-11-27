@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 import logging
 import os
@@ -26,12 +27,44 @@ from src.update.release_client import (
     fetch_latest_release,
     is_auto_update_supported,
 )
+from src.utils.state_machine import StateMachine
 from src.version import APP_VERSION
 
 
 # Allow for an in-flight socket wait and delivery of the result to the UI.
 CHECK_TIMEOUT_MS = (RELEASE_CHECK_TIMEOUT_SECONDS + SOCKET_TIMEOUT_SECONDS + 5) * 1000
 logger = logging.getLogger(__name__)
+
+
+class UpdateCheckState(StrEnum):
+    IDLE = "idle"
+    CHECKING = "checking"
+
+
+UPDATE_CHECK_TRANSITIONS = {
+    UpdateCheckState.IDLE: frozenset({UpdateCheckState.CHECKING}),
+    UpdateCheckState.CHECKING: frozenset({UpdateCheckState.IDLE}),
+}
+
+
+class UpdateDownloadState(StrEnum):
+    IDLE = "idle"
+    DOWNLOADING = "downloading"
+    CANCELLING = "cancelling"
+    READY = "ready"
+
+
+UPDATE_DOWNLOAD_TRANSITIONS = {
+    UpdateDownloadState.IDLE: frozenset({UpdateDownloadState.DOWNLOADING}),
+    UpdateDownloadState.DOWNLOADING: frozenset({
+        UpdateDownloadState.CANCELLING, UpdateDownloadState.IDLE,
+        UpdateDownloadState.READY,
+    }),
+    UpdateDownloadState.CANCELLING: frozenset({UpdateDownloadState.IDLE}),
+    UpdateDownloadState.READY: frozenset({
+        UpdateDownloadState.DOWNLOADING, UpdateDownloadState.IDLE,
+    }),
+}
 
 
 @dataclass(frozen=True)
@@ -60,13 +93,19 @@ class UpdateController(QObject):
         self._thread_factory = thread_factory or (
             lambda target: threading.Thread(target=target, daemon=True)
         )
+        self._check_sm = StateMachine(
+            "update check", UpdateCheckState.IDLE, UPDATE_CHECK_TRANSITIONS,
+        )
         self._active_check: tuple[object, bool] | None = None
         self._check_timer = QTimer(self)
         self._check_timer.setSingleShot(True)
         self._check_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._check_timer.timeout.connect(self._expire_check)
         self._check_result.connect(self._finish_check)
-        self._downloading = False
+        # The Qt thread owns lifecycle state. Workers observe cancellation via the event.
+        self._download_sm = StateMachine(
+            "update download", UpdateDownloadState.IDLE, UPDATE_DOWNLOAD_TRANSITIONS,
+        )
         self._download_result.connect(self._finish_download)
         self._cancel = threading.Event()
         self._validation_lock = threading.Lock()
@@ -92,14 +131,29 @@ class UpdateController(QObject):
                     shutil.rmtree(path, ignore_errors=True)
 
     @property
+    def check_state(self) -> UpdateCheckState:
+        return self._check_sm.state
+
+    @property
     def checking(self) -> bool:
-        return self._active_check is not None
+        return self.check_state is UpdateCheckState.CHECKING
+
+    @property
+    def download_state(self) -> UpdateDownloadState:
+        return self._download_sm.state
+
+    @property
+    def _downloading(self) -> bool:
+        return self._download_sm.is_in(
+            UpdateDownloadState.DOWNLOADING, UpdateDownloadState.CANCELLING,
+        )
 
     def check(self, manual: bool) -> None:
         if self.checking:
             return
         check_id = object()
         self._active_check = check_id, manual
+        self._check_sm.transition(UpdateCheckState.CHECKING)
         self._check_timer.start(CHECK_TIMEOUT_MS)
         self.check_started.emit()
 
@@ -129,6 +183,7 @@ class UpdateController(QObject):
         _, manual = self._active_check
         self._check_timer.stop()
         self._active_check = None
+        self._check_sm.transition(UpdateCheckState.IDLE)
         if error is None:
             self.discard_download()
             self.check_finished.emit(release, manual)
@@ -143,8 +198,8 @@ class UpdateController(QObject):
             self.discard_download()
             cached = None
         self._ready_download = None
-        self._downloading = True
         self._cancel.clear()
+        self._download_sm.transition(UpdateDownloadState.DOWNLOADING)
 
         def work():
             try:
@@ -197,19 +252,25 @@ class UpdateController(QObject):
 
     @Slot(object, object)
     def _finish_download(self, ready, error):
-        self._downloading = False
+        if not self._downloading:
+            return
         if self._cancel.is_set() or isinstance(error, DownloadCancelled):
+            self._download_sm.transition(UpdateDownloadState.IDLE)
             self.discard_download()
             self.download_cancelled.emit()
         elif error is not None:
+            self._download_sm.transition(UpdateDownloadState.IDLE)
             self.discard_download()
             self.download_failed.emit(str(error))
         else:
             self._ready_download = ready
+            self._download_sm.transition(UpdateDownloadState.READY)
             self.download_ready.emit(ready.archive, ready.release)
 
     def cancel_download(self) -> None:
         self._cancel.set()
+        if self.download_state is UpdateDownloadState.DOWNLOADING:
+            self._download_sm.transition(UpdateDownloadState.CANCELLING)
 
     def discard_download(self) -> None:
         self._ready_download = None
@@ -217,12 +278,15 @@ class UpdateController(QObject):
             # The worker still owns the files until it reports completion.
             self.cancel_download()
             return
+        self._download_sm.transition(UpdateDownloadState.IDLE, allow_same=True)
         self._remove_work_dir()
 
     @Slot()
     def _discard_download_on_quit(self) -> None:
         self.cancel_download()
         self._ready_download = None
+        if self.download_state is UpdateDownloadState.READY:
+            self._download_sm.transition(UpdateDownloadState.IDLE)
         # On Windows an open ZIP can prevent deletion. Wait for local validation
         # to close it before Qt stops delivering queued worker results.
         with self._validation_lock:

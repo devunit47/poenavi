@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import threading
 import math
+import threading
+from enum import StrEnum
 
 from src.ui.dialog_theme import UI_METRICS, equalize_button_sizes
 
@@ -50,6 +51,7 @@ from src.poetore.poe2.desecration_tiers import (
 )
 from src.poetore.poe2.ndlocr_lite import NdlOcrLiteServer
 from src.poetore.window_position import path_of_exile_client_rect
+from src.utils.state_machine import StateMachine
 
 CATEGORY_LABELS = {
     "amulet": "アミュレット", "belt": "ベルト", "body_armour": "鎧",
@@ -526,10 +528,43 @@ class HighAccuracyOcrStatusOverlay(QWidget):
         super().hide()
 
 
+class DesecrationScanState(StrEnum):
+    IDLE = "idle"
+    SCANNING_OPEN = "scanning_open"
+    SCANNING_CLOSED = "scanning_closed"
+    AWAITING_CATEGORY = "awaiting_category"
+    DISPLAYING = "displaying"
+    CLOSED = "closed"
+
+
+_DESECRATION_SCAN_OUTCOMES = frozenset({
+    DesecrationScanState.IDLE, DesecrationScanState.AWAITING_CATEGORY,
+    DesecrationScanState.DISPLAYING, DesecrationScanState.CLOSED,
+})
+DESECRATION_SCAN_TRANSITIONS = {
+    DesecrationScanState.IDLE: frozenset({
+        DesecrationScanState.SCANNING_OPEN, DesecrationScanState.CLOSED,
+    }),
+    DesecrationScanState.SCANNING_OPEN: _DESECRATION_SCAN_OUTCOMES | {
+        DesecrationScanState.SCANNING_CLOSED,
+    },
+    DesecrationScanState.SCANNING_CLOSED: _DESECRATION_SCAN_OUTCOMES,
+    DesecrationScanState.AWAITING_CATEGORY: frozenset({
+        DesecrationScanState.SCANNING_OPEN, DesecrationScanState.DISPLAYING,
+        DesecrationScanState.IDLE, DesecrationScanState.CLOSED,
+    }),
+    DesecrationScanState.DISPLAYING: frozenset({
+        DesecrationScanState.SCANNING_OPEN, DesecrationScanState.IDLE, DesecrationScanState.CLOSED,
+    }),
+    DesecrationScanState.CLOSED: frozenset(),
+}
+
+
 class DesecrationTierController(QObject):
     status = Signal(str)
     failed = Signal(str)
     _ready = Signal(object, object, object, object, int)
+    _scan_failed = Signal(str, str, int)
     _retry_closed_requested = Signal(int)
     _ndl_status_begin = Signal(bool, int, int)
     _ndl_status_end = Signal(int, int)
@@ -557,7 +592,9 @@ class DesecrationTierController(QObject):
         self._ndl_status_overlay = HighAccuracyOcrStatusOverlay()
         self._category_overlay.selected.connect(self._category_selected)
         self._category_overlay.cancelled.connect(self._category_cancelled)
-        self._running = False
+        self._sm = StateMachine(
+            "desecration scan", DesecrationScanState.IDLE, DESECRATION_SCAN_TRANSITIONS,
+        )
         self._scan_generation = 0
         self._pending = None
         self._ndl_request_number = 0
@@ -578,15 +615,34 @@ class DesecrationTierController(QObject):
         self._capture_rect = None
         self._bands = ()
         self._ready.connect(self._show_result)
+        self._scan_failed.connect(self._worker_failed)
         self._retry_closed_requested.connect(self._scan_closed)
         self._ndl_status_begin.connect(self._begin_ndl_status)
         self._ndl_status_end.connect(self._end_ndl_status)
 
     @property
-    def running(self):
-        return self._running
+    def state(self) -> DesecrationScanState:
+        return self._sm.state
+
+    @property
+    def running(self) -> bool:
+        return self._sm.is_in(DesecrationScanState.SCANNING_OPEN, DesecrationScanState.SCANNING_CLOSED)
+
+    @property
+    def _running(self) -> bool:
+        return self.running
+
+    @_running.setter
+    def _running(self, running: bool) -> None:
+        # Legacy callers can seed a scan without capturing a frame.
+        if running and not self.running:
+            self._sm.transition(DesecrationScanState.SCANNING_OPEN)
+        elif not running and self.running:
+            self._sm.transition(DesecrationScanState.IDLE)
 
     def warm_up(self):
+        if self.state is DesecrationScanState.CLOSED:
+            return
         threading.Thread(target=self._safe_start, daemon=True).start()
 
     def _safe_start(self):
@@ -598,7 +654,10 @@ class DesecrationTierController(QObject):
     def request_scan(self):
         trace = self._create_trace()
         self._mark_trace(trace, "scan_requested", schema_version=1)
-        if self._running:
+        if self.state is DesecrationScanState.CLOSED:
+            self._mark_trace(trace, "scan_completed", outcome="controller_closed")
+            return False
+        if self.running:
             self._mark_trace(trace, "scan_completed", outcome="rejected_running")
             return False
         if self._scan_coordinator is not None and not self._scan_coordinator.try_begin("desecration"):
@@ -633,7 +692,7 @@ class DesecrationTierController(QObject):
         touch_ndl = getattr(self._ndl_ocr, "touch_if_running", None)
         if callable(touch_ndl) and touch_ndl():
             self._mark_trace(trace, "ndl_resident_timeout_refreshed")
-        self._running = True
+        self._sm.transition(DesecrationScanState.SCANNING_OPEN)
         self._scan_generation += 1
         generation = self._scan_generation
         self.hide()
@@ -663,8 +722,13 @@ class DesecrationTierController(QObject):
         return True
 
     def _scan_closed(self, generation):
-        if generation != self._scan_generation or self._client_rect is None:
+        if (
+            generation != self._scan_generation
+            or self.state is not DesecrationScanState.SCANNING_OPEN
+            or self._client_rect is None
+        ):
             return False
+        self._sm.transition(DesecrationScanState.SCANNING_CLOSED)
         regions = self._regions_getter() or {}
         closed_rect = normalized_capture_rect(
             self._client_rect, regions.get("inventory_closed_region")
@@ -831,19 +895,19 @@ class DesecrationTierController(QObject):
                 resolution, self._client_rect, capture_rect, prepared.bands, generation,
             )
         except Exception as exc:  # noqa: BLE001 - worker boundary reports to UI
-            if generation == self._scan_generation:
-                self._finish_error(
-                    str(exc), failure_stage="worker",
-                    error_type=type(exc).__name__,
-                )
+            self._scan_failed.emit(str(exc), type(exc).__name__, generation)
+
+    def _worker_failed(self, message, error_type, generation):
+        if generation == self._scan_generation and self.running:
+            self._finish_error(message, failure_stage="worker", error_type=error_type)
 
     def _show_result(self, resolution, client_rect, capture_rect, bands, generation):
-        if generation != self._scan_generation:
+        if generation != self._scan_generation or not self.running:
             return
         self._mark_trace(self._active_trace, "result_received")
-        self._running = False
-        self._release_scan()
         if not resolution.categories:
+            self._sm.transition(DesecrationScanState.DISPLAYING)
+            self._release_scan()
             count = len(bands)
             statuses = resolution.fallback_statuses or ("read_failed",) * count
             self._display(
@@ -855,6 +919,8 @@ class DesecrationTierController(QObject):
             )
             return
         if resolution.needs_category_choice:
+            self._sm.transition(DesecrationScanState.AWAITING_CATEGORY)
+            self._release_scan()
             self._pending = (resolution, client_rect, capture_rect, bands)
             anchor = QPoint(capture_rect.left(), capture_rect.bottom() + 8)
             self._category_overlay.show_categories(resolution.categories, anchor)
@@ -868,6 +934,8 @@ class DesecrationTierController(QObject):
         if tiers is None:
             self._finish_error("Tierを一意に特定できませんでした。")
             return
+        self._sm.transition(DesecrationScanState.DISPLAYING)
+        self._release_scan()
         self._display(
             client_rect, capture_rect, bands, tiers,
             statuses=resolution.statuses or (), range_labels=resolution.ranges or (),
@@ -905,6 +973,8 @@ class DesecrationTierController(QObject):
         self, client_rect, capture_rect, bands, tiers, *, statuses=(), range_labels=(),
         affix_options=(),
     ):
+        if self.state is DesecrationScanState.AWAITING_CATEGORY:
+            self._sm.transition(DesecrationScanState.DISPLAYING)
         config = self._regions_getter() or {}
         self._overlay.show_tiers(
             client_rect, capture_rect, (capture_rect.width(), capture_rect.height()), bands, tiers,
@@ -942,7 +1012,8 @@ class DesecrationTierController(QObject):
             self.status.emit("冒涜Modの3択画面を閉じたため表示を消しました。")
 
     def _finish_error(self, message, *, failure_stage="unknown", error_type=None):
-        self._running = False
+        if self.running:
+            self._sm.transition(DesecrationScanState.IDLE)
         self._release_scan()
         trace = self._active_trace
         details = {"outcome": "failed", "failure_stage": failure_stage}
@@ -977,7 +1048,7 @@ class DesecrationTierController(QObject):
         )
 
     def _begin_ndl_status(self, cold_start, generation, request_number):
-        if generation != self._scan_generation or not self._running:
+        if generation != self._scan_generation or not self.running:
             return
         self._pending_ndl_status = (generation, request_number)
         self._ndl_status_delay.stop()
@@ -987,7 +1058,7 @@ class DesecrationTierController(QObject):
             self._ndl_status_delay.start()
 
     def _show_delayed_ndl_status(self):
-        if self._pending_ndl_status is None or not self._running:
+        if self._pending_ndl_status is None or not self.running:
             return
         generation, _request_number = self._pending_ndl_status
         if generation != self._scan_generation:
@@ -1022,6 +1093,8 @@ class DesecrationTierController(QObject):
             self._scan_coordinator.finish("desecration")
 
     def hide(self):
+        if self._sm.is_in(DesecrationScanState.AWAITING_CATEGORY, DesecrationScanState.DISPLAYING):
+            self._sm.transition(DesecrationScanState.IDLE)
         self._overlay.hide()
         self._category_overlay.hide()
         self._ndl_status_overlay.hide()
@@ -1032,12 +1105,14 @@ class DesecrationTierController(QObject):
         self._pending = None
 
     def close(self):
+        if self.state is DesecrationScanState.CLOSED:
+            return
+        self._sm.transition(DesecrationScanState.CLOSED)
         trace = self._active_trace
         if trace is not None:
             self._mark_trace(trace, "scan_completed", outcome="controller_closed")
             self._active_trace = None
         self._scan_generation += 1
-        self._running = False
         self.hide()
         self._release_scan()
         if self._owns_ocr:

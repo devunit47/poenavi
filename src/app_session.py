@@ -1,6 +1,7 @@
 """アプリの起動と、同一プロセスでのモード・PoE版切替を管理する。"""
 
 import logging
+from enum import StrEnum
 
 from PySide6.QtCore import QObject, Qt, Slot
 from PySide6.QtWidgets import QMessageBox
@@ -10,9 +11,25 @@ from src.app_restart import (
     save_app_target,
     switch_app_target_and_restart,
 )
+from src.utils.state_machine import StateMachine
 
 
 logger = logging.getLogger(__name__)
+
+
+class AppSessionState(StrEnum):
+    IDLE = "idle"
+    RUNNING = "running"
+    SWITCHING = "switching"
+    STOPPED = "stopped"
+
+
+APP_SESSION_TRANSITIONS = {
+    AppSessionState.IDLE: frozenset({AppSessionState.RUNNING, AppSessionState.STOPPED}),
+    AppSessionState.RUNNING: frozenset({AppSessionState.SWITCHING, AppSessionState.STOPPED}),
+    AppSessionState.SWITCHING: frozenset({AppSessionState.RUNNING, AppSessionState.STOPPED}),
+    AppSessionState.STOPPED: frozenset(),
+}
 
 
 class AppSessionController(QObject):
@@ -22,12 +39,21 @@ class AppSessionController(QObject):
         self.single_instance = single_instance
         self.window = None
         self.target = None
-        self._switching = False
+        self._sm = StateMachine("app session", AppSessionState.IDLE, APP_SESSION_TRANSITIONS)
         app.aboutToQuit.connect(self._close_window)
+
+    @property
+    def state(self) -> AppSessionState:
+        return self._sm.state
+
+    @property
+    def _switching(self) -> bool:
+        return self.state is AppSessionState.SWITCHING
 
     def start(self, mode, poe_version):
         from src.app_composition import create_mode_window
 
+        self._sm.require(AppSessionState.IDLE, AppSessionState.SWITCHING, action="start")
         self.app.setProperty("appMode", mode)
         window = create_mode_window(mode, poe_version)
         try:
@@ -40,6 +66,8 @@ class AppSessionController(QObject):
             raise
         self.window = window
         self.target = (mode, poe_version)
+        if self.state is AppSessionState.IDLE:
+            self._sm.transition(AppSessionState.RUNNING)
         return window
 
     @Slot(str, str)
@@ -51,13 +79,13 @@ class AppSessionController(QObject):
     def switch_target(self, mode, poe_version):
         target = (mode, poe_version)
         if (
-            self._switching or self.window is None or target == self.target
+            self.state is not AppSessionState.RUNNING or target == self.target
             or not is_valid_app_target(*target)
         ):
             return False
 
         old_window, old_target = self.window, self.target
-        self._switching = True
+        self._sm.transition(AppSessionState.SWITCHING)
         quit_on_close = self.app.quitOnLastWindowClosed()
         self.app.setQuitOnLastWindowClosed(False)
         try:
@@ -99,9 +127,15 @@ class AppSessionController(QObject):
                     old_window.deleteLater()
         finally:
             self.app.setQuitOnLastWindowClosed(quit_on_close)
-            self._switching = False
+            if self._switching:
+                self._sm.transition(
+                    AppSessionState.RUNNING if self.window is not None
+                    else AppSessionState.STOPPED
+                )
 
     def _restore_target(self, old_window, old_target):
+        if not self._switching:
+            return
         try:
             try:
                 old_window.config.update(save_app_target(*old_target))
@@ -128,5 +162,8 @@ class AppSessionController(QObject):
 
     @Slot()
     def _close_window(self):
+        if self.state is AppSessionState.STOPPED:
+            return
+        self._sm.transition(AppSessionState.STOPPED)
         if self.window is not None:
             self.window.close()

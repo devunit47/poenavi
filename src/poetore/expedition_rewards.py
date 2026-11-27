@@ -9,6 +9,7 @@ import sys
 import threading
 from collections import Counter
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from src.poetore.expedition_ocr_probe import (
 from src.poetore.official_exchange import resolve_reference_prices
 from src.poetore.window_position import path_of_exile_client_rect
 from src.utils.poe_version_data import POE2
+from src.utils.state_machine import StateMachine
 
 EXPEDITION_PRICE_FONT_SIZE = 14
 EXPEDITION_PRICE_BACKGROUND = QColor(0, 0, 0, 190)
@@ -584,11 +586,37 @@ class ExpeditionPriceOverlay(QWidget):
             painter.fillPath(text_path, reward_price_text_color(row))
 
 
+class ExpeditionScanState(StrEnum):
+    IDLE = "idle"
+    CAPTURING = "capturing"
+    PROCESSING = "processing"
+    DISPLAYING = "displaying"
+    CLOSED = "closed"
+
+
+EXPEDITION_SCAN_TRANSITIONS = {
+    ExpeditionScanState.IDLE: frozenset({
+        ExpeditionScanState.CAPTURING, ExpeditionScanState.CLOSED,
+    }),
+    ExpeditionScanState.CAPTURING: frozenset({
+        ExpeditionScanState.PROCESSING, ExpeditionScanState.IDLE, ExpeditionScanState.CLOSED,
+    }),
+    ExpeditionScanState.PROCESSING: frozenset({
+        ExpeditionScanState.DISPLAYING, ExpeditionScanState.IDLE, ExpeditionScanState.CLOSED,
+    }),
+    ExpeditionScanState.DISPLAYING: frozenset({
+        ExpeditionScanState.CAPTURING, ExpeditionScanState.IDLE, ExpeditionScanState.CLOSED,
+    }),
+    ExpeditionScanState.CLOSED: frozenset(),
+}
+
+
 class ExpeditionRewardController(QObject):
     status = Signal(str)
     failed = Signal(str)
     diagnostic = Signal(str)
     _ready = Signal(object, object, object, object, object, int)
+    _scan_failed = Signal(str, int)
 
     def __init__(
         self, league_getter, parent=None, *, region_getter=None, diagnostics_enabled=None,
@@ -607,9 +635,8 @@ class ExpeditionRewardController(QObject):
         self._captures: list[QImage] = []
         self._client_rect: QRect | None = None
         self._capture_rect: QRect | None = None
-        self._running = False
+        self._sm = StateMachine("expedition scan", ExpeditionScanState.IDLE, EXPEDITION_SCAN_TRANSITIONS)
         self._scan_generation = 0
-        self._active_generation = 0
         self._helper_warm_started = False
         self._monitor_misses = 0
         self._bands: list[RowBand] = []
@@ -624,28 +651,37 @@ class ExpeditionRewardController(QObject):
         self._monitor.setInterval(650)
         self._monitor.timeout.connect(self._check_panel)
         self._ready.connect(self._show_result)
+        self._scan_failed.connect(self._worker_failed)
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.close)
 
     @property
+    def state(self) -> ExpeditionScanState:
+        return self._sm.state
+
+    @property
     def running(self) -> bool:
-        return self._running
+        return self._sm.is_in(ExpeditionScanState.CAPTURING, ExpeditionScanState.PROCESSING)
 
     def hide(self) -> None:
+        if self.state is ExpeditionScanState.DISPLAYING:
+            self._sm.transition(ExpeditionScanState.IDLE)
         self._overlay.hide()
         self._monitor.stop()
 
     def close(self) -> None:
+        if self.state is ExpeditionScanState.CLOSED:
+            return
+        self._sm.transition(ExpeditionScanState.CLOSED)
         self._scan_generation += 1
-        self._running = False
         self.hide()
         self._release_scan()
         if self._owns_ocr:
             self._ocr.close(permanent=True)
 
     def warm_up(self) -> None:
-        if not self._helper_warm_started:
+        if self.state is not ExpeditionScanState.CLOSED and not self._helper_warm_started:
             self._helper_warm_started = True
             threading.Thread(target=self._warm_ocr, daemon=True).start()
 
@@ -657,7 +693,7 @@ class ExpeditionRewardController(QObject):
             self._helper_warm_started = False
 
     def request_scan(self) -> bool:
-        if self._running:
+        if self.running or self.state is ExpeditionScanState.CLOSED:
             return False
         if (
             self._scan_coordinator is not None
@@ -677,9 +713,8 @@ class ExpeditionRewardController(QObject):
         self._trace(
             f"✅ 1. ゲーム画面検出: {client_rect.width()}x{client_rect.height()}"
         )
-        self._running = True
+        self._sm.transition(ExpeditionScanState.CAPTURING)
         self._scan_generation += 1
-        self._active_generation = self._scan_generation
         self.hide()
         self._client_rect = QRect(client_rect)
         self._capture_rect = expedition_capture_rect(client_rect, self._region_getter())
@@ -706,7 +741,7 @@ class ExpeditionRewardController(QObject):
         ).toImage()
 
     def _capture_frame(self) -> None:
-        if not self._running:
+        if self.state is not ExpeditionScanState.CAPTURING:
             return
         image = self._grab_game()
         if image.isNull():
@@ -721,9 +756,10 @@ class ExpeditionRewardController(QObject):
         images = list(self._captures)
         client_rect = QRect(self._client_rect)
         capture_rect = QRect(self._capture_rect)
+        self._sm.transition(ExpeditionScanState.PROCESSING)
         threading.Thread(
             target=self._process,
-            args=(images, client_rect, capture_rect, self._active_generation),
+            args=(images, client_rect, capture_rect, self._scan_generation),
             daemon=True,
         ).start()
 
@@ -854,14 +890,15 @@ class ExpeditionRewardController(QObject):
                 (panel_right, first.panel_width, list(first.bands)), len(stable), generation,
             )
         except Exception as exc:  # noqa: BLE001 - worker boundary reports to UI
-            if generation == self._scan_generation:
-                self._finish_error(str(exc))
+            self._scan_failed.emit(str(exc), generation)
+
+    def _worker_failed(self, message: str, generation: int) -> None:
+        if generation == self._scan_generation and self.state is ExpeditionScanState.PROCESSING:
+            self._finish_error(message)
 
     def _show_result(self, client_rect, rows, source_size, panel_data, stable_count, generation):
-        if generation != self._scan_generation:
+        if generation != self._scan_generation or self.state is not ExpeditionScanState.PROCESSING:
             return
-        self._running = False
-        self._release_scan()
         self._panel_width, self._capture_panel_width, self._bands = panel_data
         self._client_rect = QRect(client_rect)
         try:
@@ -872,6 +909,8 @@ class ExpeditionRewardController(QObject):
             self._trace(f"❌ 8. オーバーレイ表示: {exc}")
             self._finish_error(f"価格表示に失敗しました: {exc}")
             return
+        self._sm.transition(ExpeditionScanState.DISPLAYING)
+        self._release_scan()
         self._monitor_misses = 0
         self._monitor.start()
         self.status.emit(f"{len(rows)}/{stable_count}件の報酬情報を表示しました。")
@@ -879,7 +918,8 @@ class ExpeditionRewardController(QObject):
         self._emit_diagnostic()
 
     def _finish_error(self, message: str) -> None:
-        self._running = False
+        if self.running:
+            self._sm.transition(ExpeditionScanState.IDLE)
         self._release_scan()
         self.failed.emit(message)
         if not self._diagnostic_steps or not self._diagnostic_steps[-1].startswith("❌"):
